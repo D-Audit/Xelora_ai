@@ -1,0 +1,82 @@
+@import "tailwindcss";
+
+@theme {
+  --color-xelora-black: #001E2B;
+  --color-xelora-deep-green: #023430;
+  --color-xelora-green: #00684A;
+  --color-xelora-bright-green: #00ED64;
+  --color-xelora-bg-main: #F7F9F8;
+  --color-xelora-surface: #FFFFFF;
+  --color-xelora-surface-2: #F1F5F3;
+  --color-xelora-nav: #001E2B;
+  --color-xelora-text: #001E2B;
+  --color-xelora-text-secondary: #5C6C75;
+  --color-xelora-text-muted: #889397;
+  --color-xelora-text-inverse: #FFFFFF;
+  --color-xelora-border: #DDE5E2;
+  --color-xelora-border-strong: #B8C4C0;
+  --color-xelora-border-focus: #00684A;
+  --color-xelora-success: #00684A;
+  --color-xelora-success-bg: #E3FCF0;
+  --color-xelora-info: #016BF8;
+  --color-xelora-info-bg: #E8F3FF;
+  --color-xelora-warning: #B45F06;
+  --color-xelora-warning-bg: #FFF4D6;
+  --color-xelora-error: #B42318;
+  --color-xelora-error-bg: #FEECEB;
+
+  --font-sans: "Inter", "Geist", ui-sans-serif, system-ui, sans-serif;
+}
+
+:root {
+  --background: #F7F9F8;
+  --foreground: #001E2B;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  font-family: "Inter", "Geist", ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background-color: #F7F9F8;
+  color: #001E2B;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* Focus styles */
+:focus-visible {
+  outline: 2px solid #00684A;
+  outline-offset: 2px;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #B8C4C0;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #5C6C75;
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
