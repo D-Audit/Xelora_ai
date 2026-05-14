@@ -1,0 +1,52 @@
+fastapi
+uvicorn
+anthropic
+google-generativeai
+xlwings
+openpyxl
+python-dotenv
+pydantic
+sqlalchemy
+psycopg2-binary
+alembic
+requests
+
+# Visual/UI fallback layer (Windows required for real desktop control)
+pyautogui
+pywinauto
+pillow
+
+# Unstructured Data Intelligence (document ingestion)
+pdfplumber
+pytesseract
+python-docx
+
+# Retrieval-Augmented Generation (local TF-IDF knowledge base)
+scikit-learn
+
+# OS-Level Event Listener (Windows required for window-focus tracking)
+watchdog
+pywin32
+
+# MCP Support - pinned to the last pre-rewrite (2.0.0) release; mcp 2.0.0
+# restructured the Server API and is NOT compatible with mcp_server/server.py
+# as written. If you want to move to 2.0.0 later, mcp_server/server.py's
+# decorator-based Server usage will need to be rewritten against the new API.
+mcp==1.29.0
+
+# Database/ERP connector - install the driver for whichever database you're
+# actually connecting to, in addition to sqlalchemy above, e.g.:
+# pymysql            (MySQL)
+# pyodbc              (SQL Server / many ODBC-based ERP exports)
+# Auth: Google OAuth credential verification (backend/auth.py)
+google-auth
+
+# Auth/Files - REQUIRED, not optional. Confirmed by actually importing
+# server.py: it crashes on startup without these two, because
+# pydantic.EmailStr (used throughout auth.py) needs email-validator, and
+# FastAPI's UploadFile (used in files.py) needs python-multipart. Neither
+# was previously listed here even though both are hard requirements.
+email-validator
+python-multipart
+passlib[bcrypt]
+python-jose[cryptography]
