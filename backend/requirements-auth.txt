@@ -1,0 +1,18 @@
+# Additive to requirements.txt - install both:
+#   pip install -r requirements.txt -r requirements-auth.txt
+#
+# Only used by auth.py, billing.py, plan_guard.py, server.py.
+# Nothing in the original requirements.txt is changed or removed.
+#
+# bcrypt is pinned to 4.0.1 deliberately: passlib 1.7.4 (the last
+# release) is incompatible with bcrypt>=4.1 and raises
+# "password cannot be longer than 72 bytes" on every hash attempt,
+# even for short passwords, due to a passlib bug in its own internal
+# version-detection routine. Pinning bcrypt avoids it.
+
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+python-jose[cryptography]==3.3.0
+email-validator==2.1.1
+stripe==9.5.0
+python-multipart==0.0.9
