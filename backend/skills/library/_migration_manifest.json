@@ -1,0 +1,166 @@
+{
+  "read_range": {
+    "category": "read",
+    "source": "skills/excel_read.py"
+  },
+  "inspect_workbook": {
+    "category": "read",
+    "source": "skills/excel_read.py"
+  },
+  "write_cell": {
+    "category": "write",
+    "source": "skills/excel_write.py"
+  },
+  "insert_formula": {
+    "category": "write",
+    "source": "skills/excel_write.py"
+  },
+  "write_table": {
+    "category": "write",
+    "source": "skills/excel_write.py"
+  },
+  "remove_duplicates": {
+    "category": "data",
+    "source": "skills/excel_data.py"
+  },
+  "sort_range": {
+    "category": "data",
+    "source": "skills/excel_data.py"
+  },
+  "filter_data": {
+    "category": "data",
+    "source": "skills/excel_data.py"
+  },
+  "find_replace": {
+    "category": "data",
+    "source": "skills/excel_data.py"
+  },
+  "split_column": {
+    "category": "data",
+    "source": "skills/excel_data.py"
+  },
+  "merge_columns": {
+    "category": "data",
+    "source": "skills/excel_data.py"
+  },
+  "apply_formatting": {
+    "category": "format",
+    "source": "skills/excel_format.py"
+  },
+  "conditional_formatting": {
+    "category": "format",
+    "source": "skills/excel_format.py"
+  },
+  "freeze_panes": {
+    "category": "format",
+    "source": "skills/excel_format.py"
+  },
+  "auto_fit_columns": {
+    "category": "format",
+    "source": "skills/excel_format.py"
+  },
+  "create_sheet": {
+    "category": "structure",
+    "source": "skills/excel_structure.py"
+  },
+  "rename_sheet": {
+    "category": "structure",
+    "source": "skills/excel_structure.py"
+  },
+  "delete_sheet": {
+    "category": "structure",
+    "source": "skills/excel_structure.py"
+  },
+  "combine_sheets": {
+    "category": "structure",
+    "source": "skills/excel_structure.py"
+  },
+  "insert_row": {
+    "category": "structure",
+    "source": "skills/excel_structure.py"
+  },
+  "insert_column": {
+    "category": "structure",
+    "source": "skills/excel_structure.py"
+  },
+  "create_named_range": {
+    "category": "structure",
+    "source": "skills/excel_structure.py"
+  },
+  "create_chart": {
+    "category": "analysis",
+    "source": "skills/excel_analysis.py"
+  },
+  "create_pivot_table": {
+    "category": "analysis",
+    "source": "skills/excel_analysis.py"
+  },
+  "data_validation": {
+    "category": "advanced",
+    "source": "skills/excel_advanced.py"
+  },
+  "protect_sheet": {
+    "category": "advanced",
+    "source": "skills/excel_advanced.py"
+  },
+  "export_to_pdf": {
+    "category": "advanced",
+    "source": "skills/excel_advanced.py"
+  },
+  "fetch_live_data": {
+    "category": "advanced",
+    "source": "skills/excel_advanced.py"
+  },
+  "color_scale_formatting": {
+    "category": "format",
+    "source": "skills/excel_extended.py"
+  },
+  "data_bar_formatting": {
+    "category": "format",
+    "source": "skills/excel_extended.py"
+  },
+  "icon_set_formatting": {
+    "category": "format",
+    "source": "skills/excel_extended.py"
+  },
+  "add_slicer": {
+    "category": "analysis",
+    "source": "skills/excel_extended.py"
+  },
+  "run_macro": {
+    "category": "advanced",
+    "source": "skills/excel_extended.py"
+  },
+  "create_power_query_connection": {
+    "category": "advanced",
+    "source": "skills/excel_extended.py"
+  },
+  "import_from_database": {
+    "category": "advanced",
+    "source": "skills/excel_database.py"
+  },
+  "import_unstructured_document": {
+    "category": "advanced",
+    "source": "skills/excel_ingest.py"
+  },
+  "check_vba_access": {
+    "category": "vba",
+    "source": "skills/excel_vba.py"
+  },
+  "create_vba_macro": {
+    "category": "vba",
+    "source": "skills/excel_vba.py"
+  },
+  "save_as_macro_enabled": {
+    "category": "vba",
+    "source": "skills/excel_vba.py"
+  },
+  "add_macro_button": {
+    "category": "vba",
+    "source": "skills/excel_vba.py"
+  },
+  "search_knowledge_base": {
+    "category": "knowledge",
+    "source": "skills/knowledge_skills.py"
+  }
+}
