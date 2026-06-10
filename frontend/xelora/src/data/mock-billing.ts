@@ -1,0 +1,63 @@
+import type { Invoice, Subscription } from '@/types';
+
+export const mockSubscription: Subscription = {
+  id: 'sub-1',
+  userId: 'user-1',
+  planTier: 'professional',
+  billingCycle: 'monthly',
+  status: 'active',
+  currentPeriodStart: '2026-07-15T00:00:00Z',
+  currentPeriodEnd: '2026-08-15T00:00:00Z',
+  cancelAtPeriodEnd: false,
+};
+
+export const mockInvoices: Invoice[] = [
+  {
+    id: 'inv-1',
+    userId: 'user-1',
+    amount: 35,
+    currency: 'USD',
+    status: 'paid',
+    description: 'Xelora Professional — Monthly (July 2026)',
+    issuedAt: '2026-07-15T00:00:00Z',
+    paidAt: '2026-07-15T00:01:00Z',
+    periodStart: '2026-07-15T00:00:00Z',
+    periodEnd: '2026-08-15T00:00:00Z',
+  },
+  {
+    id: 'inv-2',
+    userId: 'user-1',
+    amount: 35,
+    currency: 'USD',
+    status: 'paid',
+    description: 'Xelora Professional — Monthly (June 2026)',
+    issuedAt: '2026-06-15T00:00:00Z',
+    paidAt: '2026-06-15T00:01:00Z',
+    periodStart: '2026-06-15T00:00:00Z',
+    periodEnd: '2026-07-15T00:00:00Z',
+  },
+  {
+    id: 'inv-3',
+    userId: 'user-1',
+    amount: 35,
+    currency: 'USD',
+    status: 'paid',
+    description: 'Xelora Professional — Monthly (May 2026)',
+    issuedAt: '2026-05-15T00:00:00Z',
+    paidAt: '2026-05-15T00:01:00Z',
+    periodStart: '2026-05-15T00:00:00Z',
+    periodEnd: '2026-06-15T00:00:00Z',
+  },
+  {
+    id: 'inv-4',
+    userId: 'user-1',
+    amount: 12,
+    currency: 'USD',
+    status: 'paid',
+    description: 'Xelora Starter — Monthly (October 2024)',
+    issuedAt: '2024-10-15T00:00:00Z',
+    paidAt: '2024-10-15T00:01:00Z',
+    periodStart: '2024-10-15T00:00:00Z',
+    periodEnd: '2024-11-15T00:00:00Z',
+  },
+];
