@@ -1,0 +1,32 @@
+{
+  "name": "xelora-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Xelora desktop application",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "package": "electron-builder --dir",
+    "dist": "electron-builder --win nsis",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "icons": "node scripts/generate-icons.mjs",
+    "postinstall": "npm run icons"
+  },
+  "dependencies": {
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.1.4",
+    "electron": "43.2.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "jsdom": "^29.1.1",
+    "node-addon-api": "^8.0.0",
+    "png-to-ico": "^3.0.2",
+    "sharp": "^0.35.3",
+    "vite": "^7.3.6",
+    "vitest": "^4.1.10"
+  }
+}
