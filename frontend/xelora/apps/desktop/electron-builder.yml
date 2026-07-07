@@ -1,0 +1,29 @@
+appId: app.xelora.desktop
+productName: Xelora
+directories:
+  output: "C:/XeloraDesktopReleaseFresh"
+  buildResources: build
+files:
+  - out/**
+  - package.json
+  - build/**
+extraResources:
+  - from: build
+    to: build
+protocols:
+  name: Xelora
+  schemes:
+    - xelora
+win:
+  target:
+    - nsis
+nsis:
+  artifactName: Xelora-Setup.${ext}
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Xelora
+  runAfterFinish: true
+  allowElevation: true
+  perMachine: false
