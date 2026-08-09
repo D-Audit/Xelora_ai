@@ -26,7 +26,7 @@ ENABLE_VISUAL_FALLBACK = os.getenv("ENABLE_VISUAL_FALLBACK", "false").lower() ==
 GEMINI_MODEL_CHAIN = [
     m.strip() for m in os.getenv(
         "GEMINI_MODEL_CHAIN",
-        "gemini-2.5-flash-lite,gemini-3.1-flash-lite,gemini-3.5-flash,gemini-3.1-flash-lite"
+        "gemini-2.5-flash-lite,gemini-3.5-flash,gemini-3.5-flash,gemini-3.1-flash-lite"
     ).split(",") if m.strip()
 ]
 # --- Security ---

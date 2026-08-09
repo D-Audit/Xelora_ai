@@ -10,6 +10,7 @@ can't bypass it with devtools.
 Used by the middleware registered in server.py, which intercepts
 POST /task before it reaches main.py's handler.
 """
+import os
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
@@ -48,7 +49,21 @@ def check_and_increment_task_usage(db: Session, user_id: int) -> None:
     """Call before starting an agent task. Raises PlanLimitExceeded if
     the account has no active/trialing subscription, or if it's used
     up its workflow-run quota for the current billing period.
-    Otherwise increments the counter and returns normally."""
+    Otherwise increments the counter and returns normally.
+
+    LOCAL TESTING BYPASS: set SKIP_BILLING_CHECKS=true in backend/.env
+    to skip all of this entirely - no subscription lookup, no usage
+    increment, task always allowed through. This exists specifically
+    because a fresh test account (e.g. one created via Google login)
+    has no Subscription row at all yet, so the very first check below
+    would otherwise always block it with a 403.
+
+    NEVER set this to true anywhere outside your own local .env - it
+    completely disables real billing enforcement.
+    """
+    if os.getenv("SKIP_BILLING_CHECKS", "false").lower() == "true":
+        return
+
     sub = db.query(Subscription).filter(Subscription.user_id == user_id).first()
     if not sub:
         raise PlanLimitExceeded("No subscription found for this account.", status_code=403)
@@ -78,5 +93,5 @@ def check_and_increment_task_usage(db: Session, user_id: int) -> None:
         )
 
     usage.workflow_runs_used += 1
-    usage.ai_actions_used += 1  # a task counts as at least one AI action; agent.core logs finer-grained usage separately if you want it later
+    usage.ai_actions_used += 1
     db.commit()
