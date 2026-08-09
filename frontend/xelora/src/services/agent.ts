@@ -11,16 +11,38 @@ export interface TaskStartResponse {
 }
 
 export interface TaskProgressResponse {
+  task_id?: number;
   current_task: string;
   completed_action_count: number;
   completed_actions: { tool_name: string; execution_layer?: string }[];
   decision_explanations: string[];
   is_done: boolean;
+  is_paused?: boolean;
+  progress_log?: string[];
+  final_response?: string | null;
 }
 
 export interface TaskRevealResponse {
   task_id: number;
-  workflow: unknown;
+  workflow: {
+    step: number;
+    native_feature: string;
+    tool_name: string;
+    execution_layer?: string;
+    succeeded: boolean;
+  }[];
+  final_response?: string | null;
+  is_done?: boolean;
+  is_paused?: boolean;
+}
+
+export interface TaskStatusResponse {
+  task_id: number;
+  is_done: boolean;
+  is_paused: boolean;
+  status: 'running' | 'paused' | 'done';
+  progress_log: string[];
+  final_response?: string | null;
 }
 
 async function parseOrThrow<T>(res: Response): Promise<T> {
@@ -48,6 +70,11 @@ export async function getTaskProgress(taskId: number): Promise<TaskProgressRespo
 export async function getTaskReveal(taskId: number): Promise<TaskRevealResponse> {
   const res = await fetch(`/api/task/${taskId}/reveal`, { cache: 'no-store' });
   return parseOrThrow<TaskRevealResponse>(res);
+}
+
+export async function getTaskStatus(taskId: number): Promise<TaskStatusResponse> {
+  const res = await fetch(`/api/task/${taskId}/status`, { cache: 'no-store' });
+  return parseOrThrow<TaskStatusResponse>(res);
 }
 
 export async function pauseTask(taskId: number) {

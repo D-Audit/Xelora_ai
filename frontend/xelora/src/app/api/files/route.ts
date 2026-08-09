@@ -1,9 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { backendFetch } from '@/lib/backend';
+import { backendFetch, backendHeaders, backendUrl } from '@/lib/backend';
 import { getSessionToken } from '@/lib/session';
-
-const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
-const BACKEND_API_KEY = process.env.BACKEND_API_KEY || '';
 
 export async function GET() {
   const token = await getSessionToken();
@@ -31,12 +28,9 @@ export async function POST(req: NextRequest) {
   const outgoingForm = new FormData();
   outgoingForm.append('upload', file);
 
-  const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
-  if (BACKEND_API_KEY) headers['X-API-Key'] = BACKEND_API_KEY;
-
   let res: Response;
   try {
-    res = await fetch(`${BACKEND_URL}/files`, { method: 'POST', headers, body: outgoingForm });
+    res = await fetch(backendUrl('/files'), { method: 'POST', headers: backendHeaders(token), body: outgoingForm });
   } catch {
     return NextResponse.json({ error: 'Could not reach the backend.' }, { status: 502 });
   }

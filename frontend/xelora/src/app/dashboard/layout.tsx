@@ -1,6 +1,7 @@
 'use client';
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import { useAuthStore } from '@/stores/auth-store';
 import { useUIStore } from '@/stores/ui-store';
 import { Sidebar } from '@/components/dashboard/sidebar';
@@ -11,6 +12,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const { isAuthenticated, isLoading, initialize } = useAuthStore();
   const { sidebarOpen, sidebarCollapsed, setSidebarOpen } = useUIStore();
   const router = useRouter();
+  const pathname = usePathname();
+  const isChatWorkspace = pathname === '/dashboard/agent';
 
   useEffect(() => {
     initialize();
@@ -55,9 +58,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
       {/* Main area */}
       <div className="flex flex-1 flex-col overflow-hidden">
-        <Topbar />
+        {!isChatWorkspace && <Topbar />}
         <main
-          className={cn('flex-1 overflow-y-auto p-4 sm:p-6', 'bg-xelora-bg-main')}
+          className={cn('flex-1 overflow-y-auto', isChatWorkspace ? 'bg-[#fcfcfb]' : 'bg-xelora-bg-main p-4 sm:p-6')}
           id="main-content"
         >
           {children}

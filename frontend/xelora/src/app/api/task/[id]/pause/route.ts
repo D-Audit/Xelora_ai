@@ -9,7 +9,11 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const { id } = await params;
   const result = await backendFetch(`/task/${id}/pause`, { method: 'POST', token });
   if (!result.ok) {
-    return NextResponse.json({ error: 'Could not pause the task.' }, { status: result.status || 500 });
+    const detail =
+      (result.data as { error?: string })?.error ||
+      (result.data as { detail?: string })?.detail ||
+      'Could not pause the task.';
+    return NextResponse.json({ error: detail }, { status: result.status || 500 });
   }
   return NextResponse.json(result.data);
 }

@@ -1,13 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
 import { backendFetch } from '@/lib/backend';
-import { setOAuthState } from '@/lib/session';
+import { applyOAuthStateCookie } from '@/lib/session';
 
 export async function GET(req: NextRequest) {
   const origin = req.nextUrl.origin;
   const redirectUri = `${origin}/api/auth/google/callback`;
   const state = randomUUID();
-  await setOAuthState(state);
 
   const result = await backendFetch<{ url: string }>(
     `/auth/google/login?redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}`
@@ -18,5 +17,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(`${origin}/login?error=${encodeURIComponent(message)}`);
   }
 
-  return NextResponse.redirect((result.data as { url: string }).url);
+  const response = NextResponse.redirect((result.data as { url: string }).url);
+  return applyOAuthStateCookie(response, state);
 }

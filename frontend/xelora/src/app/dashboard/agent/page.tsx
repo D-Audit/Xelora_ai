@@ -26,7 +26,7 @@ const QUICK_ACTIONS = [
 
 type ChatMessage =
   | { id: string; role: 'user'; text: string; attachment?: string }
-  | { id: string; role: 'agent'; taskId: number; steps: string[]; currentTask?: string; status: 'running' | 'paused' | 'done' | 'error'; error?: string };
+  | { id: string; role: 'agent'; taskId: number; steps: string[]; currentTask?: string; response?: string; status: 'running' | 'paused' | 'done' | 'error'; error?: string };
 
 export default function AgentPage() {
   // Client-only check - starts null (renders nothing) to avoid a
@@ -68,11 +68,11 @@ export default function AgentPage() {
         updateAgentMessage(messageId, {
           steps: stepNames,
           currentTask: data.is_done ? undefined : data.current_task,
+          response: data.final_response ?? undefined,
         });
         if (data.is_done) {
           if (pollRef.current) clearInterval(pollRef.current);
-          updateAgentMessage(messageId, { status: 'done' });
-          getTaskReveal(taskId).catch(() => null);
+          updateAgentMessage(messageId, { status: 'done', response: data.final_response ?? undefined });
         }
       } catch {
         if (pollRef.current) clearInterval(pollRef.current);
@@ -213,9 +213,9 @@ export default function AgentPage() {
   );
 
   const inputBar = (
-    <div className="mx-auto w-full max-w-2xl">
+    <div className="mx-auto w-full max-w-3xl">
       {attachmentChip}
-      <div className="flex items-end gap-2 rounded-2xl border border-xelora-border bg-white p-2 shadow-sm focus-within:border-xelora-green">
+      <div className="flex items-end gap-2 rounded-2xl border border-xelora-border bg-white p-2 shadow-sm transition-shadow focus-within:border-xelora-green focus-within:shadow-md">
         <input ref={fileInputRef} type="file" className="hidden" accept=".xlsx,.xls,.csv,.ods,.tsv" onChange={handleFileSelected} />
         <Button
           size="icon"
@@ -232,7 +232,7 @@ export default function AgentPage() {
           value={input}
           onChange={(e) => { setInput(e.target.value); autoGrow(e.target); }}
           onKeyDown={handleKeyDown}
-          placeholder="How can I help with your workbook?"
+          placeholder="Message Xelora…"
           rows={1}
           className="max-h-[200px] min-h-[28px] flex-1 resize-none bg-transparent px-1 py-1.5 text-sm text-xelora-text outline-none placeholder:text-xelora-text-muted"
         />
@@ -246,7 +246,7 @@ export default function AgentPage() {
         </Button>
       </div>
       <p className="mt-2 text-center text-xs text-xelora-text-muted">
-        Each message counts as one workflow run against your plan.
+        Excel is only changed when you explicitly ask for a workbook action.
       </p>
     </div>
   );
@@ -255,11 +255,11 @@ export default function AgentPage() {
     // Empty state: centered greeting + input, quick actions below -
     // shown once, before the first message.
     return (
-      <div className="flex h-[calc(100vh-3.5rem)] flex-col items-center justify-center gap-6 px-4">
+      <div className="flex h-screen flex-col items-center justify-center gap-6 px-4">
         <div className="flex flex-col items-center gap-3 text-center">
           <Sparkles className="h-8 w-8 text-xelora-green" />
-          <h1 className="text-2xl font-semibold text-xelora-text">
-            What would you like to do{user?.name ? `, ${user.name.split(' ')[0]}` : ''}?
+          <h1 className="text-3xl font-semibold tracking-tight text-xelora-text">
+            What can I help you do{user?.name ? `, ${user.name.split(' ')[0]}` : ''}?
           </h1>
         </div>
         {inputBar}
@@ -279,9 +279,13 @@ export default function AgentPage() {
   }
 
   return (
-    <div className="-m-4 flex h-[calc(100vh-3.5rem)] flex-col sm:-m-6">
-      <div className="flex-1 overflow-y-auto px-4 py-6">
-        <div className="mx-auto flex max-w-2xl flex-col gap-6">
+    <div className="flex h-screen flex-col">
+      <header className="flex h-14 flex-shrink-0 items-center border-b border-xelora-border px-5">
+        <div className="flex items-center gap-2 text-sm font-medium text-xelora-text"><Sparkles className="h-4 w-4 text-xelora-green" /> Xelora</div>
+        <span className="ml-2 text-sm text-xelora-text-muted">New task</span>
+      </header>
+      <div className="flex-1 overflow-y-auto px-4 py-8">
+        <div className="mx-auto flex max-w-3xl flex-col gap-7">
           {messages.map((msg) =>
             msg.role === 'user' ? (
               <div key={msg.id} className="flex justify-end gap-3">
@@ -337,7 +341,10 @@ export default function AgentPage() {
                         </p>
                       )}
                       {msg.status === 'done' && (
-                        <p className="mt-2 text-xs font-medium text-xelora-success">Done.</p>
+                        <>
+                          {msg.response && <p className="mt-3 whitespace-pre-wrap text-xelora-text">{msg.response}</p>}
+                          <p className="mt-2 text-xs font-medium text-xelora-success">Done.</p>
+                        </>
                       )}
                       {msg.status === 'paused' && (
                         <p className="mt-2 text-xs font-medium text-xelora-warning">Paused.</p>
@@ -358,7 +365,7 @@ export default function AgentPage() {
         </div>
       </div>
 
-      <div className="border-t border-xelora-border bg-white p-4">
+      <div className="border-t border-xelora-border bg-[#fcfcfb] p-4">
         {inputBar}
       </div>
     </div>

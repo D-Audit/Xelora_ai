@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { backendFetch } from '@/lib/backend';
-import { setSessionCookie, consumeOAuthState } from '@/lib/session';
+import { applySessionCookie, clearOAuthStateCookie, consumeOAuthState } from '@/lib/session';
 
 interface ExchangeResponse {
   token: string;
@@ -37,7 +37,8 @@ export async function GET(req: NextRequest) {
     return NextResponse.redirect(`${origin}/login?error=${encodeURIComponent(message)}`);
   }
 
-  await setSessionCookie(result.data.token, result.data.expires_at);
   const destination = result.data.is_new_user ? '/onboarding' : '/dashboard';
-  return NextResponse.redirect(`${origin}${destination}`);
+  const response = NextResponse.redirect(`${origin}${destination}`);
+  clearOAuthStateCookie(response);
+  return applySessionCookie(response, result.data.token, result.data.expires_at);
 }

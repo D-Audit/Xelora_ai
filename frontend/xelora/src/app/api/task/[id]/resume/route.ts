@@ -14,7 +14,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     body: { correction: body.correction ?? null },
   });
   if (!result.ok) {
-    return NextResponse.json({ error: 'Could not resume the task.' }, { status: result.status || 500 });
+    const detail =
+      (result.data as { error?: string })?.error ||
+      (result.data as { detail?: string })?.detail ||
+      'Could not resume the task.';
+    return NextResponse.json({ error: detail }, { status: result.status || 500 });
   }
   return NextResponse.json(result.data);
 }

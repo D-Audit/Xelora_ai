@@ -11,13 +11,26 @@
  */
 import 'server-only';
 
-const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
+const BACKEND_URL = (process.env.BACKEND_URL || 'http://localhost:8000').replace(/\/+$/, '');
 const BACKEND_API_KEY = process.env.BACKEND_API_KEY || '';
 
 export interface BackendResult<T = unknown> {
   ok: boolean;
   status: number;
   data: T;
+}
+
+/** Build authenticated server-to-server headers for non-JSON requests. */
+export function backendHeaders(token?: string | null): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (BACKEND_API_KEY) headers['X-API-Key'] = BACKEND_API_KEY;
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+/** Resolve a backend path without exposing the backend URL to the browser. */
+export function backendUrl(path: string): string {
+  return `${BACKEND_URL}${path.startsWith('/') ? path : `/${path}`}`;
 }
 
 /**
@@ -36,13 +49,12 @@ export async function backendFetch<T = unknown>(
 ): Promise<BackendResult<T>> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    ...backendHeaders(options.token),
   };
-  if (BACKEND_API_KEY) headers['X-API-Key'] = BACKEND_API_KEY;
-  if (options.token) headers['Authorization'] = `Bearer ${options.token}`;
 
   let res: Response;
   try {
-    res = await fetch(`${BACKEND_URL}${path}`, {
+    res = await fetch(backendUrl(path), {
       method: options.method || 'GET',
       headers,
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,

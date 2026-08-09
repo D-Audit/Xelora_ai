@@ -8,19 +8,39 @@
  */
 import 'server-only';
 import { cookies } from 'next/headers';
+import type { NextResponse } from 'next/server';
 
 const COOKIE_NAME = 'xelora_session';
 const OAUTH_STATE_COOKIE = 'xelora_oauth_state';
 
-export async function setSessionCookie(token: string, expiresAt: string) {
-  const store = await cookies();
-  store.set(COOKIE_NAME, token, {
+function sessionCookieOptions(expiresAt: string) {
+  return {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
+    sameSite: 'lax' as const,
     path: '/',
     expires: new Date(expiresAt),
-  });
+  };
+}
+
+function oauthStateCookieOptions() {
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax' as const,
+    path: '/',
+    maxAge: 600,
+  };
+}
+
+export async function setSessionCookie(token: string, expiresAt: string) {
+  const store = await cookies();
+  store.set(COOKIE_NAME, token, sessionCookieOptions(expiresAt));
+}
+
+export function applySessionCookie(response: NextResponse, token: string, expiresAt: string) {
+  response.cookies.set(COOKIE_NAME, token, sessionCookieOptions(expiresAt));
+  return response;
 }
 
 export async function getSessionToken(): Promise<string | null> {
@@ -42,13 +62,17 @@ export async function clearSessionCookie() {
  */
 export async function setOAuthState(state: string) {
   const store = await cookies();
-  store.set(OAUTH_STATE_COOKIE, state, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
-    path: '/',
-    maxAge: 600, // 10 minutes - the whole provider round-trip should take seconds
-  });
+  store.set(OAUTH_STATE_COOKIE, state, oauthStateCookieOptions());
+}
+
+export function applyOAuthStateCookie(response: NextResponse, state: string) {
+  response.cookies.set(OAUTH_STATE_COOKIE, state, oauthStateCookieOptions());
+  return response;
+}
+
+export function clearOAuthStateCookie(response: NextResponse) {
+  response.cookies.delete(OAUTH_STATE_COOKIE);
+  return response;
 }
 
 /** Reads and deletes the OAuth state cookie in one step - it's only ever meant to be checked once. */
