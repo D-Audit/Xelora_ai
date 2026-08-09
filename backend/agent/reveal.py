@@ -69,7 +69,7 @@ def reveal_workflow(structured_steps: list) -> list:
     return revealed
 
 
-def progress_snapshot(structured_steps: list, is_done: bool) -> dict:
+def progress_snapshot(structured_steps: list, is_done: bool, final_response: str | None = None) -> dict:
     """A compact 'what is the AI doing right now' view - Current task /
     Completed actions / Decision explanations, per the Intelligent
     Progress Visualization capability."""
@@ -86,4 +86,5 @@ def progress_snapshot(structured_steps: list, is_done: bool) -> dict:
         ],
         "decision_explanations": reasoning,
         "is_done": is_done,
+        "final_response": final_response,
     }

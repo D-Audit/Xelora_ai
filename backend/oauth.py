@@ -120,7 +120,7 @@ def _issue_session(db: Session, user: User) -> dict:
 
 @router.get("/google/login")
 def google_login(redirect_uri: str, state: str = ""):
-    if not GOOGLE_CLIENT_ID:
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
         raise HTTPException(status_code=503, detail="Google sign-in is not configured on this server.")
     params = {
         "client_id": GOOGLE_CLIENT_ID,
@@ -178,7 +178,7 @@ def google_exchange(req: ExchangeRequest):
 
 @router.get("/microsoft/login")
 def microsoft_login(redirect_uri: str, state: str = ""):
-    if not MICROSOFT_CLIENT_ID:
+    if not MICROSOFT_CLIENT_ID or not MICROSOFT_CLIENT_SECRET:
         raise HTTPException(status_code=503, detail="Microsoft sign-in is not configured on this server.")
     params = {
         "client_id": MICROSOFT_CLIENT_ID,

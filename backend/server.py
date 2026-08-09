@@ -20,6 +20,7 @@ handler, so that's where the check lives instead - functionally
 equivalent, zero changes to main.py.
 """
 from fastapi.responses import JSONResponse
+from starlette.datastructures import MutableHeaders
 
 # Import main's app FIRST.
 from main import app  # noqa: E402
@@ -57,6 +58,11 @@ app.include_router(workflows_router)
 app.include_router(admin_router)
 
 
+def _set_header(request, name: str, value: str) -> None:
+    headers = MutableHeaders(scope=request.scope)
+    headers[name] = value
+
+
 @app.on_event("startup")
 def _seed_on_startup():
     if SessionLocal is None:
@@ -92,6 +98,8 @@ async def enforce_plan_limits(request, call_next):
             user_id = decode_token(auth_header.removeprefix("Bearer ").strip())
         except Exception:
             return JSONResponse(status_code=401, content={"error": "Invalid or expired session token."})
+
+        _set_header(request, "x-xelora-user-id", str(user_id))
 
         db = SessionLocal()
         try:

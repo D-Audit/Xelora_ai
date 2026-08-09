@@ -11,7 +11,7 @@ documented.
 Run with:  uvicorn main:app --reload
 """
 
-from fastapi import FastAPI, Request, Depends, HTTPException
+from fastapi import FastAPI, Request, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -100,16 +100,21 @@ class PreferenceRequest(BaseModel):
 
 
 @app.post("/task", dependencies=_AUTH)
-def start_task(req: InstructionRequest, db: Session = Depends(_get_db_optional)):
+def start_task(
+    req: InstructionRequest,
+    db: Session = Depends(_get_db_optional),
+    x_xelora_user_id: str = Header(default=""),
+):
     global _next_local_id
-    user_prefs = get_all_preferences(db, req.user_id) if (db and req.user_id) else {}
+    user_id = int(x_xelora_user_id) if x_xelora_user_id else req.user_id
+    user_prefs = get_all_preferences(db, user_id) if (db and user_id) else {}
 
-    task = AgentTask(req.instruction, user_id=req.user_id, workbook_name=req.workbook_name)
+    task = AgentTask(req.instruction, user_id=user_id, workbook_name=req.workbook_name)
 
     db_task_id = None
     if db is not None:
         from models import Task
-        db_task = Task(user_id=req.user_id, instruction=req.instruction)
+        db_task = Task(user_id=user_id, instruction=req.instruction)
         db.add(db_task)
         db.commit()
         db.refresh(db_task)
@@ -120,7 +125,7 @@ def start_task(req: InstructionRequest, db: Session = Depends(_get_db_optional))
         _next_local_id += 1
 
     ACTIVE_TASKS[task_id] = task
-    _start_task_in_background(task, task_id, req.user_id, user_prefs)
+    _start_task_in_background(task, task_id, user_id, user_prefs)
 
     return {"task_id": task_id, "status": "started",
             "message": f"Poll GET /task/{task_id}/progress or /task/{task_id}/reveal to watch it run."}
@@ -179,7 +184,14 @@ def get_status(task_id: int):
     task = ACTIVE_TASKS.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found.")
-    return {"task_id": task_id, "is_done": task.is_done, "is_paused": task.is_paused, "progress_log": task.progress_log}
+    return {
+        "task_id": task_id,
+        "is_done": task.is_done,
+        "is_paused": task.is_paused,
+        "status": "paused" if task.is_paused else ("done" if task.is_done else "running"),
+        "progress_log": task.progress_log,
+        "final_response": task.final_response,
+    }
 
 
 @app.get("/task/{task_id}/reveal", dependencies=_AUTH)
@@ -187,7 +199,13 @@ def get_reveal_workflow(task_id: int):
     task = ACTIVE_TASKS.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found.")
-    return {"task_id": task_id, "workflow": reveal_workflow(task.structured_steps)}
+    return {
+        "task_id": task_id,
+        "workflow": reveal_workflow(task.structured_steps),
+        "final_response": task.final_response,
+        "is_done": task.is_done,
+        "is_paused": task.is_paused,
+    }
 
 
 @app.get("/task/{task_id}/progress", dependencies=_AUTH)
@@ -195,7 +213,11 @@ def get_progress(task_id: int):
     task = ACTIVE_TASKS.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found.")
-    return progress_snapshot(task.structured_steps, task.is_done)
+    snapshot = progress_snapshot(task.structured_steps, task.is_done, task.final_response)
+    snapshot["task_id"] = task_id
+    snapshot["is_paused"] = task.is_paused
+    snapshot["progress_log"] = task.progress_log
+    return snapshot
 
 
 @app.post("/preferences", dependencies=_AUTH)

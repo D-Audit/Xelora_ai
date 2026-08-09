@@ -5,10 +5,11 @@ to Excel, the DB, or the AI - it's pure environment plumbing.
 """
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 
-load_dotenv()
+load_dotenv(Path(__file__).with_name(".env"))
 
 AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")

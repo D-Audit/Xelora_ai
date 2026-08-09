@@ -60,6 +60,39 @@ def _run_skill_with_timeout(tool_name: str, tool_input: dict, timeout: int = SKI
         ex.shutdown(wait=not timed_out, cancel_futures=True)
 
 
+_EXCEL_ACTION_TERMS = (
+    "add", "apply", "build", "calculate", "clean", "create", "delete", "edit", "filter",
+    "format", "insert", "make", "move", "organize", "remove", "rename", "replace", "sort",
+    "summarize", "update", "write", "formula", "pivot", "chart", "graph", "table", "column",
+    "row", "cell", "sheet", "worksheet", "workbook", "spreadsheet", "data", "duplicate",
+)
+
+
+def is_excel_action_request(instruction: str) -> bool:
+    """Only allow the execution loop for a clear workbook instruction.
+
+    The chat is also used for greetings, questions, and planning. Those messages
+    must never open, inspect, or modify Excel merely because an agent task was
+    created for them.
+    """
+    text = " ".join((instruction or "").lower().split())
+    if not text:
+        return False
+    if text.startswith(("how do ", "how can ", "what is ", "what are ", "can you explain", "tell me about")):
+        return False
+    return any(term in text for term in _EXCEL_ACTION_TERMS)
+
+
+def conversational_response(instruction: str) -> str:
+    text = " ".join((instruction or "").strip().split())
+    if text.lower() in {"hi", "hello", "hey", "hey there", "good morning", "good afternoon", "good evening"}:
+        return "Hi — I’m ready when you are. Tell me what you’d like to change, analyse, or create in your workbook."
+    return (
+        "I can help with that without changing your workbook. "
+        "When you want an Excel action, tell me the specific change you want made—for example, “remove duplicate rows” or “create a sales chart.”"
+    )
+
+
 class AgentTask:
     def __init__(self, instruction: str, user_id: int = None, workbook_name: str = None):
         self.instruction = instruction
@@ -68,6 +101,7 @@ class AgentTask:
         self.messages = [{"role": "user", "content": instruction}]
         self.is_paused = False
         self.is_done = False
+        self.final_response = None
         self.progress_log = []
         self.structured_steps = []
         self.retry_counts = {}
@@ -135,6 +169,13 @@ def _restore_calculation_mode_safety_net():
 
 
 def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences: dict = None):
+    if not is_excel_action_request(task.instruction):
+        task.final_response = conversational_response(task.instruction)
+        task.structured_steps.append({"type": "reasoning", "text": "No workbook action requested; replied without accessing Excel."})
+        task.log_step("No workbook action requested. Replied without accessing Excel.")
+        task.is_done = True
+        return task
+
     system_prompt = build_system_prompt(user_preferences)
     steps_taken = 0
 
@@ -161,6 +202,9 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 task.structured_steps.append({"type": "reasoning", "text": text})
 
         if not tool_calls:
+            final_text = "\n\n".join(text.strip() for text in text_blocks if text and text.strip())
+            if final_text:
+                task.final_response = final_text
             task.is_done = True
             unresolved = [
                 step for step in task.structured_steps
