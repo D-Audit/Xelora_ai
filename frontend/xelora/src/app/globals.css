@@ -33,6 +33,30 @@
   --foreground: #001E2B;
 }
 
+.dark {
+  --color-xelora-black: #E9F3EF;
+  --color-xelora-deep-green: #8DD7BE;
+  --color-xelora-green: #48A987;
+  --color-xelora-bright-green: #52E39D;
+  --color-xelora-bg-main: #101817;
+  --color-xelora-surface: #16201E;
+  --color-xelora-surface-2: #1E2A27;
+  --color-xelora-nav: #0B1211;
+  --color-xelora-text: #E9F3EF;
+  --color-xelora-text-secondary: #B5C7C0;
+  --color-xelora-text-muted: #83958E;
+  --color-xelora-border: #334540;
+  --color-xelora-border-strong: #4B6159;
+  --color-xelora-border-focus: #52C69A;
+  --color-xelora-success: #78D7B5;
+  --color-xelora-success-bg: #16382D;
+  --color-xelora-info-bg: #17334A;
+  --color-xelora-warning-bg: #3D2E12;
+  --color-xelora-error-bg: #48211F;
+  --background: #101817;
+  --foreground: #E9F3EF;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -44,16 +68,52 @@ html {
 }
 
 body {
-  background-color: #F7F9F8;
-  color: #001E2B;
+  background-color: var(--background);
+  color: var(--foreground);
   font-size: 14px;
   line-height: 1.5;
 }
+
+/* Interactive controls should communicate that they can be activated. */
+a[href], button:not(:disabled), [role="button"]:not([aria-disabled="true"]), summary {
+  cursor: pointer;
+}
+
+.dark .bg-white {
+  background-color: var(--color-xelora-surface) !important;
+}
+
+.dark .bg-black\/5,
+.dark .bg-black\/\[0\.045\] {
+  background-color: rgb(255 255 255 / 0.06) !important;
+}
+
+.dark .hover\:bg-black\/5:hover,
+.dark .hover\:bg-black\/\[0\.045\]:hover {
+  background-color: rgb(255 255 255 / 0.09) !important;
+}
+
+.dark ::-webkit-scrollbar-thumb { background: #4B6159; }
+.dark ::-webkit-scrollbar-thumb:hover { background: #83958E; }
 
 /* Focus styles */
 :focus-visible {
   outline: 2px solid #00684A;
   outline-offset: 2px;
+}
+
+/* The chat composer keeps one calm, static border while typing. Its
+   textarea still receives focus and remains keyboard-accessible; only the
+   visual focus rectangle is suppressed to match the product's chat style. */
+.xelora-chat-composer:focus-within {
+  border-color: #DDE5E2;
+  box-shadow: none;
+}
+
+.xelora-chat-composer textarea:focus,
+.xelora-chat-composer textarea:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
 }
 
 /* Scrollbar */
