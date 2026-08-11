@@ -174,6 +174,11 @@
     "sha256_impl": "e669ebcdde9275ae72865ddaea3314348a837bf6c812f663b994dae6003076e8",
     "sha256_skill_md": "4d042bc7a5a640626d8ee77c945b1d4c9ab3ed5f60b9bc81b78bd7b410a299ee"
   },
+  "get_excel_version": {
+    "category": "read",
+    "sha256_impl": "93fae4dfd049baa0c0adcb61ce3815ad8b724d6c11a68a5459539ed364977fcd",
+    "sha256_skill_md": "dd4b43ac58b30dd624f041cb7ac1020da8a4cce4f524e0398f99902c73becb8a"
+  },
   "group_rows_columns": {
     "category": "structure",
     "sha256_impl": "153ca4cd25bdbd61029f28d31bb859e3864229d0fe163fc12c5e4e4268594f2c",

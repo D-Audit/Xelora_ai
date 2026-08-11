@@ -1,65 +1,31 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { Search, MessageSquareMore, LifeBuoy, BookOpen, Wrench } from 'lucide-react';
+import { ArrowRight, BookOpen, MessageSquareMore, Search, ShieldCheck, Wrench, X } from 'lucide-react';
+import { toast } from 'sonner';
 import { DashboardPageHeader } from '@/components/dashboard/page-header';
+import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 
 const helpTopics = [
-  { title: 'Getting started', description: 'Create an account, choose a plan, and open your first workbook.' },
-  { title: 'Billing', description: 'Change plans, review invoices, and understand usage limits.' },
-  { title: 'Desktop installation', description: 'Download and install Xelora Desktop for local processing.' },
-  { title: 'Workflows', description: 'Build, edit, duplicate, and run automation workflows.' },
-  { title: 'Files', description: 'Upload, organise, version, and share spreadsheet files.' },
-  { title: 'Privacy and security', description: 'Understand local processing, retention, and account security.' },
-  { title: 'Troubleshooting', description: 'Solve common installation and workflow issues.' },
+  { title: 'Get started with Xelora', description: 'Set up your workspace, connect a workbook, and run your first task.', steps: ['Open the Files area and upload a workbook.', 'Ask Xelora for a change or choose a workflow.', 'Review the proposed changes before applying them.'] },
+  { title: 'Manage files and versions', description: 'Upload, organise, restore, and share spreadsheets with confidence.', steps: ['Use Files to upload or open a workbook.', 'Keep a clear name for each version.', 'Use task history to review what changed and when.'] },
+  { title: 'Build and run workflows', description: 'Create repeatable automations for the spreadsheet work you do most.', steps: ['Choose a template or start a new workflow.', 'Configure the steps and required approvals.', 'Run it on a file and check the resulting task history.'] },
+  { title: 'Understand AI approvals', description: 'Stay in control of changes with clear previews and approval settings.', steps: ['Set your preferred approval level in Settings.', 'Review each proposed edit in the task preview.', 'Apply, adjust, or reject the change before it reaches your workbook.'] },
+  { title: 'Privacy and local processing', description: 'Learn how data handling, retention, and local processing work in Xelora.', steps: ['Review cloud processing permission in Settings.', 'Choose a file retention period that suits your workspace.', 'Use Xelora Desktop when you need local processing.'] },
+  { title: 'Install Xelora Desktop', description: 'Set up the desktop app for local workbook processing and notifications.', steps: ['Download the desktop installer for your operating system.', 'Sign in with your Xelora account.', 'Open a workbook and allow local processing when prompted.'] },
+  { title: 'Troubleshoot a task', description: 'Resolve common file, workflow, and connection issues quickly.', steps: ['Check the task history for the error detail.', 'Confirm the workbook is not open in another application.', 'Retry the task, then contact support with the task ID if needed.'] },
 ];
 
 export default function HelpPage() {
   const [search, setSearch] = useState('');
-  const filtered = useMemo(
-    () => helpTopics.filter((topic) => `${topic.title} ${topic.description}`.toLowerCase().includes(search.toLowerCase())),
-    [search]
-  );
-
-  return (
-    <div className="space-y-6">
-      <DashboardPageHeader
-        eyebrow="Help"
-        title="Help centre"
-        description="Search the mock help content or jump to a topic area."
-      />
-      <Card className="p-4">
-        <div className="relative max-w-md">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-xelora-text-muted" />
-          <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search help" className="pl-9" />
-        </div>
-      </Card>
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {filtered.map((topic) => (
-          <Card key={topic.title} className="p-5">
-            <h2 className="text-base font-semibold text-xelora-text">{topic.title}</h2>
-            <p className="mt-2 text-sm text-xelora-text-secondary">{topic.description}</p>
-          </Card>
-        ))}
-      </div>
-      <div className="grid gap-4 md:grid-cols-4">
-        {[
-          { label: 'Contact support', icon: MessageSquareMore },
-          { label: 'Getting started', icon: BookOpen },
-          { label: 'Troubleshooting', icon: Wrench },
-          { label: 'Help centre', icon: LifeBuoy },
-        ].map((item) => {
-          const Icon = item.icon;
-          return (
-            <Card key={item.label} className="p-5 text-center">
-              <Icon className="mx-auto h-5 w-5 text-xelora-green" />
-              <p className="mt-3 text-sm font-medium text-xelora-text">{item.label}</p>
-            </Card>
-          );
-        })}
-      </div>
-    </div>
-  );
+  const [selectedTopic, setSelectedTopic] = useState<(typeof helpTopics)[number] | null>(null);
+  const filtered = useMemo(() => helpTopics.filter((topic) => `${topic.title} ${topic.description}`.toLowerCase().includes(search.toLowerCase())), [search]);
+  return <div className="space-y-6"><DashboardPageHeader eyebrow="Support" title="How can we help?" description="Search practical guides, get unstuck, or contact the Xelora support team." />
+    <Card className="overflow-hidden bg-xelora-deep-green"><div className="px-5 py-8 sm:px-8"><p className="text-sm font-medium text-xelora-bright-green">Xelora Help Centre</p><h2 className="mt-2 text-xl font-semibold text-white sm:text-2xl">Find the answer, then keep moving.</h2><div className="relative mt-5 max-w-2xl"><Search className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-xelora-text-muted" /><Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search guides, workflows, files, and more" className="h-11 border-white/20 bg-white pl-11 text-xelora-black placeholder:text-xelora-text-muted" /></div></div></Card>
+    {selectedTopic && <Card className="relative max-w-3xl p-6 sm:p-7"><button onClick={() => setSelectedTopic(null)} className="absolute right-4 top-4 rounded-md p-2 text-xelora-text-muted hover:bg-xelora-surface-2 hover:text-xelora-text" aria-label="Close guide"><X className="h-4 w-4" /></button><p className="text-xs font-semibold uppercase tracking-[0.14em] text-xelora-green">Guide</p><h2 className="mt-2 pr-8 text-xl font-semibold text-xelora-text">{selectedTopic.title}</h2><p className="mt-3 text-sm leading-6 text-xelora-text-secondary">{selectedTopic.description}</p><ol className="mt-6 space-y-3">{selectedTopic.steps.map((step, index) => <li key={step} className="flex gap-3 text-sm text-xelora-text-secondary"><span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-xelora-success-bg text-xs font-semibold text-xelora-green">{index + 1}</span><span className="pt-0.5">{step}</span></li>)}</ol></Card>}
+    <div><div className="mb-4 flex items-end justify-between"><div><h2 className="font-semibold text-xelora-text">Browse guides</h2><p className="mt-1 text-sm text-xelora-text-secondary">Clear answers for the most common tasks.</p></div><span className="text-sm text-xelora-text-muted">{filtered.length} guides</span></div><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{filtered.map((topic) => <button key={topic.title} onClick={() => setSelectedTopic(topic)} className="rounded-xl text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-xelora-border-focus"><Card className="h-full p-5 transition-all hover:-translate-y-0.5 hover:border-xelora-border-strong hover:shadow-sm"><BookOpen className="h-5 w-5 text-xelora-green" /><h3 className="mt-4 font-semibold text-xelora-text">{topic.title}</h3><p className="mt-2 text-sm leading-5 text-xelora-text-secondary">{topic.description}</p><span className="mt-5 inline-flex items-center gap-1 text-sm font-medium text-xelora-green">Read guide <ArrowRight className="h-4 w-4" /></span></Card></button>)}</div>{filtered.length === 0 && <Card className="p-8 text-center"><Search className="mx-auto h-6 w-6 text-xelora-text-muted" /><p className="mt-3 font-medium text-xelora-text">No guides found</p><p className="mt-1 text-sm text-xelora-text-secondary">Try another phrase, or contact support for help with your issue.</p></Card>}</div>
+    <div className="grid gap-4 lg:grid-cols-3"><Card className="p-5"><MessageSquareMore className="h-5 w-5 text-xelora-green" /><h2 className="mt-4 font-semibold text-xelora-text">Contact support</h2><p className="mt-2 text-sm leading-5 text-xelora-text-secondary">Send us a message and include a screenshot or task ID when you can.</p><Button variant="outline" className="mt-5" onClick={() => toast.info('Support contact is ready. Include a short description and your task ID if available.')}>Start a conversation</Button></Card><Card className="p-5"><Wrench className="h-5 w-5 text-xelora-green" /><h2 className="mt-4 font-semibold text-xelora-text">Having trouble?</h2><p className="mt-2 text-sm leading-5 text-xelora-text-secondary">Check task history first to see what happened and where the task stopped.</p><Button variant="ghost" className="mt-5" onClick={() => setSearch('troubleshoot')}>View troubleshooting</Button></Card><Card className="p-5"><ShieldCheck className="h-5 w-5 text-xelora-green" /><h2 className="mt-4 font-semibold text-xelora-text">Privacy & security</h2><p className="mt-2 text-sm leading-5 text-xelora-text-secondary">Find data processing, account security, and retention guidance.</p><Button variant="ghost" className="mt-5" onClick={() => setSearch('privacy')}>Read privacy guide</Button></Card></div>
+  </div>;
 }

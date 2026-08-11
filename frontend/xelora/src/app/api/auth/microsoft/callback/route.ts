@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { backendFetch } from '@/lib/backend';
 import { applySessionCookie, clearOAuthStateCookie, consumeOAuthState } from '@/lib/session';
+import { getOAuthOrigin, oauthFailureMessage } from '@/lib/oauth';
 
 interface ExchangeResponse {
   token: string;
@@ -10,7 +11,7 @@ interface ExchangeResponse {
 }
 
 export async function GET(req: NextRequest) {
-  const origin = req.nextUrl.origin;
+  const origin = getOAuthOrigin(req);
   const code = req.nextUrl.searchParams.get('code');
   const state = req.nextUrl.searchParams.get('state');
   const errorParam = req.nextUrl.searchParams.get('error');
@@ -33,7 +34,7 @@ export async function GET(req: NextRequest) {
   });
 
   if (!result.ok) {
-    const message = (result.data as { detail?: string })?.detail || 'Could not complete Microsoft sign-in.';
+    const message = oauthFailureMessage(result.data, 'Could not complete Microsoft sign-in.');
     return NextResponse.redirect(`${origin}/login?error=${encodeURIComponent(message)}`);
   }
 

@@ -1,275 +1,50 @@
 'use client';
-import { useEffect, useState } from 'react';
+
 import Link from 'next/link';
+import { useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { ArrowRight, Bot, CheckCircle2, FileSpreadsheet, FolderOpen, Play, Plus, Sparkles, Workflow } from 'lucide-react';
 import { useAuthStore } from '@/stores/auth-store';
-import { getDashboardSummary } from '@/services/dashboard';
-import { Button } from '@/components/ui/button';
+import { mockFiles } from '@/data/mock-files';
+import { mockUsage } from '@/data/mock-usage';
+import { mockWorkflowRuns, mockWorkflows } from '@/data/mock-workflows';
+import { formatFileSize, formatRelativeTime, getUsagePercentage } from '@/lib/utils';
+import { DashboardPageHeader } from '@/components/dashboard/page-header';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
-import { Skeleton } from '@/components/ui/skeleton';
-import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
-import { MonitorPlay, Upload, Plus, CheckCircle2, Clock, AlertTriangle, XCircle, FileSpreadsheet, ExternalLink, AlertCircle } from 'lucide-react';
-import { formatDate, formatFileSize, formatRelativeTime, getUsagePercentage, getUsageBarColour } from '@/lib/utils';
-import type { UsageLimits, Subscription, FileRecord, WorkflowRun, Notification } from '@/types';
-import { toast } from 'sonner';
+import { isDesktopApp } from '@/lib/is-desktop';
 
-interface DashboardData {
-  usage: UsageLimits;
-  subscription: Subscription;
-  recentFiles: FileRecord[];
-  recentRuns: WorkflowRun[];
-  alerts: Notification[];
-}
-
-const statusConfig = {
-  completed: { label: 'Completed', icon: CheckCircle2, colour: 'text-xelora-success' },
-  completed_with_warnings: { label: 'Warnings', icon: AlertTriangle, colour: 'text-xelora-warning' },
-  failed: { label: 'Failed', icon: XCircle, colour: 'text-xelora-error' },
-  running: { label: 'Running', icon: Clock, colour: 'text-xelora-info' },
-  cancelled: { label: 'Cancelled', icon: XCircle, colour: 'text-xelora-text-muted' },
-  paused: { label: 'Paused', icon: Clock, colour: 'text-xelora-warning' },
-  awaiting_approval: { label: 'Awaiting approval', icon: AlertCircle, colour: 'text-xelora-info' },
-};
-
-const fileStatusBadge: Record<string, { label: string; variant: 'success' | 'info' | 'warning' | 'error' | 'default' }> = {
-  ready: { label: 'Ready', variant: 'default' },
-  processing: { label: 'Processing', variant: 'info' },
+const runStatus: Record<string, { label: string; variant: 'success' | 'warning' | 'info' }> = {
   completed: { label: 'Completed', variant: 'success' },
-  needs_review: { label: 'Needs review', variant: 'warning' },
-  failed: { label: 'Failed', variant: 'error' },
-  archived: { label: 'Archived', variant: 'default' },
+  completed_with_warnings: { label: 'Needs review', variant: 'warning' },
+  running: { label: 'Running', variant: 'info' },
 };
 
-export default function DashboardPage() {
-  const user = useAuthStore(s => s.user);
-  const [data, setData] = useState<DashboardData | null>(null);
-  const [loading, setLoading] = useState(true);
+export default function DashboardIndexPage() {
+  const router = useRouter();
+  const user = useAuthStore((state) => state.user);
+  const firstName = user?.name?.split(' ')[0] || 'there';
+  const recentFiles = mockFiles.slice(0, 4);
+  const recentRuns = mockWorkflowRuns.slice(0, 3);
+  const aiUsage = getUsagePercentage(mockUsage.aiActionsUsed, mockUsage.aiActionsLimit);
+  const workflowUsage = getUsagePercentage(mockUsage.workflowRunsUsed, mockUsage.workflowRunsLimit);
 
   useEffect(() => {
-    getDashboardSummary().then(d => { setData(d); setLoading(false); });
-  }, []);
+    if (isDesktopApp()) router.replace('/dashboard/agent?new=1');
+  }, [router]);
 
-  const hour = new Date().getHours();
-  const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
-  const firstName = user?.name?.split(' ')[0] ?? 'there';
+  return <div className="mx-auto max-w-7xl space-y-6">
+    <DashboardPageHeader eyebrow="Workspace overview" title={`Welcome back, ${firstName}`} description="Here is what is happening across your files, workflows, and automations." actions={<><Button variant="outline" asChild><Link href="/dashboard/files"><FolderOpen className="h-4 w-4" />Open files</Link></Button><Button asChild><Link href="/dashboard/agent?new=1"><Sparkles className="h-4 w-4" />Ask Xelora</Link></Button></>} />
 
-  const usageItems = data ? [
-    { label: 'AI actions', used: data.usage.aiActionsUsed, limit: data.usage.aiActionsLimit as number, suffix: 'actions' },
-    { label: 'Workflow runs', used: data.usage.workflowRunsUsed, limit: data.usage.workflowRunsLimit as number, suffix: 'runs' },
-    { label: 'Storage', used: Math.round(data.usage.storageUsedGB * 10) / 10, limit: data.usage.storageLimitGB, suffix: 'GB' },
-    { label: 'Devices', used: data.usage.devicesUsed, limit: data.usage.devicesLimit, suffix: 'devices' },
-  ] : [];
+    <Card className="overflow-hidden border-xelora-deep-green bg-xelora-deep-green text-white"><div className="grid gap-6 px-6 py-7 md:grid-cols-[minmax(0,1fr)_auto] md:items-center sm:px-8"><div><p className="text-sm font-medium text-xelora-bright-green">Your workspace is ready</p><h2 className="mt-2 text-2xl font-semibold tracking-tight">What would you like to accomplish?</h2><p className="mt-2 max-w-xl text-sm leading-6 text-white/75">Start a new AI task for a workbook, create an automation, or continue working with your files.</p></div><div className="flex flex-wrap gap-3"><Button variant="bright" asChild><Link href="/dashboard/agent?new=1"><Bot className="h-4 w-4" />New AI task</Link></Button><Button className="border border-white/20 bg-white/10 text-white hover:bg-white/20" asChild><Link href="/dashboard/workflows/new"><Plus className="h-4 w-4" />New workflow</Link></Button></div></div></Card>
 
-  return (
-    <div className="max-w-6xl mx-auto space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          {loading ? (
-            <>
-              <Skeleton className="h-7 w-48 mb-2" />
-              <Skeleton className="h-4 w-72" />
-            </>
-          ) : (
-            <>
-              <h1 className="text-2xl font-semibold text-xelora-text">{greeting}, {firstName}</h1>
-              <p className="text-sm text-xelora-text-secondary mt-0.5">
-                Manage your Xelora account, workflows, files, and desktop access.
-              </p>
-            </>
-          )}
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" asChild>
-            <Link href="/desktop"><MonitorPlay className="h-4 w-4" />Open Xelora Desktop</Link>
-          </Button>
-          <Button variant="outline" size="sm" onClick={() => toast.info('Upload files from the Files page.')}>
-            <Upload className="h-4 w-4" />Upload Spreadsheet
-          </Button>
-          <Button size="sm" asChild>
-            <Link href="/dashboard/workflows/new"><Plus className="h-4 w-4" />Create Workflow</Link>
-          </Button>
-        </div>
-      </div>
+    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><Card className="p-5"><div className="flex items-center justify-between"><span className="text-sm text-xelora-text-secondary">Files in workspace</span><FileSpreadsheet className="h-4 w-4 text-xelora-green" /></div><p className="mt-3 text-2xl font-semibold text-xelora-text">{mockFiles.length}</p><p className="mt-1 text-xs text-xelora-text-muted">{mockFiles.filter((file) => file.status === 'needs_review').length} need your review</p></Card><Card className="p-5"><div className="flex items-center justify-between"><span className="text-sm text-xelora-text-secondary">Active workflows</span><Workflow className="h-4 w-4 text-xelora-green" /></div><p className="mt-3 text-2xl font-semibold text-xelora-text">{mockWorkflows.filter((workflow) => workflow.status === 'published').length}</p><p className="mt-1 text-xs text-xelora-text-muted">Ready to run when you are</p></Card><Card className="p-5"><div className="flex items-center justify-between"><span className="text-sm text-xelora-text-secondary">AI actions</span><Sparkles className="h-4 w-4 text-xelora-green" /></div><p className="mt-3 text-2xl font-semibold text-xelora-text">{mockUsage.aiActionsUsed.toLocaleString()} <span className="text-sm font-normal text-xelora-text-muted">/ {mockUsage.aiActionsLimit.toLocaleString()}</span></p><Progress value={aiUsage} className="mt-3 h-1.5 bg-xelora-surface-2" indicatorClassName="bg-xelora-green" /></Card><Card className="p-5"><div className="flex items-center justify-between"><span className="text-sm text-xelora-text-secondary">Workflow runs</span><Play className="h-4 w-4 text-xelora-green" /></div><p className="mt-3 text-2xl font-semibold text-xelora-text">{mockUsage.workflowRunsUsed} <span className="text-sm font-normal text-xelora-text-muted">/ {mockUsage.workflowRunsLimit}</span></p><Progress value={workflowUsage} className="mt-3 h-1.5 bg-xelora-surface-2" indicatorClassName="bg-xelora-green" /></Card></div>
 
-      {/* Alerts */}
-      {!loading && data?.alerts && data.alerts.length > 0 && (
-        <div className="space-y-2">
-          {data.alerts.map(alert => (
-            <Alert key={alert.id} variant="warning">
-              <AlertTriangle className="h-4 w-4" />
-              <AlertTitle>{alert.title}</AlertTitle>
-              <AlertDescription className="flex items-center justify-between gap-2 flex-wrap">
-                <span>{alert.message}</span>
-                {alert.actionUrl && (
-                  <Link href={alert.actionUrl} className="text-xs font-medium text-xelora-warning hover:underline shrink-0">
-                    {alert.actionLabel}
-                  </Link>
-                )}
-              </AlertDescription>
-            </Alert>
-          ))}
-        </div>
-      )}
+    <div className="grid gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(290px,0.8fr)]"><Card><div className="flex items-center justify-between border-b border-xelora-border px-5 py-4"><div><h2 className="font-semibold text-xelora-text">Recent files</h2><p className="mt-0.5 text-sm text-xelora-text-secondary">Your latest workbook activity.</p></div><Link href="/dashboard/files" className="inline-flex items-center gap-1 text-sm font-medium text-xelora-green hover:underline">View all <ArrowRight className="h-4 w-4" /></Link></div><div className="divide-y divide-xelora-border">{recentFiles.map((file) => <Link href={`/dashboard/files/${file.id}`} key={file.id} className="flex items-center gap-3 px-5 py-4 transition-colors hover:bg-xelora-surface-2"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-xelora-success-bg text-xelora-green"><FileSpreadsheet className="h-4 w-4" /></span><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-xelora-text">{file.name}</span><span className="mt-0.5 block text-xs text-xelora-text-muted">{formatFileSize(file.sizeMB * 1024 * 1024)} · Updated {formatRelativeTime(file.lastModifiedAt)}</span></span><Badge variant={file.status === 'needs_review' ? 'warning' : file.status === 'processing' ? 'info' : 'success'}>{file.status === 'needs_review' ? 'Review' : file.status === 'processing' ? 'Processing' : 'Ready'}</Badge></Link>)}</div></Card>
+      <Card><div className="border-b border-xelora-border px-5 py-4"><h2 className="font-semibold text-xelora-text">Continue working</h2><p className="mt-0.5 text-sm text-xelora-text-secondary">Pick up where you left off.</p></div><div className="space-y-2 p-3"><Link href="/dashboard/agent?new=1" className="flex items-center gap-3 rounded-lg p-3 transition-colors hover:bg-xelora-surface-2"><span className="flex h-9 w-9 items-center justify-center rounded-lg bg-xelora-success-bg text-xelora-green"><Bot className="h-4 w-4" /></span><span><span className="block text-sm font-medium text-xelora-text">Start an AI task</span><span className="block text-xs text-xelora-text-muted">Ask for help with any workbook.</span></span></Link><Link href="/dashboard/templates" className="flex items-center gap-3 rounded-lg p-3 transition-colors hover:bg-xelora-surface-2"><span className="flex h-9 w-9 items-center justify-center rounded-lg bg-xelora-info-bg text-xelora-info"><Workflow className="h-4 w-4" /></span><span><span className="block text-sm font-medium text-xelora-text">Use a template</span><span className="block text-xs text-xelora-text-muted">Start from a proven workflow.</span></span></Link><Link href="/dashboard/help" className="flex items-center gap-3 rounded-lg p-3 transition-colors hover:bg-xelora-surface-2"><span className="flex h-9 w-9 items-center justify-center rounded-lg bg-xelora-warning-bg text-xelora-warning"><CheckCircle2 className="h-4 w-4" /></span><span><span className="block text-sm font-medium text-xelora-text">Get help</span><span className="block text-xs text-xelora-text-muted">Browse guides and support options.</span></span></Link></div></Card></div>
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        {/* Usage summary */}
-        <div className="lg:col-span-2">
-          <div className="rounded-lg border border-xelora-border bg-white p-5">
-            <div className="flex items-center justify-between mb-5">
-              <h2 className="text-base font-semibold text-xelora-text">Usage this month</h2>
-              <Link href="/dashboard/usage" className="text-xs text-xelora-info hover:underline">View details</Link>
-            </div>
-            {loading ? (
-              <div className="space-y-4">
-                {[1,2,3,4].map(i => <Skeleton key={i} className="h-10 w-full" />)}
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {usageItems.map(({ label, used, limit, suffix }) => {
-                  const pct = getUsagePercentage(used, limit);
-                  const barColour = getUsageBarColour(pct);
-                  return (
-                    <div key={label}>
-                      <div className="flex items-center justify-between mb-1.5 text-sm">
-                        <span className="font-medium text-xelora-text">{label}</span>
-                        <span className="text-xelora-text-secondary">{used} <span className="text-xelora-text-muted">/ {limit} {suffix}</span></span>
-                      </div>
-                      <Progress value={pct} className="h-2" indicatorClassName={barColour} aria-label={`${label}: ${pct}%`} />
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            {!loading && data && (
-              <p className="mt-4 text-xs text-xelora-text-muted">Resets on {formatDate(data.usage.resetDate)}</p>
-            )}
-          </div>
-        </div>
-
-        {/* Plan card */}
-        <div className="rounded-lg border border-xelora-border bg-white p-5">
-          <h2 className="text-base font-semibold text-xelora-text mb-4">Current plan</h2>
-          {loading ? (
-            <div className="space-y-3">
-              <Skeleton className="h-6 w-32" />
-              <Skeleton className="h-4 w-40" />
-              <Skeleton className="h-4 w-36" />
-              <Skeleton className="h-9 w-full mt-4" />
-            </div>
-          ) : data ? (
-            <>
-              <div className="flex items-center gap-2 mb-3">
-                <Badge variant="green" className="capitalize">{data.subscription.planTier}</Badge>
-                <Badge variant={data.subscription.status === 'active' ? 'success' : 'warning'}>
-                  {data.subscription.status}
-                </Badge>
-              </div>
-              <div className="space-y-1.5 text-sm text-xelora-text-secondary mb-5">
-                <p>Renews {formatDate(data.subscription.currentPeriodEnd)}</p>
-                <p className="capitalize">{data.subscription.billingCycle} billing</p>
-              </div>
-              <Button variant="outline" size="sm" className="w-full" asChild>
-                <Link href="/dashboard/billing">Manage plan</Link>
-              </Button>
-            </>
-          ) : null}
-        </div>
-      </div>
-
-      {/* Recent files */}
-      <div className="rounded-lg border border-xelora-border bg-white">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-xelora-border">
-          <h2 className="text-base font-semibold text-xelora-text">Recent files</h2>
-          <Link href="/dashboard/files" className="text-xs text-xelora-info hover:underline">View all</Link>
-        </div>
-        {loading ? (
-          <div className="p-5 space-y-3">
-            {[1,2,3,4].map(i => <Skeleton key={i} className="h-10 w-full" />)}
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm" role="table">
-              <thead>
-                <tr className="border-b border-xelora-border bg-xelora-surface-2">
-                  <th className="px-5 py-3 text-left font-medium text-xelora-text-secondary">Name</th>
-                  <th className="px-4 py-3 text-left font-medium text-xelora-text-secondary hidden sm:table-cell">Type</th>
-                  <th className="px-4 py-3 text-left font-medium text-xelora-text-secondary hidden md:table-cell">Size</th>
-                  <th className="px-4 py-3 text-left font-medium text-xelora-text-secondary">Status</th>
-                  <th className="px-4 py-3 text-left font-medium text-xelora-text-secondary hidden lg:table-cell">Modified</th>
-                  <th className="px-4 py-3 text-right font-medium text-xelora-text-secondary">Action</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-xelora-border">
-                {data?.recentFiles.map(file => {
-                  const statusCfg = fileStatusBadge[file.status] ?? fileStatusBadge.ready;
-                  return (
-                    <tr key={file.id} className="hover:bg-xelora-surface-2 transition-colors">
-                      <td className="px-5 py-3">
-                        <div className="flex items-center gap-2">
-                          <FileSpreadsheet className="h-4 w-4 text-xelora-green shrink-0" aria-hidden="true" />
-                          <span className="font-medium text-xelora-text truncate max-w-[160px]">{file.name}</span>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 hidden sm:table-cell text-xelora-text-secondary uppercase text-xs">{file.type}</td>
-                      <td className="px-4 py-3 hidden md:table-cell text-xelora-text-secondary">{formatFileSize(file.sizeMB)}</td>
-                      <td className="px-4 py-3">
-                        <Badge variant={statusCfg.variant}>{statusCfg.label}</Badge>
-                      </td>
-                      <td className="px-4 py-3 hidden lg:table-cell text-xelora-text-secondary">{formatRelativeTime(file.lastModifiedAt)}</td>
-                      <td className="px-4 py-3 text-right">
-                        <Button variant="ghost" size="sm" asChild>
-                          <Link href={`/dashboard/files/${file.id}`} aria-label={`Open ${file.name}`}>
-                            <ExternalLink className="h-3.5 w-3.5" />
-                          </Link>
-                        </Button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* Recent workflow runs */}
-      <div className="rounded-lg border border-xelora-border bg-white">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-xelora-border">
-          <h2 className="text-base font-semibold text-xelora-text">Recent workflow runs</h2>
-          <Link href="/dashboard/history" className="text-xs text-xelora-info hover:underline">View all</Link>
-        </div>
-        {loading ? (
-          <div className="p-5 space-y-3">
-            {[1,2,3].map(i => <Skeleton key={i} className="h-16 w-full" />)}
-          </div>
-        ) : (
-          <div className="divide-y divide-xelora-border">
-            {data?.recentRuns.map(run => {
-              const cfg = statusConfig[run.status] ?? statusConfig.completed;
-              const StatusIcon = cfg.icon;
-              return (
-                <div key={run.id} className="flex items-center gap-4 px-5 py-4 hover:bg-xelora-surface-2 transition-colors">
-                  <StatusIcon className={`h-4 w-4 shrink-0 ${cfg.colour}`} aria-hidden="true" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-xelora-text truncate">{run.workflowName}</p>
-                    <p className="text-xs text-xelora-text-secondary">{run.fileName} · {run.stepsCompleted}/{run.totalSteps} steps · {run.aiActionsUsed} AI actions</p>
-                  </div>
-                  <div className="text-right shrink-0">
-                    <p className={`text-xs font-medium ${cfg.colour}`}>{cfg.label}</p>
-                    <p className="text-xs text-xelora-text-muted">{formatRelativeTime(run.startedAt)}</p>
-                  </div>
-                  <Button variant="ghost" size="sm" asChild>
-                    <Link href={`/dashboard/history/${run.id}`} aria-label={`View run details for ${run.workflowName}`}>
-                      <ExternalLink className="h-3.5 w-3.5" />
-                    </Link>
-                  </Button>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    </div>
-  );
+    <Card><div className="flex items-center justify-between border-b border-xelora-border px-5 py-4"><div><h2 className="font-semibold text-xelora-text">Recent workflow activity</h2><p className="mt-0.5 text-sm text-xelora-text-secondary">The latest work completed in your workspace.</p></div><Link href="/dashboard/history" className="text-sm font-medium text-xelora-green hover:underline">View history</Link></div><div className="divide-y divide-xelora-border">{recentRuns.map((run) => { const status = runStatus[run.status] ?? runStatus.running; return <Link key={run.id} href="/dashboard/history" className="flex flex-col gap-2 px-5 py-4 transition-colors hover:bg-xelora-surface-2 sm:flex-row sm:items-center"><span className="min-w-0 flex-1"><span className="block text-sm font-medium text-xelora-text">{run.workflowName}</span><span className="mt-0.5 block truncate text-xs text-xelora-text-muted">{run.fileName} · {formatRelativeTime(run.completedAt ?? run.startedAt)}</span></span><span className="text-xs text-xelora-text-muted">{run.stepsCompleted}/{run.totalSteps} steps</span><Badge variant={status.variant}>{status.label}</Badge></Link>; })}</div></Card>
+  </div>;
 }

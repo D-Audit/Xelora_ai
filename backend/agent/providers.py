@@ -63,9 +63,6 @@ def _strip_unsupported_schema_keys(schema):
     if "items" in cleaned:
         cleaned["items"] = _strip_unsupported_schema_keys(cleaned["items"])
 
-    # A field with no 'type' at all (e.g. {} for "any value") isn't valid
-    # here - fall back to "string" so it's at least schema-valid; the
-    # actual value passed at runtime isn't strictly re-validated against this.
     if "type" not in cleaned:
         cleaned["type"] = "string"
 
@@ -79,7 +76,6 @@ def _strip_unsupported_schema_keys(schema):
 
 
 def build_gemini_tools():
-    # Gemini wants one function_declarations block; merge everything into it.
     merged = gemini_tools()[0]["function_declarations"]
     merged = [
         {**decl, "parameters": _strip_unsupported_schema_keys(decl["parameters"])}
@@ -107,7 +103,24 @@ def call_claude(task, system_prompt: str):
         tools=build_claude_tools(),
         messages=task.messages,
     )
-    task.messages.append({"role": "assistant", "content": response.content})
+    # Store plain, JSON-serializable dicts instead of raw Anthropic SDK
+    # block objects. The Claude API accepts either form as input (a list
+    # of dicts is standard, documented usage), so this changes nothing
+    # about live behavior - but it means task.messages can now be safely
+    # json.dumps()'d for real persistence and later reconstructed into a
+    # working conversation after a server restart, instead of only ever
+    # being usable within this same process.
+    def _serialize_block(block):
+        # Handle both pydantic v2 (.model_dump) and older v1-style SDKs
+        # (.dict) without guessing which one is installed.
+        if hasattr(block, "model_dump"):
+            return block.model_dump()
+        if hasattr(block, "dict"):
+            return block.dict()
+        return block  # already a plain dict/primitive
+
+    serializable_content = [_serialize_block(block) for block in response.content]
+    task.messages.append({"role": "assistant", "content": serializable_content})
 
     tool_calls = [b for b in response.content if b.type == "tool_use"]
     text_blocks = [b.text for b in response.content if b.type == "text"]
@@ -148,13 +161,6 @@ def call_gemini(task, system_prompt: str):
     tools = build_gemini_tools()
     from google.generativeai.types.generation_types import StopCandidateException
 
-    # Gemini's free tier gives each MODEL its own separate per-minute quota.
-    # Rather than only backing off and retrying the same model, walk forward
-    # through config.GEMINI_MODEL_CHAIN - once a model's quota is genuinely
-    # exhausted (not just one 429), move to the next model, which has its
-    # own fresh quota bucket. task.gemini_model_index remembers which model
-    # worked last, so later steps in the same task don't re-try ones that
-    # just failed.
     RETRIES_PER_MODEL = 2
     last_error = None
 
@@ -167,7 +173,7 @@ def call_gemini(task, system_prompt: str):
         for attempt in range(RETRIES_PER_MODEL):
             try:
                 response = chat.send_message(last_user_msg)
-                task.gemini_model_index = model_index  # remember what worked for the rest of this task
+                task.gemini_model_index = model_index
                 return _parse_gemini_response(task, response)
             except ResourceExhausted as e:
                 last_error = e
@@ -184,10 +190,6 @@ def call_gemini(task, system_prompt: str):
                     task.log_step(f"🔀 '{model_name}' still rate-limited after retrying - "
                                    f"switching to the next model in the fallback chain.")
             except StopCandidateException as e:
-                # MALFORMED_FUNCTION_CALL: the model tried to build a tool call
-                # and produced something invalid - this happens more often with
-                # very large/complex arguments (e.g. writing a big data table in
-                # one call). Previously this crashed the whole task uncaught.
                 last_error = e
                 if attempt < RETRIES_PER_MODEL - 1:
                     task.log_step(f"⚠️ '{model_name}' produced a malformed function call - retrying once more.")
@@ -195,9 +197,6 @@ def call_gemini(task, system_prompt: str):
                     task.log_step(f"🔀 '{model_name}' keeps producing malformed function calls - "
                                    f"switching to the next model in the fallback chain.")
 
-
-
-    # Every model in the chain is exhausted - nothing left to fall back to.
     raise last_error
 
 

@@ -13,6 +13,10 @@
  */
 declare global {
   interface Window {
+    // The current Electron preload exposes this API.
+    xelora?: {
+      getAppInfo?: () => Promise<unknown>;
+    };
     xeloraDesktop?: {
       platform: string;
       version: string;
@@ -24,5 +28,5 @@ declare global {
 
 export function isDesktopApp(): boolean {
   if (typeof window === 'undefined') return false;
-  return Boolean(window.xeloraDesktop?.isDesktopApp);
+  return Boolean(window.xeloraDesktop?.isDesktopApp || window.xelora);
 }

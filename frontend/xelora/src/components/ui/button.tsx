@@ -14,7 +14,7 @@ const buttonVariants = cva(
         primary: 'bg-xelora-green text-white hover:bg-xelora-deep-green',
         bright: 'bg-xelora-bright-green text-xelora-black font-semibold hover:bg-[#00d458]',
         destructive: 'bg-xelora-error text-white hover:bg-[#9b1e14]',
-        outline: 'border border-xelora-border bg-white text-xelora-text hover:bg-xelora-surface-2',
+        outline: 'border border-xelora-border bg-xelora-surface text-xelora-text hover:bg-xelora-surface-2',
         secondary: 'bg-xelora-surface-2 text-xelora-text hover:bg-xelora-border',
         ghost: 'text-xelora-text hover:bg-xelora-surface-2',
         link: 'text-xelora-info underline-offset-4 hover:underline p-0 h-auto',

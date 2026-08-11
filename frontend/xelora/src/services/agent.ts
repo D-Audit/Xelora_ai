@@ -1,92 +1,93 @@
-/**
- * Client-side service for the AI agent task endpoints. Calls our own
- * Next.js API routes (never the backend directly), which forward the
- * request server-side with the session cookie's JWT.
- */
+/** Browser client for the Next.js task proxies.  Keep these paths in sync with
+ * src/app/api/task and src/app/api/tasks; the browser must never call FastAPI
+ * directly because the session token is held in an httpOnly cookie. */
 
-export interface TaskStartResponse {
-  task_id: number;
+export interface ChatSummary {
+  id: number;
+  title: string;
   status: string;
-  message: string;
+  created_at: string | null;
+  completed_at: string | null;
+  is_read: boolean;
+}
+
+export interface ChatDetail {
+  id: number;
+  instruction: string;
+  status: string;
+  created_at: string | null;
+  completed_at: string | null;
+  transcript: { role: 'user' | 'assistant'; text: string; timestamp: string }[];
+  resumable: boolean;
 }
 
 export interface TaskProgressResponse {
-  task_id?: number;
-  current_task: string;
-  completed_action_count: number;
-  completed_actions: { tool_name: string; execution_layer?: string }[];
-  decision_explanations: string[];
-  is_done: boolean;
-  is_paused?: boolean;
-  progress_log?: string[];
-  final_response?: string | null;
-}
-
-export interface TaskRevealResponse {
-  task_id: number;
-  workflow: {
-    step: number;
-    native_feature: string;
-    tool_name: string;
-    execution_layer?: string;
-    succeeded: boolean;
-  }[];
-  final_response?: string | null;
-  is_done?: boolean;
-  is_paused?: boolean;
-}
-
-export interface TaskStatusResponse {
   task_id: number;
   is_done: boolean;
   is_paused: boolean;
-  status: 'running' | 'paused' | 'done';
+  current_task?: string;
+  completed_actions?: { tool_name: string }[];
   progress_log: string[];
-  final_response?: string | null;
+  final_response: string | null;
 }
 
-async function parseOrThrow<T>(res: Response): Promise<T> {
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error((data as { error?: string }).error || 'Request failed.');
+async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, init);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error((body as { error?: string; detail?: string }).error
+      || (body as { detail?: string }).detail
+      || 'Request to Xelora agent failed.');
   }
-  return data as T;
+  return body as T;
 }
 
-export async function startTask(instruction: string, workbookName?: string): Promise<TaskStartResponse> {
-  const res = await fetch('/api/task', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ instruction, workbookName }),
+export const listChats = () => request<ChatSummary[]>('/api/tasks');
+export const getChat = (taskId: number) => request<ChatDetail>(`/api/tasks/${taskId}`);
+export const markChatRead = (taskId: number) =>
+  request<{ id: number; is_read: boolean }>(`/api/tasks/${taskId}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'mark-read' }),
   });
-  return parseOrThrow<TaskStartResponse>(res);
-}
+export const deleteChat = (taskId: number) =>
+  request<{ id: number; deleted: boolean }>(`/api/tasks/${taskId}`, { method: 'DELETE' });
 
-export async function getTaskProgress(taskId: number): Promise<TaskProgressResponse> {
-  const res = await fetch(`/api/task/${taskId}/progress`, { cache: 'no-store' });
-  return parseOrThrow<TaskProgressResponse>(res);
-}
-
-export async function getTaskReveal(taskId: number): Promise<TaskRevealResponse> {
-  const res = await fetch(`/api/task/${taskId}/reveal`, { cache: 'no-store' });
-  return parseOrThrow<TaskRevealResponse>(res);
-}
-
-export async function getTaskStatus(taskId: number): Promise<TaskStatusResponse> {
-  const res = await fetch(`/api/task/${taskId}/status`, { cache: 'no-store' });
-  return parseOrThrow<TaskStatusResponse>(res);
-}
-
-export async function pauseTask(taskId: number) {
-  const res = await fetch(`/api/task/${taskId}/pause`, { method: 'POST' });
-  return parseOrThrow(res);
-}
-
-export async function resumeTask(taskId: number, correction?: string) {
-  const res = await fetch(`/api/task/${taskId}/resume`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ correction }),
+export const startTask = (instruction: string, workbookName?: string) =>
+  request<{ task_id: number; status: string }>('/api/task', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ instruction, workbookName: workbookName ?? null }),
   });
-  return parseOrThrow(res);
+export const resumeTask = (taskId: number, correction?: string) =>
+  request<{ task_id: number; status: string }>(`/api/task/${taskId}/resume`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ correction: correction ?? null }),
+  });
+export const pauseTask = (taskId: number) =>
+  request<{ task_id: number; is_paused: boolean }>(`/api/task/${taskId}/pause`, { method: 'POST' });
+export const getTaskProgress = (taskId: number) =>
+  request<TaskProgressResponse>(`/api/task/${taskId}/progress`);
+export const getTaskReveal = (taskId: number) => request(`/api/task/${taskId}/reveal`);
+
+// Compatibility aliases used by the desktop workspace components.
+export type BackendTaskSummary = ChatSummary;
+export type BackendTaskDetail = ChatDetail;
+export type BackendProgress = TaskProgressResponse;
+export const listTasks = listChats;
+export const getTaskDetail = getChat;
+export const getProgress = getTaskProgress;
+
+export function pollProgress(taskId: number, onUpdate: (snapshot: TaskProgressResponse) => void, intervalMs = 1500): () => void {
+  let cancelled = false;
+  const tick = async () => {
+    if (cancelled) return;
+    try {
+      const snapshot = await getTaskProgress(taskId);
+      if (cancelled) return;
+      onUpdate(snapshot);
+      if (!snapshot.is_done && !snapshot.is_paused) window.setTimeout(tick, intervalMs);
+    } catch {
+      if (!cancelled) window.setTimeout(tick, intervalMs * 2);
+    }
+  };
+  void tick();
+  return () => { cancelled = true; };
 }

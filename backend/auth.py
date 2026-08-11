@@ -71,6 +71,10 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, password_hash: str) -> bool:
+    # OAuth accounts do not have a local password.  Avoid passing their
+    # deliberate marker to bcrypt, which would raise for a non-bcrypt hash.
+    if password_hash.startswith("!oauth-only:"):
+        return False
     return pwd_context.verify(password, password_hash)
 
 

@@ -21,6 +21,7 @@ import config
 import security
 from agent.core import AgentTask, run_task
 from agent.reveal import reveal_workflow, progress_snapshot
+from auth import decode_token
 from database import init_db, get_db
 from learning.memory import set_preference, get_all_preferences
 from learning.pattern_miner import mine_patterns, promotable_patterns
@@ -32,7 +33,7 @@ if config.ALLOWED_ORIGINS:
         CORSMiddleware,
         allow_origins=config.ALLOWED_ORIGINS,
         allow_credentials=True,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["*"],
     )
 
@@ -82,6 +83,29 @@ def _get_db_optional():
 _AUTH = [Depends(security.check_api_key), Depends(security.rate_limit)]
 
 
+def _current_user_id_from_jwt(authorization: str = Header(default="")) -> int | None:
+    """Soft version of auth.get_current_user_id: returns the verified
+    user id from a Bearer JWT if one was sent, or None if the caller
+    isn't using JWT auth at all (e.g. a direct /docs test with only an
+    X-API-Key). Only raises if a token WAS sent but is invalid/expired -
+    an absent token is not an error here, an invalid one is."""
+    if not authorization.startswith("Bearer "):
+        return None
+    return decode_token(authorization.removeprefix("Bearer ").strip())
+
+
+def _assert_task_owner(task_user_id: int | None, current_user_id: int | None):
+    """Security fix: previously ANY task_id could be paused/resumed/read
+    by anyone who guessed or enumerated it - task ids are sequential
+    integers, so this was genuinely walkable. Now, whenever we know both
+    who owns the task and who's asking (i.e. the caller sent a real JWT),
+    we enforce that they match. If either side is unknown (no DB, or the
+    caller used API-key-only auth with no user context), we skip the
+    check rather than break existing non-user-scoped usage."""
+    if task_user_id is not None and current_user_id is not None and task_user_id != current_user_id:
+        raise HTTPException(status_code=403, detail="This task belongs to a different user.")
+
+
 class InstructionRequest(BaseModel):
     instruction: str
     user_id: int | None = None
@@ -103,10 +127,10 @@ class PreferenceRequest(BaseModel):
 def start_task(
     req: InstructionRequest,
     db: Session = Depends(_get_db_optional),
-    x_xelora_user_id: str = Header(default=""),
+    jwt_user_id: int | None = Depends(_current_user_id_from_jwt),
 ):
     global _next_local_id
-    user_id = int(x_xelora_user_id) if x_xelora_user_id else req.user_id
+    user_id = jwt_user_id if jwt_user_id is not None else req.user_id
     user_prefs = get_all_preferences(db, user_id) if (db and user_id) else {}
 
     task = AgentTask(req.instruction, user_id=user_id, workbook_name=req.workbook_name)
@@ -114,7 +138,7 @@ def start_task(
     db_task_id = None
     if db is not None:
         from models import Task
-        db_task = Task(user_id=user_id, instruction=req.instruction)
+        db_task = Task(user_id=user_id, instruction=req.instruction, workbook_name=req.workbook_name)
         db.add(db_task)
         db.commit()
         db.refresh(db_task)
@@ -135,6 +159,7 @@ def _start_task_in_background(task, task_id, user_id, user_preferences):
     import threading
 
     def _worker():
+        import json
         from database import SessionLocal
         db = SessionLocal() if SessionLocal is not None else None
         try:
@@ -142,8 +167,12 @@ def _start_task_in_background(task, task_id, user_id, user_preferences):
             if db is not None and task.is_done:
                 from models import Task
                 from datetime import datetime, timezone
-                db.query(Task).filter_by(id=task_id).update(
-                    {"status": "done", "completed_at": datetime.now(timezone.utc)})
+                db.query(Task).filter_by(id=task_id).update({
+                    "status": "done",
+                    "completed_at": datetime.now(timezone.utc),
+                    "transcript": json.dumps(task.chat_transcript, default=str),
+                    "raw_messages": json.dumps(task.messages, default=str),
+                })
                 db.commit()
         except Exception as e:
             task.log_step(f"Task crashed: {e}")
@@ -157,19 +186,70 @@ def _start_task_in_background(task, task_id, user_id, user_preferences):
 
 
 @app.post("/task/{task_id}/pause", dependencies=_AUTH)
-def pause_task(task_id: int):
+def pause_task(task_id: int, jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
     task = ACTIVE_TASKS.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found.")
+    _assert_task_owner(task.user_id, jwt_user_id)
     task.pause()
     return {"task_id": task_id, "is_paused": True}
 
 
-@app.post("/task/{task_id}/resume", dependencies=_AUTH)
-def resume_task(task_id: int, req: CorrectionRequest, db: Session = Depends(_get_db_optional)):
+def _reconstruct_task_from_db(task_id: int, db: Session):
+    """Rebuilds a working AgentTask from persisted DB state when the
+    server has restarted since this conversation last ran (so
+    ACTIVE_TASKS no longer has it). Needs Task.raw_messages to have been
+    saved (see main worker + providers.py's call_claude fix) - older
+    rows saved before that fix won't have it, and this returns None for
+    those (the caller falls back to a clear 404 rather than a broken
+    resume)."""
+    if db is None:
+        return None
+    from models import Task
+    row = db.query(Task).filter(Task.id == task_id).first()
+    if row is None or not row.raw_messages:
+        return None
+
+    import json
+    task = AgentTask(row.instruction, user_id=row.user_id, workbook_name=row.workbook_name)
+    task.messages = json.loads(row.raw_messages)
+    if row.transcript:
+        task.chat_transcript = json.loads(row.transcript)
+    task.is_done = True
+    ACTIVE_TASKS[task_id] = task
+    return task
+
+
+def _get_or_reconstruct_task(task_id: int, db: Session):
+    """The single lookup path /resume uses: prefer the live in-memory
+    task (has full structured_steps/progress_log for this run), fall
+    back to reconstructing one from the DB if the server restarted."""
     task = ACTIVE_TASKS.get(task_id)
+    if task is not None:
+        return task
+    return _reconstruct_task_from_db(task_id, db)
+
+
+@app.post("/task/{task_id}/resume", dependencies=_AUTH)
+def resume_task(
+    task_id: int,
+    req: CorrectionRequest,
+    db: Session = Depends(_get_db_optional),
+    jwt_user_id: int | None = Depends(_current_user_id_from_jwt),
+):
+    task = _get_or_reconstruct_task(task_id, db)
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found.")
+        raise HTTPException(
+            status_code=404,
+            detail="Task not found and could not be reconstructed - either it never "
+                   "completed a run, or it ran before persistence was enabled.",
+        )
+    _assert_task_owner(task.user_id, jwt_user_id)
+
+    if not task.is_done and not task.is_paused:
+        raise HTTPException(status_code=409, detail="This conversation is still processing the previous message.")
+    if not req.correction and task.is_done:
+        raise HTTPException(status_code=400, detail="Send a message to continue a completed conversation.")
 
     user_prefs = get_all_preferences(db, task.user_id) if (db and task.user_id) else {}
     task.resume(correction=req.correction)
@@ -180,10 +260,11 @@ def resume_task(task_id: int, req: CorrectionRequest, db: Session = Depends(_get
 
 
 @app.get("/task/{task_id}/status", dependencies=_AUTH)
-def get_status(task_id: int):
+def get_status(task_id: int, jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
     task = ACTIVE_TASKS.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found.")
+    _assert_task_owner(task.user_id, jwt_user_id)
     return {
         "task_id": task_id,
         "is_done": task.is_done,
@@ -195,10 +276,11 @@ def get_status(task_id: int):
 
 
 @app.get("/task/{task_id}/reveal", dependencies=_AUTH)
-def get_reveal_workflow(task_id: int):
+def get_reveal_workflow(task_id: int, jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
     task = ACTIVE_TASKS.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found.")
+    _assert_task_owner(task.user_id, jwt_user_id)
     return {
         "task_id": task_id,
         "workflow": reveal_workflow(task.structured_steps),
@@ -209,15 +291,119 @@ def get_reveal_workflow(task_id: int):
 
 
 @app.get("/task/{task_id}/progress", dependencies=_AUTH)
-def get_progress(task_id: int):
+def get_progress(task_id: int, jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
     task = ACTIVE_TASKS.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found.")
+    _assert_task_owner(task.user_id, jwt_user_id)
     snapshot = progress_snapshot(task.structured_steps, task.is_done, task.final_response)
     snapshot["task_id"] = task_id
     snapshot["is_paused"] = task.is_paused
     snapshot["progress_log"] = task.progress_log
     return snapshot
+
+
+@app.get("/tasks", dependencies=_AUTH)
+def list_tasks(
+    db: Session = Depends(_get_db_optional),
+    jwt_user_id: int | None = Depends(_current_user_id_from_jwt),
+):
+    if db is None:
+        raise HTTPException(status_code=400, detail="DATABASE_URL is not configured.")
+    if jwt_user_id is None:
+        raise HTTPException(status_code=401, detail="Sign in to view chat history.")
+
+    from models import Task
+    tasks = (
+        db.query(Task)
+        .filter(Task.user_id == jwt_user_id)
+        .order_by(Task.created_at.desc())
+        .limit(100)
+        .all()
+    )
+    return [
+        {
+            "id": t.id,
+            "title": (t.instruction[:80] + "…") if len(t.instruction) > 80 else t.instruction,
+            "status": t.status,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "completed_at": t.completed_at.isoformat() if t.completed_at else None,
+            "is_read": t.is_read,
+        }
+        for t in tasks
+    ]
+
+
+@app.get("/tasks/{task_id}", dependencies=_AUTH)
+def get_task_detail(
+    task_id: int,
+    db: Session = Depends(_get_db_optional),
+    jwt_user_id: int | None = Depends(_current_user_id_from_jwt),
+):
+    if db is None:
+        raise HTTPException(status_code=400, detail="DATABASE_URL is not configured.")
+    if jwt_user_id is None:
+        raise HTTPException(status_code=401, detail="Sign in to view chat history.")
+
+    import json
+    from models import Task
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    _assert_task_owner(task.user_id, jwt_user_id)
+
+    transcript = json.loads(task.transcript) if task.transcript else []
+    return {
+        "id": task.id,
+        "instruction": task.instruction,
+        "status": task.status,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+        "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+        "transcript": transcript,
+        "resumable": (task_id in ACTIVE_TASKS) or bool(task.raw_messages),
+    }
+
+
+@app.post("/tasks/{task_id}/mark-read", dependencies=_AUTH)
+def mark_task_read(
+    task_id: int,
+    db: Session = Depends(_get_db_optional),
+    jwt_user_id: int | None = Depends(_current_user_id_from_jwt),
+):
+    if db is None:
+        raise HTTPException(status_code=400, detail="DATABASE_URL is not configured.")
+
+    from models import Task
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    _assert_task_owner(task.user_id, jwt_user_id)
+
+    task.is_read = True
+    db.commit()
+    return {"id": task_id, "is_read": True}
+
+
+@app.delete("/tasks/{task_id}", dependencies=_AUTH)
+def delete_task(
+    task_id: int,
+    db: Session = Depends(_get_db_optional),
+    jwt_user_id: int | None = Depends(_current_user_id_from_jwt),
+):
+    if db is None:
+        raise HTTPException(status_code=400, detail="DATABASE_URL is not configured.")
+
+    from models import ActionLog, Task
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    _assert_task_owner(task.user_id, jwt_user_id)
+
+    db.query(ActionLog).filter(ActionLog.task_id == task_id).delete(synchronize_session=False)
+    db.delete(task)
+    db.commit()
+    ACTIVE_TASKS.pop(task_id, None)
+    return {"id": task_id, "deleted": True}
 
 
 @app.post("/preferences", dependencies=_AUTH)

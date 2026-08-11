@@ -2,9 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
 import { backendFetch } from '@/lib/backend';
 import { applyOAuthStateCookie } from '@/lib/session';
+import { getOAuthOrigin, oauthFailureMessage } from '@/lib/oauth';
 
 export async function GET(req: NextRequest) {
-  const origin = req.nextUrl.origin;
+  const origin = getOAuthOrigin(req);
   const redirectUri = `${origin}/api/auth/google/callback`;
   const state = randomUUID();
 
@@ -13,7 +14,7 @@ export async function GET(req: NextRequest) {
   );
 
   if (!result.ok || !('url' in result.data)) {
-    const message = (result.data as { detail?: string })?.detail || 'Google sign-in is not available right now.';
+    const message = oauthFailureMessage(result.data, 'Google sign-in is not available right now.');
     return NextResponse.redirect(`${origin}/login?error=${encodeURIComponent(message)}`);
   }
 

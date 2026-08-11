@@ -60,7 +60,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       <div className="flex flex-1 flex-col overflow-hidden">
         {!isChatWorkspace && <Topbar />}
         <main
-          className={cn('flex-1 overflow-y-auto', isChatWorkspace ? 'bg-[#fcfcfb]' : 'bg-xelora-bg-main p-4 sm:p-6')}
+          className={cn('flex-1 overflow-y-auto', isChatWorkspace ? 'bg-xelora-surface' : 'bg-xelora-bg-main p-4 sm:p-6')}
           id="main-content"
         >
           {children}

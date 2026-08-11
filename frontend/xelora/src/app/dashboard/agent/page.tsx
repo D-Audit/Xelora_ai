@@ -1,16 +1,22 @@
+
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { toast } from 'sonner';
 import {
   ArrowUp, Loader2, Pause, Play, Bot, User, AlertTriangle, ArrowUpRight,
   MonitorSpeaker, Plus, Paperclip, X, Sparkles,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { XeloraLogo } from '@/components/ui/xelora-logo';
 import { isDesktopApp } from '@/lib/is-desktop';
 import { useAuthStore } from '@/stores/auth-store';
-import { startTask, getTaskProgress, pauseTask, resumeTask, getTaskReveal } from '@/services/agent';
+import {
+  startTask, getTaskProgress, pauseTask, resumeTask, getTaskReveal,
+  getChat,
+} from '@/services/agent';
 import { uploadFile } from '@/services/workspace';
 import type { TaskProgressResponse } from '@/services/agent';
 import type { FileItem } from '@/services/workspace';
@@ -29,6 +35,8 @@ type ChatMessage =
   | { id: string; role: 'agent'; taskId: number; steps: string[]; currentTask?: string; response?: string; status: 'running' | 'paused' | 'done' | 'error'; error?: string };
 
 export default function AgentPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   // Client-only check - starts null (renders nothing) to avoid a
   // flash of the wrong state before we know if we're in the desktop
   // wrapper or a browser tab.
@@ -47,11 +55,29 @@ export default function AgentPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Bug fix (the core one): every message used to call startTask() and
+  // create a BRAND NEW backend AgentTask, with zero memory of anything
+  // said before - "it doesn't feel like it's continuing to talk" is
+  // exactly that. currentTaskId now tracks the single ongoing backend
+  // task for this chat session; follow-up messages call resumeTask()
+  // against it instead of starting fresh, so the AI actually sees the
+  // whole conversation, not just the latest line.
+  const [currentTaskId, setCurrentTaskId] = useState<number | null>(null);
+
+  const [openingChatId, setOpeningChatId] = useState<number | null>(null);
+  // Records the route we have already hydrated. Without this, changing the
+  // URL immediately after POST /task can fetch the not-yet-persisted DB
+  // transcript and overwrite the optimistic message on screen with [].
+  const hydratedRouteRef = useRef<string | null>(null);
+  const chatRequestRef = useRef(0);
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  const refreshChatList = () => window.dispatchEvent(new Event('xelora:chats-updated'));
 
   const updateAgentMessage = (id: string, patch: Partial<Extract<ChatMessage, { role: 'agent' }>>) => {
     setMessages((current) =>
@@ -61,7 +87,7 @@ export default function AgentPage() {
 
   const pollProgress = (messageId: string, taskId: number) => {
     if (pollRef.current) clearInterval(pollRef.current);
-    pollRef.current = setInterval(async () => {
+    const checkProgress = async () => {
       try {
         const data: TaskProgressResponse = await getTaskProgress(taskId);
         const stepNames = (data.completed_actions ?? []).map((s) => s.tool_name);
@@ -73,12 +99,17 @@ export default function AgentPage() {
         if (data.is_done) {
           if (pollRef.current) clearInterval(pollRef.current);
           updateAgentMessage(messageId, { status: 'done', response: data.final_response ?? undefined });
+          refreshChatList(); // this conversation just changed - refresh its entry (title/status) in the sidebar
         }
       } catch {
         if (pollRef.current) clearInterval(pollRef.current);
         updateAgentMessage(messageId, { status: 'error', error: 'Lost connection while checking progress.' });
       }
-    }, POLL_INTERVAL_MS);
+    };
+    // Do not leave a completed reply stuck in the terminal while the UI
+    // waits for its first interval tick.
+    void checkProgress();
+    pollRef.current = setInterval(() => { void checkProgress(); }, POLL_INTERVAL_MS);
   };
 
   const handleAttachClick = () => fileInputRef.current?.click();
@@ -99,14 +130,118 @@ export default function AgentPage() {
     }
   };
 
+  const startNewChat = () => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    setCurrentTaskId(null);
+    setMessages([]);
+    setAttachedFile(null);
+    setInput('');
+  };
+
+  const openChat = async (chatId: number) => {
+    if (openingChatId !== null) return;
+    hydratedRouteRef.current = `chat:${chatId}`;
+    const requestId = ++chatRequestRef.current;
+    setOpeningChatId(chatId);
+    if (pollRef.current) clearInterval(pollRef.current);
+    try {
+      const chat = await getChat(chatId);
+      const transcript = Array.isArray(chat.transcript) ? chat.transcript : [];
+      const savedTurns = transcript.length > 0
+        ? transcript
+        // Conversations created before transcript persistence was fixed
+        // still need to open. Show their original request rather than
+        // dropping back to the blank welcome screen.
+        : [{ role: 'user' as const, text: chat.instruction, timestamp: chat.created_at ?? new Date().toISOString() }];
+      const restored: ChatMessage[] = savedTurns.map((turn, i) => (
+        turn.role === 'user'
+          ? { id: `${chatId}-${i}-u`, role: 'user', text: turn.text }
+          : { id: `${chatId}-${i}-a`, role: 'agent', taskId: chatId, steps: [], response: turn.text, status: 'done' }
+      ));
+      // Ignore a slow response for a conversation the user has since left.
+      if (requestId !== chatRequestRef.current) return;
+      setMessages(restored);
+      // Only treat this as the "live" task if the server's in-memory
+      // state actually still has it (see backend GET /tasks/{id}'s
+      // `resumable` field) - otherwise the next message below will
+      // gracefully fall back to starting a fresh task instead of
+      // hitting a 404 on /resume.
+      setCurrentTaskId(chat.resumable ? chat.id : null);
+      if (!chat.resumable) {
+        toast.info('This conversation ended in a previous session - sending a new message will start a fresh one.');
+      }
+
+      // A task can finish before its worker commits the transcript. Recover
+      // its live state for both running and finished tasks: otherwise a fast
+      // reply can be printed by the backend but the chat restores only the
+      // user's message after the route changes or a page reload.
+      if (chat.resumable && transcript.every((turn) => turn.role !== 'assistant')) {
+        try {
+          const progress = await getTaskProgress(chatId);
+          const recoveredResponse = progress.final_response;
+          if (requestId !== chatRequestRef.current) return;
+          setMessages((current) => [
+            ...current,
+            {
+              id: `${chatId}-recovered-response`, role: 'agent', taskId: chatId,
+              steps: (progress.completed_actions ?? []).map((step) => step.tool_name),
+              currentTask: progress.is_done ? undefined : progress.current_task,
+              response: recoveredResponse ?? undefined,
+              status: progress.is_done ? 'done' : 'running',
+            },
+          ]);
+          if (!progress.is_done && !progress.is_paused) {
+            pollProgress(`${chatId}-recovered-response`, chatId);
+          }
+        } catch {
+          // The persisted user turn remains visible; retrying later will use
+          // the transcript once the worker has committed it.
+        }
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not open that conversation.');
+    } finally {
+      setOpeningChatId(null);
+    }
+  };
+
+  useEffect(() => {
+    const chatId = Number(searchParams.get('chat'));
+    if (Number.isInteger(chatId) && chatId > 0) {
+      // The newly-created task is already represented by optimistic UI
+      // messages. Do not replace it with the database transcript until the
+      // worker has finished persisting that transcript.
+      if (chatId === currentTaskId && messages.length > 0) {
+        hydratedRouteRef.current = `chat:${chatId}`;
+        return;
+      }
+      if (hydratedRouteRef.current === `chat:${chatId}`) return;
+      openChat(chatId);
+      return;
+    }
+
+    if (searchParams.get('new') === '1' && hydratedRouteRef.current !== 'new') {
+      hydratedRouteRef.current = 'new';
+      ++chatRequestRef.current;
+      startNewChat();
+    }
+  }, [searchParams, currentTaskId, messages.length]);
+
   const sendMessage = async (text: string) => {
-    if (!text.trim() || isSending) return;
+    if (!text.trim() || isSending || conversationBusy) return;
 
     setInput('');
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
 
     const userMsgId = `u-${Date.now()}`;
-    setMessages((current) => [...current, { id: userMsgId, role: 'user', text, attachment: attachedFile?.name }]);
+    const agentMsgId = `a-${Date.now()}`;
+    // Add the assistant bubble before the network request. This keeps the
+    // conversation visible even when the backend completes very quickly.
+    setMessages((current) => [
+      ...current,
+      { id: userMsgId, role: 'user', text, attachment: attachedFile?.name },
+      { id: agentMsgId, role: 'agent', taskId: -1, steps: [], status: 'running' },
+    ]);
     setIsSending(true);
 
     // The agent controls whichever Excel workbook is already open on
@@ -115,30 +250,59 @@ export default function AgentPage() {
     // name and hints which open window to target if one shares that
     // name; open the file in Excel yourself for the agent to act on
     // it directly.
+    const requestedText = text.trim();
+    // "use your own data" means the data already open in Excel, not that
+    // the model should invent data. Expand this common short reply into an
+    // unambiguous instruction before it reaches the backend.
+    const useOpenWorkbook = /^(use|work with|use data from) (your |the )?(own |existing )?(data|workbook|spreadsheet)$/i.test(requestedText);
     const instruction = attachedFile
-      ? `Regarding the file "${attachedFile.name}": ${text.trim()}`
-      : text.trim();
+      ? `Regarding the file "${attachedFile.name}": ${requestedText}`
+      : useOpenWorkbook
+        ? 'Use the data in the active Excel workbook already open on my computer. Inspect the workbook first, then continue the report requested above using its real data. Do not ask me to paste data unless no workbook or usable data is open.'
+        : requestedText;
     const workbookHint = attachedFile?.name;
     setAttachedFile(null);
 
     try {
-      const res = await startTask(instruction, workbookHint);
-      const agentMsgId = `a-${Date.now()}`;
-      setMessages((current) => [
-        ...current,
-        { id: agentMsgId, role: 'agent', taskId: res.task_id, steps: [], status: 'running' },
-      ]);
-      pollProgress(agentMsgId, res.task_id);
+      if (currentTaskId !== null) {
+        // Continuing THIS conversation - the fix for "doesn't feel like
+        // it's still talking to me": reuse the same backend task so the
+        // AI actually has the prior turns in context.
+        try {
+          await resumeTask(currentTaskId, instruction);
+          updateAgentMessage(agentMsgId, { taskId: currentTaskId, status: 'running' });
+          pollProgress(agentMsgId, currentTaskId);
+        } catch (err) {
+          // A running task is not a lost conversation. Starting a new task
+          // for this case is exactly how chat context used to be discarded.
+          if (err instanceof Error && err.message.includes('still processing')) {
+            throw err;
+          }
+          // The previous task's in-memory state is gone (server restarted
+          // since) - fall back to a fresh task rather than dead-ending.
+          toast.info('That earlier session had ended - continuing as a new conversation.');
+          const res = await startTask(instruction, workbookHint);
+          setCurrentTaskId(res.task_id);
+          hydratedRouteRef.current = `chat:${res.task_id}`;
+          router.replace(`/dashboard/agent?chat=${res.task_id}`);
+          updateAgentMessage(agentMsgId, { taskId: res.task_id, status: 'running' });
+          pollProgress(agentMsgId, res.task_id);
+        }
+      } else {
+        const res = await startTask(instruction, workbookHint);
+        setCurrentTaskId(res.task_id);
+        hydratedRouteRef.current = `chat:${res.task_id}`;
+        router.replace(`/dashboard/agent?chat=${res.task_id}`);
+        updateAgentMessage(agentMsgId, { taskId: res.task_id, status: 'running' });
+        pollProgress(agentMsgId, res.task_id);
+      }
+      refreshChatList();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not start the task.';
       // A 402/403 from the backend's plan-limit middleware lands here -
       // this is the real, server-enforced subscription protection,
       // shown inline in the chat rather than a silent failure.
-      const agentMsgId = `a-${Date.now()}`;
-      setMessages((current) => [
-        ...current,
-        { id: agentMsgId, role: 'agent', taskId: -1, steps: [], status: 'error', error: message },
-      ]);
+      updateAgentMessage(agentMsgId, { status: 'error', error: message });
     } finally {
       setIsSending(false);
     }
@@ -201,6 +365,13 @@ export default function AgentPage() {
   }
 
   const hasMessages = messages.length > 0;
+  const welcomeComposer = !hasMessages;
+  // A conversation has one ordered agent loop. Letting the user submit a
+  // second turn while the first is executing creates concurrent /resume
+  // calls and can make the later turn appear to lose context.
+  const conversationBusy = messages.some(
+    (message) => message.role === 'agent' && (message.status === 'running' || message.status === 'paused')
+  );
 
   const attachmentChip = attachedFile && (
     <div className="mb-2 flex w-fit items-center gap-2 rounded-lg border border-xelora-border bg-xelora-surface-2 px-3 py-1.5 text-xs text-xelora-text">
@@ -213,9 +384,9 @@ export default function AgentPage() {
   );
 
   const inputBar = (
-    <div className="mx-auto w-full max-w-3xl">
+    <div className={`mx-auto w-full ${welcomeComposer ? 'max-w-5xl' : 'max-w-3xl'}`}>
       {attachmentChip}
-      <div className="flex items-end gap-2 rounded-2xl border border-xelora-border bg-white p-2 shadow-sm transition-shadow focus-within:border-xelora-green focus-within:shadow-md">
+      <div className={`xelora-chat-composer flex items-end gap-2 border border-xelora-border bg-white p-3 shadow-sm ${welcomeComposer ? 'min-h-36 rounded-[28px]' : 'rounded-2xl p-2'}`}>
         <input ref={fileInputRef} type="file" className="hidden" accept=".xlsx,.xls,.csv,.ods,.tsv" onChange={handleFileSelected} />
         <Button
           size="icon"
@@ -232,20 +403,20 @@ export default function AgentPage() {
           value={input}
           onChange={(e) => { setInput(e.target.value); autoGrow(e.target); }}
           onKeyDown={handleKeyDown}
-          placeholder="Message Xelora…"
-          rows={1}
-          className="max-h-[200px] min-h-[28px] flex-1 resize-none bg-transparent px-1 py-1.5 text-sm text-xelora-text outline-none placeholder:text-xelora-text-muted"
+          placeholder={welcomeComposer ? 'How can Xelora help with your workbook today?' : 'Message Xelora…'}
+          rows={welcomeComposer ? 3 : 1}
+          className={`max-h-[200px] flex-1 resize-none bg-transparent px-2 py-2 text-xelora-text outline-none ring-0 focus:outline-none focus-visible:outline-none focus-visible:ring-0 placeholder:text-xelora-text-muted ${welcomeComposer ? 'min-h-24 text-lg' : 'min-h-[28px] text-sm'}`}
         />
         <Button
           size="icon"
           onClick={() => sendMessage(input)}
-          disabled={isSending || !input.trim()}
-          className="flex-shrink-0 rounded-full"
+          disabled={isSending || conversationBusy || !input.trim()}
+          className={`flex-shrink-0 rounded-full ${welcomeComposer ? 'h-11 w-11' : ''}`}
         >
           {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
         </Button>
       </div>
-      <p className="mt-2 text-center text-xs text-xelora-text-muted">
+      <p className="mt-3 text-center text-xs text-xelora-text-muted">
         Excel is only changed when you explicitly ask for a workbook action.
       </p>
     </div>
@@ -255,119 +426,121 @@ export default function AgentPage() {
     // Empty state: centered greeting + input, quick actions below -
     // shown once, before the first message.
     return (
-      <div className="flex h-screen flex-col items-center justify-center gap-6 px-4">
-        <div className="flex flex-col items-center gap-3 text-center">
-          <Sparkles className="h-8 w-8 text-xelora-green" />
-          <h1 className="text-3xl font-semibold tracking-tight text-xelora-text">
-            What can I help you do{user?.name ? `, ${user.name.split(' ')[0]}` : ''}?
-          </h1>
-        </div>
-        {inputBar}
-        <div className="flex flex-wrap justify-center gap-2">
-          {QUICK_ACTIONS.map((action) => (
-            <button
-              key={action.label}
-              onClick={() => setInput(action.instruction)}
-              className="rounded-full border border-xelora-border bg-white px-4 py-2 text-sm text-xelora-text-secondary transition-colors hover:bg-xelora-surface-2"
-            >
-              {action.label}
-            </button>
-          ))}
-        </div>
+      <div className="flex h-full flex-col items-center justify-center gap-8 px-6 pb-20">
+          <div className="flex w-full max-w-5xl flex-col gap-4 text-left">
+            <XeloraLogo size="lg" showWordmark={false} />
+            <h1 className="max-w-4xl text-4xl font-semibold tracking-[-0.035em] text-xelora-text sm:text-5xl">
+              What can we build together{user?.name ? `, ${user.name.split(' ')[0]}` : ''}?
+            </h1>
+          </div>
+          {inputBar}
+          <div className="flex w-full max-w-5xl flex-wrap gap-2">
+            {QUICK_ACTIONS.map((action) => (
+              <button
+                key={action.label}
+                onClick={() => setInput(action.instruction)}
+                className="rounded-lg border border-xelora-border bg-white px-4 py-2.5 text-sm font-medium text-xelora-text-secondary transition-colors hover:border-xelora-green/40 hover:bg-xelora-success-bg hover:text-xelora-green"
+              >
+                {action.label}
+              </button>
+            ))}
+          </div>
       </div>
     );
   }
 
   return (
-    <div className="flex h-screen flex-col">
-      <header className="flex h-14 flex-shrink-0 items-center border-b border-xelora-border px-5">
-        <div className="flex items-center gap-2 text-sm font-medium text-xelora-text"><Sparkles className="h-4 w-4 text-xelora-green" /> Xelora</div>
-        <span className="ml-2 text-sm text-xelora-text-muted">New task</span>
-      </header>
-      <div className="flex-1 overflow-y-auto px-4 py-8">
-        <div className="mx-auto flex max-w-3xl flex-col gap-7">
-          {messages.map((msg) =>
-            msg.role === 'user' ? (
-              <div key={msg.id} className="flex justify-end gap-3">
-                <div className="max-w-[85%] space-y-1.5">
-                  {msg.attachment && (
-                    <div className="ml-auto flex w-fit items-center gap-1.5 rounded-lg bg-white/15 px-2.5 py-1 text-xs text-white">
-                      <Paperclip className="h-3 w-3" /> {msg.attachment}
+    <div className="flex h-full flex-col">
+        <header className="flex h-14 flex-shrink-0 items-center gap-3 border-b border-xelora-border px-5">
+          <div className="flex items-center gap-2 text-sm font-medium text-xelora-text"><Sparkles className="h-4 w-4 text-xelora-green" /> Xelora</div>
+          <span className="ml-2 text-sm text-xelora-text-muted">
+            {currentTaskId !== null ? `Conversation #${currentTaskId}` : 'New task'}
+          </span>
+        </header>
+        <div className="flex-1 overflow-y-auto px-4 py-8">
+          <div className="mx-auto flex max-w-3xl flex-col gap-7">
+            {messages.map((msg) =>
+              msg.role === 'user' ? (
+                <div key={msg.id} className="flex justify-end gap-3">
+                  <div className="max-w-[85%] space-y-1.5">
+                    {msg.attachment && (
+                      <div className="ml-auto flex w-fit items-center gap-1.5 rounded-lg bg-white/15 px-2.5 py-1 text-xs text-white">
+                        <Paperclip className="h-3 w-3" /> {msg.attachment}
+                      </div>
+                    )}
+                    <div className="rounded-2xl rounded-tr-sm bg-xelora-green px-4 py-2.5 text-sm text-white">
+                      {msg.text}
                     </div>
-                  )}
-                  <div className="rounded-2xl rounded-tr-sm bg-xelora-green px-4 py-2.5 text-sm text-white">
-                    {msg.text}
+                  </div>
+                  <div className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-xelora-surface-2">
+                    <User className="h-4 w-4 text-xelora-text-secondary" />
                   </div>
                 </div>
-                <div className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-xelora-surface-2">
-                  <User className="h-4 w-4 text-xelora-text-secondary" />
-                </div>
-              </div>
-            ) : (
-              <div key={msg.id} className="flex gap-3">
-                <div className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-xelora-success-bg">
-                  <Bot className="h-4 w-4 text-xelora-green" />
-                </div>
-                <div className="max-w-[85%] flex-1 space-y-2">
-                  {msg.status === 'error' ? (
-                    <div className="flex items-start gap-2 rounded-2xl rounded-tl-sm border border-xelora-error/30 bg-xelora-error-bg px-4 py-3 text-sm">
-                      <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-xelora-error" />
-                      <div>
-                        <p className="text-xelora-text">{msg.error}</p>
-                        <Link href="/dashboard/billing/plans" className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-xelora-green hover:underline">
-                          Upgrade plan <ArrowUpRight className="h-3 w-3" />
-                        </Link>
+              ) : (
+                <div key={msg.id} className="flex gap-3">
+                  <div className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-xelora-success-bg">
+                    <Bot className="h-4 w-4 text-xelora-green" />
+                  </div>
+                  <div className="max-w-[85%] flex-1 space-y-2">
+                    {msg.status === 'error' ? (
+                      <div className="flex items-start gap-2 rounded-2xl rounded-tl-sm border border-xelora-error/30 bg-xelora-error-bg px-4 py-3 text-sm">
+                        <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-xelora-error" />
+                        <div>
+                          <p className="text-xelora-text">{msg.error}</p>
+                          <Link href="/dashboard/billing/plans" className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-xelora-green hover:underline">
+                            Upgrade plan <ArrowUpRight className="h-3 w-3" />
+                          </Link>
+                        </div>
                       </div>
-                    </div>
-                  ) : (
-                    <div className="rounded-2xl rounded-tl-sm bg-xelora-surface-2 px-4 py-3 text-sm">
-                      {msg.steps.length === 0 && !msg.currentTask ? (
-                        <p className="flex items-center gap-2 text-xelora-text-muted">
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" /> Thinking…
-                        </p>
-                      ) : (
-                        <ul className="space-y-1.5">
-                          {msg.steps.map((step, i) => (
-                            <li key={i} className="flex items-center gap-2 text-xelora-text">
-                              <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-xelora-green" />
-                              {step}
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                      {msg.status === 'running' && msg.currentTask && (
-                        <p className="mt-2 flex items-center gap-2 text-xs text-xelora-text-muted">
-                          <Loader2 className="h-3 w-3 animate-spin" /> {msg.currentTask}
-                        </p>
-                      )}
-                      {msg.status === 'done' && (
-                        <>
-                          {msg.response && <p className="mt-3 whitespace-pre-wrap text-xelora-text">{msg.response}</p>}
-                          <p className="mt-2 text-xs font-medium text-xelora-success">Done.</p>
-                        </>
-                      )}
-                      {msg.status === 'paused' && (
-                        <p className="mt-2 text-xs font-medium text-xelora-warning">Paused.</p>
-                      )}
-                    </div>
-                  )}
-                  {(msg.status === 'running' || msg.status === 'paused') && (
-                    <Button size="sm" variant="outline" onClick={() => handlePauseResume(msg)}>
-                      {msg.status === 'running' ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-                      {msg.status === 'running' ? 'Pause' : 'Resume'}
-                    </Button>
-                  )}
+                    ) : (
+                      <div className="rounded-2xl rounded-tl-sm bg-xelora-surface-2 px-4 py-3 text-sm">
+                        {msg.steps.length === 0 && !msg.currentTask && msg.status === 'running' ? (
+                          <p className="flex items-center gap-2 text-xelora-text-muted">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" /> Thinking…
+                          </p>
+                        ) : (
+                          <ul className="space-y-1.5">
+                            {msg.steps.map((step, i) => (
+                              <li key={i} className="flex items-center gap-2 text-xelora-text">
+                                <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-xelora-green" />
+                                {step}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        {msg.status === 'running' && msg.currentTask && (
+                          <p className="mt-2 flex items-center gap-2 text-xs text-xelora-text-muted">
+                            <Loader2 className="h-3 w-3 animate-spin" /> {msg.currentTask}
+                          </p>
+                        )}
+                        {msg.status === 'done' && (
+                          <>
+                            {msg.response && <p className="mt-3 whitespace-pre-wrap text-xelora-text">{msg.response}</p>}
+                            <p className="mt-2 text-xs font-medium text-xelora-success">Done.</p>
+                          </>
+                        )}
+                        {msg.status === 'paused' && (
+                          <p className="mt-2 text-xs font-medium text-xelora-warning">Paused.</p>
+                        )}
+                      </div>
+                    )}
+                    {(msg.status === 'running' || msg.status === 'paused') && (
+                      <Button size="sm" variant="outline" onClick={() => handlePauseResume(msg)}>
+                        {msg.status === 'running' ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                        {msg.status === 'running' ? 'Pause' : 'Resume'}
+                      </Button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            )
-          )}
-          <div ref={bottomRef} />
+              )
+            )}
+            <div ref={bottomRef} />
+          </div>
         </div>
-      </div>
 
-      <div className="border-t border-xelora-border bg-[#fcfcfb] p-4">
-        {inputBar}
-      </div>
+        <div className="border-t border-xelora-border bg-[#fcfcfb] p-4">
+          {inputBar}
+        </div>
     </div>
   );
 }

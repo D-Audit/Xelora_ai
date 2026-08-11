@@ -20,6 +20,7 @@ RESPONSIVENESS_TIMEOUT_SECONDS = 20
 RESPONSIVENESS_POLL_INTERVAL = 1
 
 _DYNAMIC_ARRAY_SUPPORT_CACHE = {}  # keyed by app.pid - avoids re-probing every single call
+_EXCEL_CAPABILITY_CACHE = {}  # keyed by app.pid; safe to reuse for one Excel process
 
 
 def bind_workbook_context(workbook_name: str | None):
@@ -96,6 +97,46 @@ def supports_dynamic_arrays(app) -> bool:
 
     _DYNAMIC_ARRAY_SUPPORT_CACHE[app.pid] = supported
     return supported
+
+
+def get_excel_capabilities(wb=None) -> dict:
+    """Return a capability profile for the *running* Excel instance.
+
+    ``Application.Version`` alone is deliberately not treated as an edition:
+    Excel 2016, 2019, 2021 and Microsoft 365 can all report 16.0.  We retain
+    that diagnostic value, but use a live formula probe for feature decisions.
+    The profile is cached per process and can be passed to the planner.
+    """
+    wb = wb or get_active_workbook()
+    app = wb.app
+    if app.pid in _EXCEL_CAPABILITY_CACHE:
+        return _EXCEL_CAPABILITY_CACHE[app.pid]
+
+    def _read_api(name):
+        try:
+            return str(getattr(app.api, name))
+        except Exception:
+            return None
+
+    dynamic_arrays = supports_dynamic_arrays(app)
+    profile = {
+        "application_version": _read_api("Version"),
+        "application_build": _read_api("Build"),
+        "dynamic_arrays": dynamic_arrays,
+        "xlookup": dynamic_arrays,
+        "let": dynamic_arrays,
+        "modern_formula_support": dynamic_arrays,
+        "formula_mode": "Formula2" if dynamic_arrays else "legacy Formula",
+        "planning_rule": (
+            "Modern dynamic-array functions are supported."
+            if dynamic_arrays else
+            "Use legacy-compatible formulas only: INDEX/MATCH, helper columns, "
+            "SUMIFS/COUNTIFS, and ordinary ranges. Do not use XLOOKUP, LET, "
+            "FILTER, UNIQUE, SORT, SEQUENCE, RANDARRAY, HSTACK, or VSTACK."
+        ),
+    }
+    _EXCEL_CAPABILITY_CACHE[app.pid] = profile
+    return profile
 
 
 def _ensure_workbook_has_path(wb):
