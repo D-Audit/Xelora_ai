@@ -1,7 +1,3 @@
-// Xelora shared TypeScript types
-// These types are designed to be shared between the web app and future desktop app
-
-// ─── User & Auth ─────────────────────────────────────────────────────────────
 
 export type UserRole = 'owner' | 'administrator' | 'editor' | 'operator' | 'viewer';
 
