@@ -27,10 +27,6 @@ from sklearn.metrics.pairwise import cosine_similarity
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# Same pattern as skills/excel_shared.py's workbook binding: the AI
-# shouldn't have to supply (or guess) a user_id when calling
-# search_knowledge_base mid-task - agent/core.py binds the real one
-# once per task, and the skill just reads it from here.
 _CURRENT_USER_ID = contextvars.ContextVar("current_user_id_for_kb", default=None)
 
 

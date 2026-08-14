@@ -15,8 +15,6 @@ def run(sheet_name: str, start_cell: str, headers: list, rows: list, table_name:
     wb = get_active_workbook()
     sheet = wb.sheets[sheet_name]
 
-    # Activate the sheet before writing - same fix as insert_formula, and
-    # cheap insurance against the same class of "sheet not active" issues.
     sheet.activate()
 
     start = sheet.range(start_cell)

@@ -11,7 +11,6 @@ USER_ID = 1
 def test_learning_system():
     print("🧪 Testing Automatic Learning System\n")
     
-    # Test 1: Submit a task that should trigger learning
     print("1️⃣  Submitting a task with 'dashboard' and 'professional' keywords...")
     task_data = {
         "instruction": "Create a professional sales dashboard with revenue chart",
@@ -24,7 +23,6 @@ def test_learning_system():
         task_id = resp.json()["task_id"]
         print(f"   ✅ Task {task_id} started\n")
         
-        # Wait for task to complete
         print("2️⃣  Waiting for task to complete...")
         while True:
             status_resp = requests.get(f"{BASE_URL}/task/{task_id}/progress")
@@ -33,7 +31,6 @@ def test_learning_system():
                 break
             time.sleep(2)
         
-        # Test 2: Check what was learned
         print("3️⃣  Checking what the system learned...")
         time.sleep(1)  # Give auto-learning a moment
         

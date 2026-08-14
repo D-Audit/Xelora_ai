@@ -36,9 +36,6 @@ export default function LoginPage() {
   const router = useRouter();
 
   useEffect(() => {
-    // Reads the URL directly (rather than next/navigation's
-    // useSearchParams) so this page doesn't need a Suspense boundary
-    // just to show an OAuth error toast.
     const params = new URLSearchParams(window.location.search);
     const error = params.get('error');
     if (error) {
@@ -74,7 +71,6 @@ export default function LoginPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      {/* Logo */}
       <div className="flex justify-center">
         <Link href="/" aria-label="Go to homepage">
           <XeloraLogo size="lg" />
@@ -93,7 +89,6 @@ export default function LoginPage() {
 
         <CardContent>
           <form onSubmit={handleSubmit(onSubmit)} noValidate className="flex flex-col gap-4">
-            {/* Email */}
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="email">Email</Label>
               <Input
@@ -109,7 +104,6 @@ export default function LoginPage() {
               )}
             </div>
 
-            {/* Password */}
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="password">Password</Label>
               <div className="relative">
@@ -136,7 +130,6 @@ export default function LoginPage() {
               )}
             </div>
 
-            {/* Remember me + Forgot password */}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Checkbox
@@ -158,7 +151,6 @@ export default function LoginPage() {
               </Link>
             </div>
 
-            {/* Submit */}
             <Button
               type="submit"
               variant="default"
@@ -171,14 +163,12 @@ export default function LoginPage() {
             </Button>
           </form>
 
-          {/* Divider */}
           <div className="flex items-center gap-3 my-4">
             <div className="flex-1 h-px bg-xelora-border" />
             <span className="text-xs text-xelora-text-muted">or continue with</span>
             <div className="flex-1 h-px bg-xelora-border" />
           </div>
 
-          {/* OAuth buttons */}
           <div className="flex flex-col gap-2">
             <Button
               variant="outline"
@@ -225,7 +215,6 @@ export default function LoginPage() {
             </Button>
           </div>
 
-          {/* Register link */}
           <p className="text-center text-sm text-xelora-text-secondary mt-4">
             Don&apos;t have an account?{' '}
             <Link href="/register" className="text-xelora-green font-medium hover:underline">

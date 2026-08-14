@@ -74,7 +74,6 @@ body {
   line-height: 1.5;
 }
 
-/* Interactive controls should communicate that they can be activated. */
 a[href], button:not(:disabled), [role="button"]:not([aria-disabled="true"]), summary {
   cursor: pointer;
 }
@@ -96,7 +95,6 @@ a[href], button:not(:disabled), [role="button"]:not([aria-disabled="true"]), sum
 .dark ::-webkit-scrollbar-thumb { background: #4B6159; }
 .dark ::-webkit-scrollbar-thumb:hover { background: #83958E; }
 
-/* Focus styles */
 :focus-visible {
   outline: 2px solid #00684A;
   outline-offset: 2px;
@@ -116,7 +114,6 @@ a[href], button:not(:disabled), [role="button"]:not([aria-disabled="true"]), sum
   box-shadow: none !important;
 }
 
-/* Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -132,7 +129,6 @@ a[href], button:not(:disabled), [role="button"]:not([aria-disabled="true"]), sum
   background: #5C6C75;
 }
 
-/* Reduced motion */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

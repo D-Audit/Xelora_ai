@@ -43,7 +43,6 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-# --- schemas -------------------------------------------------------------
 
 class RegisterRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
@@ -64,15 +63,12 @@ class AuthResponse(BaseModel):
     user: dict
 
 
-# --- helpers ---------------------------------------------------------------
 
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
 
 def verify_password(password: str, password_hash: str) -> bool:
-    # OAuth accounts do not have a local password.  Avoid passing their
-    # deliberate marker to bcrypt, which would raise for a non-bcrypt hash.
     if password_hash.startswith("!oauth-only:"):
         return False
     return pwd_context.verify(password, password_hash)
@@ -138,7 +134,6 @@ def _require_db(db: Session | None) -> Session:
     return db
 
 
-# --- routes ------------------------------------------------------------
 
 @router.post("/register", response_model=AuthResponse)
 def register(req: RegisterRequest, db: Session | None = Depends(get_db_or_503)):
@@ -174,8 +169,6 @@ def register(req: RegisterRequest, db: Session | None = Depends(get_db_or_503)):
     db.refresh(user)
     db.refresh(auth_user)
 
-    # Local import to avoid a circular import at module load time
-    # (notify.py has no dependency on auth.py, so this is safe).
     from notify import notify
     notify(
         db, user.id, "account", "Welcome to Xelora",
@@ -195,7 +188,6 @@ def login(req: LoginRequest, db: Session | None = Depends(get_db_or_503)):
     auth_user = db.query(AuthUser).filter(AuthUser.id == user.id).first() if user else None
 
     if not user or not auth_user or not verify_password(req.password, auth_user.password_hash):
-        # Same error for "no such user" and "wrong password" - don't leak which.
         raise HTTPException(status_code=401, detail="Invalid email address or password.")
 
     token, expires_at = create_token(user.id)

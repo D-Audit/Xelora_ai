@@ -39,11 +39,6 @@ def run(sheet_name: str, source_range: str, row_field: str, value_field: str,
 
     source_api_range = _resolve_source_range(wb, sheet, source_range)
 
-    # Confirm the fields the AI asked for actually exist in the source
-    # BEFORE creating anything - avoids leaving a half-built pivot object
-    # behind (which is what blocked write_cell/insert_formula on
-    # unrelated cells afterward: "We can't change this part of the
-    # PivotTable.").
     try:
         header_values = [cell.Value for cell in source_api_range.Rows(1).Columns]
     except Exception:
@@ -78,9 +73,6 @@ def run(sheet_name: str, source_range: str, row_field: str, value_field: str,
         pivot_table.AddDataField(data_field, f"{agg_function.title()} of {value_field}", xl_function)
 
     except Exception as e:
-        # Clean up any partially-created pivot object instead of leaving
-        # it sitting on the sheet blocking unrelated future actions -
-        # this is the specific fix for the cascade failure seen before.
         try:
             if pivot_table is not None:
                 pivot_table.TableRange2.Clear()

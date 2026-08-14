@@ -14,8 +14,6 @@ them automatically before sending it to Excel.
 import re
 from skills.excel_shared import get_active_workbook, normalize, hex_to_rgb  # noqa: F401
 
-# Standard Excel number-format tokens that are NOT literal text and must
-# never get wrapped in quotes, even though they contain letters.
 _FORMAT_TOKENS = {
     "E", "e", "AM/PM", "am/pm", "A/P", "a/p",
     "YYYY", "YY", "MMMM", "MMM", "MM", "M", "DDDD", "DDD", "DD", "D",

@@ -38,7 +38,6 @@ export default function ForgotPasswordPage() {
   });
 
   const onSubmit = async (values: ForgotPasswordFormValues) => {
-    // Simulate API call
     await new Promise((resolve) => setTimeout(resolve, 800));
     setSubmittedEmail(values.email);
     setSubmitted(true);
@@ -46,7 +45,6 @@ export default function ForgotPasswordPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      {/* Logo */}
       <div className="flex justify-center">
         <Link href="/" aria-label="Go to homepage">
           <XeloraLogo size="lg" />
@@ -55,7 +53,6 @@ export default function ForgotPasswordPage() {
 
       <Card>
         {submitted ? (
-          /* Success state */
           <CardContent className="pt-8 pb-8">
             <div className="flex flex-col items-center gap-4 text-center">
               <div className="flex h-14 w-14 items-center justify-center rounded-full bg-xelora-success-bg">
@@ -125,7 +122,6 @@ export default function ForgotPasswordPage() {
           </>
         )}
 
-        {/* Back to login */}
         <div className="flex justify-center pb-5">
           <Link
             href="/login"

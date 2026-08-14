@@ -47,7 +47,6 @@ export function DesktopIconRail({ activeView, onViewChange, user }: Props) {
         {bottomItems.map(({ id, icon: Icon, label }) => (
           <RailButton key={id} id={id} icon={Icon} label={label} active={activeView === id} onClick={() => onViewChange(id)} />
         ))}
-        {/* User avatar */}
         <button
           className="mt-2 flex h-8 w-8 items-center justify-center rounded-full bg-xelora-green text-white text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-xelora-bright-green"
           aria-label={`User: ${user?.name ?? 'Account'}`}

@@ -49,7 +49,6 @@ export function TaskThreadWorkspace({ task, tasks, setTasks, setActiveTask, onOp
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      {/* Thread header */}
       <div className="flex items-center justify-between border-b border-xelora-border px-5 py-3 shrink-0">
         <div>
           <p className="text-sm font-semibold text-xelora-text">{task.title}</p>
@@ -75,7 +74,6 @@ export function TaskThreadWorkspace({ task, tasks, setTasks, setActiveTask, onOp
         </div>
       </div>
 
-      {/* Messages */}
       <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
         {task.messages.map(msg => (
           <MessageBubble
@@ -90,7 +88,6 @@ export function TaskThreadWorkspace({ task, tasks, setTasks, setActiveTask, onOp
         <div ref={bottomRef} />
       </div>
 
-      {/* Composer */}
       <div className="border-t border-xelora-border px-4 py-3 shrink-0">
         <div className="flex gap-2 items-end">
           <div className="flex-1 rounded-lg border border-xelora-border bg-xelora-surface-2 px-3 py-2">
@@ -128,7 +125,6 @@ function MessageBubble({ message, expandedSteps, onToggleStep, onApprove, onKeep
         <p className="text-sm leading-relaxed">{message.content}</p>
         <p className="text-[10px] mt-1 opacity-50">{formatRelativeTime(message.timestamp)}</p>
 
-        {/* Workflow steps */}
         {message.steps && message.steps.length > 0 && (
           <div className="mt-4 space-y-1">
             <p className="text-xs font-semibold text-xelora-text-secondary mb-2">Workflow plan</p>
@@ -149,12 +145,10 @@ function MessageBubble({ message, expandedSteps, onToggleStep, onApprove, onKeep
           </div>
         )}
 
-        {/* Approval request */}
         {message.approvalRequest && (
           <ApprovalPanel req={message.approvalRequest} onApprove={onApprove} onKeepAll={onKeepAll} />
         )}
 
-        {/* Result summary */}
         {message.resultSummary && (
           <div className="mt-3 rounded-lg border border-xelora-success bg-xelora-success-bg px-3 py-2">
             <p className="text-xs font-medium text-xelora-success flex items-center gap-1.5">

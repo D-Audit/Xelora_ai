@@ -14,10 +14,6 @@ export async function POST(req: NextRequest) {
   });
 
   if (!result.ok) {
-    // 402 here means the backend's plan_guard middleware blocked this -
-    // the account is out of workflow runs for its billing period, or
-    // its subscription isn't active. Surface that message as-is so the
-    // UI can show a clear upgrade prompt instead of a generic error.
     const detail =
       (result.data as { error?: string })?.error ||
       (result.data as { detail?: string })?.detail ||

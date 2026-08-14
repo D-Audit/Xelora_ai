@@ -28,10 +28,6 @@ def run(sheet_name: str):
         first_row = normalize(used.rows[0].value)[0]
         header_guess = all(isinstance(v, str) for v in first_row if v is not None)
 
-        # AST-lite formula scan: record every non-empty formula cell in the
-        # used range, plus a naive extraction of the ranges it references,
-        # so the agent has a dependency hint before it edits a formula it
-        # didn't write ("AST Analysis" capability, simplified).
         try:
             formulas = used.formula
             formulas = normalize(formulas)

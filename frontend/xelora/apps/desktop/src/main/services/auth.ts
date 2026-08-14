@@ -49,7 +49,6 @@ export async function clearLocalIdentityData(): Promise<void> {
   try {
     await fs.unlink(userData);
   } catch {
-    // ignore
   }
 }
 

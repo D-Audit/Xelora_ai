@@ -27,10 +27,6 @@ def run():
 
     major = full_version.split(".")[0]
 
-    # Excel's own version numbering doesn't distinguish 365/2021/2019 by
-    # major version alone (they're all "16.0") - the build number range
-    # is what actually separates them, and only 365/2021+ ship the
-    # dynamic-array engine (UNIQUE/SORT/FILTER/XLOOKUP/LET).
     supports_dynamic_arrays = major == "16" and build >= 10000
 
     if major == "16" and not supports_dynamic_arrays:

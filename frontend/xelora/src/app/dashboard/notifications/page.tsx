@@ -39,7 +39,6 @@ export default function NotificationsPage() {
     try {
       await markNotificationRead(n.id);
     } catch {
-      /* best-effort */
     }
   };
 

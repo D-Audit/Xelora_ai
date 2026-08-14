@@ -14,7 +14,6 @@ export const mockUsage: UsageLimits = {
   resetDate: '2026-08-15T00:00:00Z',
 };
 
-// Last 14 days of usage data
 export const mockDailyUsage: DailyUsage[] = [
   { date: '2026-07-11', aiActions: 18, workflowRuns: 2, fileOperations: 4 },
   { date: '2026-07-12', aiActions: 24, workflowRuns: 3, fileOperations: 5 },

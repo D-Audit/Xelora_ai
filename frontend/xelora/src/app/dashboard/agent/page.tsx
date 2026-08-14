@@ -1,4 +1,3 @@
-
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
@@ -20,6 +19,7 @@ import {
 import { uploadFile } from '@/services/workspace';
 import type { TaskProgressResponse } from '@/services/agent';
 import type { FileItem } from '@/services/workspace';
+import type { ChatMessage } from '@/types/agent-chat';
 
 const POLL_INTERVAL_MS = 1500;
 
@@ -30,16 +30,9 @@ const QUICK_ACTIONS = [
   { label: 'Format the sheet', instruction: 'Apply consistent number, currency, and date formatting across the sheet.' },
 ];
 
-type ChatMessage =
-  | { id: string; role: 'user'; text: string; attachment?: string }
-  | { id: string; role: 'agent'; taskId: number; steps: string[]; currentTask?: string; response?: string; status: 'running' | 'paused' | 'done' | 'error'; error?: string };
-
 export default function AgentPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  // Client-only check - starts null (renders nothing) to avoid a
-  // flash of the wrong state before we know if we're in the desktop
-  // wrapper or a browser tab.
   const [desktop, setDesktop] = useState<boolean | null>(null);
   useEffect(() => setDesktop(isDesktopApp()), []);
 
@@ -50,24 +43,20 @@ export default function AgentPage() {
   const [isSending, setIsSending] = useState(false);
   const [attachedFile, setAttachedFile] = useState<FileItem | null>(null);
   const [isAttaching, setIsAttaching] = useState(false);
+  const [isFloatingMode, setIsFloatingMode] = useState(false);
+  useEffect(() => {
+    if (!desktop) return;
+    void window.xeloraDesktop?.getFloatingMode().then(setIsFloatingMode);
+    return window.xeloraDesktop?.onFloatingModeChange(setIsFloatingMode);
+  }, [desktop]);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Bug fix (the core one): every message used to call startTask() and
-  // create a BRAND NEW backend AgentTask, with zero memory of anything
-  // said before - "it doesn't feel like it's continuing to talk" is
-  // exactly that. currentTaskId now tracks the single ongoing backend
-  // task for this chat session; follow-up messages call resumeTask()
-  // against it instead of starting fresh, so the AI actually sees the
-  // whole conversation, not just the latest line.
   const [currentTaskId, setCurrentTaskId] = useState<number | null>(null);
 
   const [openingChatId, setOpeningChatId] = useState<number | null>(null);
-  // Records the route we have already hydrated. Without this, changing the
-  // URL immediately after POST /task can fetch the not-yet-persisted DB
-  // transcript and overwrite the optimistic message on screen with [].
   const hydratedRouteRef = useRef<string | null>(null);
   const chatRequestRef = useRef(0);
 
@@ -106,8 +95,6 @@ export default function AgentPage() {
         updateAgentMessage(messageId, { status: 'error', error: 'Lost connection while checking progress.' });
       }
     };
-    // Do not leave a completed reply stuck in the terminal while the UI
-    // waits for its first interval tick.
     void checkProgress();
     pollRef.current = setInterval(() => { void checkProgress(); }, POLL_INTERVAL_MS);
   };
@@ -149,32 +136,19 @@ export default function AgentPage() {
       const transcript = Array.isArray(chat.transcript) ? chat.transcript : [];
       const savedTurns = transcript.length > 0
         ? transcript
-        // Conversations created before transcript persistence was fixed
-        // still need to open. Show their original request rather than
-        // dropping back to the blank welcome screen.
         : [{ role: 'user' as const, text: chat.instruction, timestamp: chat.created_at ?? new Date().toISOString() }];
       const restored: ChatMessage[] = savedTurns.map((turn, i) => (
         turn.role === 'user'
           ? { id: `${chatId}-${i}-u`, role: 'user', text: turn.text }
           : { id: `${chatId}-${i}-a`, role: 'agent', taskId: chatId, steps: [], response: turn.text, status: 'done' }
       ));
-      // Ignore a slow response for a conversation the user has since left.
       if (requestId !== chatRequestRef.current) return;
       setMessages(restored);
-      // Only treat this as the "live" task if the server's in-memory
-      // state actually still has it (see backend GET /tasks/{id}'s
-      // `resumable` field) - otherwise the next message below will
-      // gracefully fall back to starting a fresh task instead of
-      // hitting a 404 on /resume.
       setCurrentTaskId(chat.resumable ? chat.id : null);
       if (!chat.resumable) {
         toast.info('This conversation ended in a previous session - sending a new message will start a fresh one.');
       }
 
-      // A task can finish before its worker commits the transcript. Recover
-      // its live state for both running and finished tasks: otherwise a fast
-      // reply can be printed by the backend but the chat restores only the
-      // user's message after the route changes or a page reload.
       if (chat.resumable && transcript.every((turn) => turn.role !== 'assistant')) {
         try {
           const progress = await getTaskProgress(chatId);
@@ -194,8 +168,6 @@ export default function AgentPage() {
             pollProgress(`${chatId}-recovered-response`, chatId);
           }
         } catch {
-          // The persisted user turn remains visible; retrying later will use
-          // the transcript once the worker has committed it.
         }
       }
     } catch (err) {
@@ -208,9 +180,6 @@ export default function AgentPage() {
   useEffect(() => {
     const chatId = Number(searchParams.get('chat'));
     if (Number.isInteger(chatId) && chatId > 0) {
-      // The newly-created task is already represented by optimistic UI
-      // messages. Do not replace it with the database transcript until the
-      // worker has finished persisting that transcript.
       if (chatId === currentTaskId && messages.length > 0) {
         hydratedRouteRef.current = `chat:${chatId}`;
         return;
@@ -235,8 +204,6 @@ export default function AgentPage() {
 
     const userMsgId = `u-${Date.now()}`;
     const agentMsgId = `a-${Date.now()}`;
-    // Add the assistant bubble before the network request. This keeps the
-    // conversation visible even when the backend completes very quickly.
     setMessages((current) => [
       ...current,
       { id: userMsgId, role: 'user', text, attachment: attachedFile?.name },
@@ -244,16 +211,7 @@ export default function AgentPage() {
     ]);
     setIsSending(true);
 
-    // The agent controls whichever Excel workbook is already open on
-    // your machine - it doesn't read the uploaded file's bytes
-    // directly. Attaching a file gives the AI context about it by
-    // name and hints which open window to target if one shares that
-    // name; open the file in Excel yourself for the agent to act on
-    // it directly.
     const requestedText = text.trim();
-    // "use your own data" means the data already open in Excel, not that
-    // the model should invent data. Expand this common short reply into an
-    // unambiguous instruction before it reaches the backend.
     const useOpenWorkbook = /^(use|work with|use data from) (your |the )?(own |existing )?(data|workbook|spreadsheet)$/i.test(requestedText);
     const instruction = attachedFile
       ? `Regarding the file "${attachedFile.name}": ${requestedText}`
@@ -265,21 +223,14 @@ export default function AgentPage() {
 
     try {
       if (currentTaskId !== null) {
-        // Continuing THIS conversation - the fix for "doesn't feel like
-        // it's still talking to me": reuse the same backend task so the
-        // AI actually has the prior turns in context.
         try {
           await resumeTask(currentTaskId, instruction);
           updateAgentMessage(agentMsgId, { taskId: currentTaskId, status: 'running' });
           pollProgress(agentMsgId, currentTaskId);
         } catch (err) {
-          // A running task is not a lost conversation. Starting a new task
-          // for this case is exactly how chat context used to be discarded.
           if (err instanceof Error && err.message.includes('still processing')) {
             throw err;
           }
-          // The previous task's in-memory state is gone (server restarted
-          // since) - fall back to a fresh task rather than dead-ending.
           toast.info('That earlier session had ended - continuing as a new conversation.');
           const res = await startTask(instruction, workbookHint);
           setCurrentTaskId(res.task_id);
@@ -299,9 +250,6 @@ export default function AgentPage() {
       refreshChatList();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not start the task.';
-      // A 402/403 from the backend's plan-limit middleware lands here -
-      // this is the real, server-enforced subscription protection,
-      // shown inline in the chat rather than a silent failure.
       updateAgentMessage(agentMsgId, { status: 'error', error: message });
     } finally {
       setIsSending(false);
@@ -336,9 +284,6 @@ export default function AgentPage() {
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   };
 
-  // Not in the desktop app - this page is desktop-only. Avoid
-  // rendering anything until we know for sure (desktop === null) to
-  // prevent a flash of this message inside the real desktop app.
   if (desktop === false) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
@@ -366,9 +311,6 @@ export default function AgentPage() {
 
   const hasMessages = messages.length > 0;
   const welcomeComposer = !hasMessages;
-  // A conversation has one ordered agent loop. Letting the user submit a
-  // second turn while the first is executing creates concurrent /resume
-  // calls and can make the later turn appear to lose context.
   const conversationBusy = messages.some(
     (message) => message.role === 'agent' && (message.status === 'running' || message.status === 'paused')
   );
@@ -422,16 +364,29 @@ export default function AgentPage() {
     </div>
   );
 
+  const floatingModeButton = desktop && (
+    <button
+      onClick={() => void window.xeloraDesktop?.setFloatingMode(!isFloatingMode)}
+      className="flex items-center gap-1.5 rounded-full border border-xelora-border bg-xelora-surface-2 px-3 py-1.5 text-xs font-medium text-xelora-text-secondary transition-colors hover:border-xelora-green/40 hover:text-xelora-green"
+    >
+      {isFloatingMode ? 'Exit Floating Mode' : 'Floating Mode'}
+    </button>
+  );
+  const floatingWindowDragClass = isFloatingMode
+    ? '[-webkit-app-region:drag] [&_a]:[-webkit-app-region:no-drag] [&_button]:[-webkit-app-region:no-drag] [&_input]:[-webkit-app-region:no-drag] [&_textarea]:[-webkit-app-region:no-drag] [&_select]:[-webkit-app-region:no-drag]'
+    : '';
+
   if (!hasMessages) {
-    // Empty state: centered greeting + input, quick actions below -
-    // shown once, before the first message.
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-8 px-6 pb-20">
+      <div className={`flex h-full flex-col items-center justify-center gap-8 px-6 pb-20 ${floatingWindowDragClass}`}>
           <div className="flex w-full max-w-5xl flex-col gap-4 text-left">
             <XeloraLogo size="lg" showWordmark={false} />
             <h1 className="max-w-4xl text-4xl font-semibold tracking-[-0.035em] text-xelora-text sm:text-5xl">
               What can we build together{user?.name ? `, ${user.name.split(' ')[0]}` : ''}?
             </h1>
+          </div>
+          <div className="flex w-full max-w-5xl items-center justify-end">
+            {floatingModeButton}
           </div>
           {inputBar}
           <div className="flex w-full max-w-5xl flex-wrap gap-2">
@@ -450,12 +405,15 @@ export default function AgentPage() {
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div className={`flex h-full flex-col ${floatingWindowDragClass}`}>
         <header className="flex h-14 flex-shrink-0 items-center gap-3 border-b border-xelora-border px-5">
           <div className="flex items-center gap-2 text-sm font-medium text-xelora-text"><Sparkles className="h-4 w-4 text-xelora-green" /> Xelora</div>
           <span className="ml-2 text-sm text-xelora-text-muted">
             {currentTaskId !== null ? `Conversation #${currentTaskId}` : 'New task'}
           </span>
+          <div className="ml-auto flex items-center gap-2">
+            {floatingModeButton}
+          </div>
         </header>
         <div className="flex-1 overflow-y-auto px-4 py-8">
           <div className="mx-auto flex max-w-3xl flex-col gap-7">

@@ -18,7 +18,6 @@ export default function XeloraDesktopPage() {
   const [tasks, setTasks] = useState<DesktopTask[]>(mockDesktopTasks);
   const [commandOpen, setCommandOpen] = useState(false);
 
-  // Ctrl+K global shortcut
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
@@ -32,7 +31,6 @@ export default function XeloraDesktopPage() {
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-[#F7F9F8] select-none">
-      {/* Simulated title bar */}
       <div className="flex h-9 items-center justify-between bg-xelora-nav px-4 shrink-0">
         <div className="flex items-center gap-3">
           <div className="flex gap-1.5">
@@ -54,7 +52,6 @@ export default function XeloraDesktopPage() {
         <span className="text-xs text-white/40">{user?.name}</span>
       </div>
 
-      {/* Main area */}
       <div className="flex flex-1 overflow-hidden">
         <DesktopIconRail
           activeView={activeView}

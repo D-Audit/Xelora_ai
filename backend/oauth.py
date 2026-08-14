@@ -81,8 +81,6 @@ def _get_or_create_user(db: Session, email: str, name: str) -> tuple[User, bool]
     now = datetime.now(timezone.utc)
     db.add(AuthUser(
         id=user.id,
-        # A non-password marker.  It is rejected by password login and
-        # avoids invoking bcrypt for an OAuth-only account.
         password_hash=f"!oauth-only:{secrets.token_urlsafe(32)}",
         plan_tier="trial",
         is_verified=True,  # the provider already verified this email
@@ -120,7 +118,6 @@ def _issue_session(db: Session, user: User) -> dict:
     }
 
 
-# --- Google ------------------------------------------------------------
 
 @router.get("/google/login")
 def google_login(redirect_uri: str, state: str = ""):
@@ -178,7 +175,6 @@ def google_exchange(req: ExchangeRequest):
         db.close()
 
 
-# --- Microsoft ---------------------------------------------------------
 
 @router.get("/microsoft/login")
 def microsoft_login(redirect_uri: str, state: str = ""):

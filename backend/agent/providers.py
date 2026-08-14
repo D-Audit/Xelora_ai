@@ -27,12 +27,47 @@ CODEGEN_TOOL_CLAUDE = {
     },
 }
 
-VISION_TOOLS_CLAUDE = []  # superseded by the click_on_screen_element skill (see vision/decision_loop.py),
-                          # which wires screenshot -> locate -> click into one atomic, safer skill
-                          # instead of exposing raw click_at/type_text coordinates directly to the planner.
+VISION_TOOLS_CLAUDE = [
+    {
+        "name": "take_screenshot",
+        "description": "Captures the current Windows screen without acting on it. Use parse_screen afterwards to obtain OmniParser UI elements.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "parse_screen",
+        "description": "Captures the current Windows screen and asks OmniParser to identify visible UI elements with labels, bounding boxes, and centers. Observe before acting; use returned element centers for clicks.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "click", "description": "Clicks the center of an element returned by the most recent parse_screen call. Never invent coordinates.",
+        "input_schema": {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}}, "required": ["x", "y"]},
+    },
+    {
+        "name": "double_click", "description": "Double-clicks the center of an element returned by the most recent parse_screen call.",
+        "input_schema": {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}}, "required": ["x", "y"]},
+    },
+    {
+        "name": "type_text", "description": "Types text into the currently focused control.",
+        "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+    },
+    {
+        "name": "press_key", "description": "Presses one keyboard key, for example enter, tab, esc, or f2.",
+        "input_schema": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]},
+    },
+    {
+        "name": "hotkey", "description": "Presses a keyboard shortcut, for example ctrl+s or alt+h.",
+        "input_schema": {"type": "object", "properties": {"keys": {"type": "array", "items": {"type": "string"}}}, "required": ["keys"]},
+    },
+    {
+        "name": "scroll", "description": "Scrolls the current screen. Positive clicks scroll up and negative clicks scroll down.",
+        "input_schema": {"type": "object", "properties": {"clicks": {"type": "integer"}}, "required": ["clicks"]},
+    },
+]
 
 
 def build_claude_tools():
+    if config.VISUAL_ONLY_MODE:
+        return VISION_TOOLS_CLAUDE
     tools = claude_tools() + [CODEGEN_TOOL_CLAUDE]
     if config.ENABLE_VISUAL_FALLBACK:
         tools += VISION_TOOLS_CLAUDE
@@ -76,6 +111,11 @@ def _strip_unsupported_schema_keys(schema):
 
 
 def build_gemini_tools():
+    if config.VISUAL_ONLY_MODE:
+        return [{"function_declarations": [
+            {"name": t["name"], "description": t["description"], "parameters": _strip_unsupported_schema_keys(t["input_schema"])}
+            for t in VISION_TOOLS_CLAUDE
+        ]}]
     merged = gemini_tools()[0]["function_declarations"]
     merged = [
         {**decl, "parameters": _strip_unsupported_schema_keys(decl["parameters"])}
@@ -103,16 +143,7 @@ def call_claude(task, system_prompt: str):
         tools=build_claude_tools(),
         messages=task.messages,
     )
-    # Store plain, JSON-serializable dicts instead of raw Anthropic SDK
-    # block objects. The Claude API accepts either form as input (a list
-    # of dicts is standard, documented usage), so this changes nothing
-    # about live behavior - but it means task.messages can now be safely
-    # json.dumps()'d for real persistence and later reconstructed into a
-    # working conversation after a server restart, instead of only ever
-    # being usable within this same process.
     def _serialize_block(block):
-        # Handle both pydantic v2 (.model_dump) and older v1-style SDKs
-        # (.dict) without guessing which one is installed.
         if hasattr(block, "model_dump"):
             return block.model_dump()
         if hasattr(block, "dict"):

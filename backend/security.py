@@ -48,8 +48,6 @@ def check_api_key(x_api_key: str = Header(default="")):
         raise HTTPException(status_code=401, detail="Invalid or missing API key.")
 
 
-# --- Rate limiting -----------------------------------------------------
-# key -> deque of request timestamps within the current window
 _request_log: dict[str, deque] = defaultdict(deque)
 
 

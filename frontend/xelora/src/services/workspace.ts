@@ -17,7 +17,6 @@ async function parseOrThrow<T>(res: Response): Promise<T> {
   return data as T;
 }
 
-// --- Files -------------------------------------------------------------
 
 export interface FileItem {
   id: string;
@@ -54,7 +53,6 @@ export function fileDownloadUrl(id: string): string {
   return `/api/files/${id}/download`;
 }
 
-// --- Team ----------------------------------------------------------------
 
 export interface TeamMemberItem {
   id: string;
@@ -87,7 +85,6 @@ export async function removeTeamMember(id: string): Promise<void> {
   await parseOrThrow(res);
 }
 
-// --- Devices ---------------------------------------------------------------
 
 export interface DeviceItem {
   id: string;
@@ -112,7 +109,6 @@ export async function removeDevice(id: string): Promise<void> {
   await parseOrThrow(res);
 }
 
-// --- Notifications -----------------------------------------------------
 
 export interface NotificationItem {
   id: string;
@@ -142,7 +138,6 @@ export async function markAllNotificationsRead(): Promise<void> {
   await parseOrThrow(res);
 }
 
-// --- Workflows -------------------------------------------------------------
 
 export interface WorkflowStepItem {
   name: string;

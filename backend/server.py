@@ -22,14 +22,8 @@ equivalent, zero changes to main.py.
 from fastapi.responses import JSONResponse
 from starlette.datastructures import MutableHeaders
 
-# Import main's app FIRST.
 from main import app  # noqa: E402
 
-# Import the new models so their tables are registered on Base.metadata
-# before database.init_db() (called inside main.py's startup event)
-# runs Base.metadata.create_all() - this is what makes auth_users,
-# subscriptions, usage_records, invoices get created automatically
-# alongside the existing users/tasks/action_logs/etc tables.
 import auth_billing_models  # noqa: F401,E402
 import workspace_models  # noqa: F401,E402 - registers files/team/devices/notifications/workflows tables
 
@@ -81,10 +75,6 @@ async def enforce_plan_limits(request, call_next):
     passes straight through untouched."""
     if request.method == "POST" and request.url.path == "/task":
         if SessionLocal is None:
-            # No DATABASE_URL configured - main.py itself already runs
-            # without persistence in that mode, so there's nothing to
-            # enforce a plan against. Let main.py's existing behavior
-            # (works, just doesn't save) stand.
             return await call_next(request)
 
         auth_header = request.headers.get("authorization", "")

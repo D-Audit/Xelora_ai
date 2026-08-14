@@ -26,10 +26,6 @@ def _fix_multi_area_table_reference(data_range: str) -> str:
         return data_range  # not this pattern - leave it alone
 
     rejoined = ",".join(pieces)
-    # If re-joining the found pieces reconstructs the whole string (i.e. the
-    # ENTIRE input was just these pieces glued together with nothing else),
-    # it's safe to auto-fix. If there's other text mixed in, don't guess -
-    # leave it as-is so a real error surfaces instead of a silent bad fix.
     if data_range.replace(",", "") == "".join(pieces):
         return rejoined
     return data_range

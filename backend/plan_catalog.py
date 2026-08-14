@@ -81,8 +81,6 @@ PLAN_CATALOG = {
     },
 }
 
-# Maps tier -> Stripe Price IDs, filled in from env at runtime by billing.py.
-# Kept here so both billing.py and any future admin tooling read the same shape.
 STRIPE_PRICE_ENV_VARS = {
     ("starter", "monthly"): "STRIPE_PRICE_STARTER_MONTHLY",
     ("starter", "annual"): "STRIPE_PRICE_STARTER_ANNUAL",

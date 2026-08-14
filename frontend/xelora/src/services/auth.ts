@@ -82,7 +82,4 @@ export async function logout(): Promise<void> {
  * yet. See INTEGRATION.md if you want to add those columns.
  */
 export function updateSession(_updates: Partial<User>): void {
-  // Intentionally a no-op against the backend - see docstring above.
-  // auth-store.ts's setUser() is what actually updates the UI state;
-  // callers should use that for the visible effect.
 }

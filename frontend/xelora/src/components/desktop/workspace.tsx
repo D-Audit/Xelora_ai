@@ -28,7 +28,6 @@ export function DesktopWorkspace(props: Props) {
 
   return (
     <div className="flex flex-1 flex-col bg-white overflow-hidden">
-      {/* Top bar */}
       <div className="flex h-10 items-center gap-3 border-b border-xelora-border px-4 shrink-0">
         <button
           onClick={onToggleSidebar}
@@ -47,7 +46,6 @@ export function DesktopWorkspace(props: Props) {
         )}
       </div>
 
-      {/* Workspace content */}
       <div className="flex-1 overflow-hidden">
         {view === 'settings' ? (
           <SettingsWorkspace />

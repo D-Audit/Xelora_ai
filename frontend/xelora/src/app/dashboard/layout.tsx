@@ -37,12 +37,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   return (
     <div className="flex h-screen overflow-hidden bg-xelora-bg-main">
-      {/* Desktop sidebar */}
       <div className="hidden lg:flex flex-shrink-0">
         <Sidebar collapsed={sidebarCollapsed} />
       </div>
 
-      {/* Mobile sidebar drawer */}
       {sidebarOpen && (
         <div className="fixed inset-0 z-40 lg:hidden flex">
           <div
@@ -56,7 +54,6 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </div>
       )}
 
-      {/* Main area */}
       <div className="flex flex-1 flex-col overflow-hidden">
         {!isChatWorkspace && <Topbar />}
         <main

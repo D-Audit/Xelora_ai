@@ -10,8 +10,6 @@ def run(source_sheet_name: str, new_sheet_name: str):
     source = wb.sheets[source_sheet_name]
     source.api.Copy(After=source.api)
     new_sheet = wb.sheets[wb.sheets.count - 1] if False else None
-    # xlwings doesn't return the new sheet from .api.Copy - grab it as the
-    # sheet right after the source, which is where Excel places the copy.
     idx = [s.name for s in wb.sheets].index(source_sheet_name)
     copied = wb.sheets[idx + 1]
     copied.name = new_sheet_name

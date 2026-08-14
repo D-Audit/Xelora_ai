@@ -33,7 +33,6 @@ import type { Plan } from '@/types';
 
 const WINDOWS_INSTALLER_URL = '/api/download/windows';
 
-// ─── Types ───────────────────────────────────────────────────────────────────
 
 type Experience = 'beginner' | 'intermediate' | 'advanced';
 
@@ -46,7 +45,6 @@ interface OnboardingAnswers {
 
 const TOTAL_STEPS = 7;
 
-// ─── Step data ────────────────────────────────────────────────────────────────
 
 interface UseOption {
   id: string;
@@ -91,17 +89,14 @@ const OBJECTIVE_OPTIONS: ObjectiveOption[] = [
   { id: 'build-workflows', label: 'Build reusable workflows' },
 ];
 
-// Only show starter / professional / business in the plan picker
 const SELECTABLE_PLAN_TIERS = ['starter', 'professional', 'business'];
 
-// ─── Helper: format plan limit ────────────────────────────────────────────────
 
 function formatLimit(value: number | string): string {
   if (value === 'unlimited' || value === 'custom') return String(value);
   return new Intl.NumberFormat('en-US').format(value as number);
 }
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
 
 interface StepHeaderProps {
   heading: string;
@@ -117,7 +112,6 @@ function StepHeader({ heading, subtext }: StepHeaderProps) {
   );
 }
 
-// ─── Step 1: Welcome ──────────────────────────────────────────────────────────
 
 interface Step1Props {
   onNext: () => void;
@@ -160,7 +154,6 @@ function StepWelcome({ onNext }: Step1Props) {
   );
 }
 
-// ─── Step 2: Intended use ─────────────────────────────────────────────────────
 
 interface Step2Props {
   selected: string;
@@ -219,7 +212,6 @@ function StepIntendedUse({ selected, onSelect }: Step2Props) {
   );
 }
 
-// ─── Step 3: Experience ───────────────────────────────────────────────────────
 
 interface Step3Props {
   selected: Experience | '';
@@ -267,7 +259,6 @@ function StepExperience({ selected, onSelect }: Step3Props) {
   );
 }
 
-// ─── Step 4: Objectives ───────────────────────────────────────────────────────
 
 interface Step4Props {
   selected: string[];
@@ -328,7 +319,6 @@ function StepObjectives({ selected, onToggle }: Step4Props) {
   );
 }
 
-// ─── Step 5: Plan selection ───────────────────────────────────────────────────
 
 interface Step5Props {
   selectedPlan: string;
@@ -396,7 +386,6 @@ function StepPlan({ selectedPlan, onSelect }: Step5Props) {
   );
 }
 
-// ─── Step 6: Desktop download ─────────────────────────────────────────────────
 
 interface Step6Props {
   onDownload: () => void;
@@ -432,7 +421,6 @@ function StepDownload({ onDownload, onSkip }: Step6Props) {
   );
 }
 
-// ─── Step 7: Complete ─────────────────────────────────────────────────────────
 
 interface Step7Props {
   userName: string;
@@ -490,7 +478,6 @@ function StepComplete({ userName, answers, onGoToDashboard }: Step7Props) {
   );
 }
 
-// ─── Main component ───────────────────────────────────────────────────────────
 
 export default function OnboardingPage() {
   const router = useRouter();
@@ -505,7 +492,6 @@ export default function OnboardingPage() {
     selectedPlan: mockPlans.find((p) => p.tier === 'professional')?.id ?? '',
   });
 
-  // Focus the main content area on step change for screen-reader announcements
   const mainRef = useRef<HTMLElement>(null);
   useEffect(() => {
     mainRef.current?.focus({ preventScroll: true });
@@ -513,7 +499,6 @@ export default function OnboardingPage() {
 
   const progressValue = Math.round((currentStep / TOTAL_STEPS) * 100);
 
-  // ── Navigation ────────────────────────────────────────────────────────────
 
   function canAdvance(): boolean {
     if (currentStep === 2) return answers.intendedUse !== '';
@@ -534,7 +519,6 @@ export default function OnboardingPage() {
     }
 
     if (currentStep === TOTAL_STEPS - 1) {
-      // Persist answers before the final step
       await persistAnswers();
     }
 
@@ -598,7 +582,6 @@ export default function OnboardingPage() {
     }));
   }
 
-  // ── Render steps ─────────────────────────────────────────────────────────
 
   function renderStep() {
     switch (currentStep) {
@@ -654,12 +637,10 @@ export default function OnboardingPage() {
     }
   }
 
-  // Steps where navigation buttons are rendered by the step itself
   const stepHandlesOwnNav = currentStep === 1 || currentStep === 6 || currentStep === 7;
 
   return (
     <div className="flex min-h-screen flex-col bg-xelora-surface">
-      {/* ── Header ── */}
       <header className="flex h-14 items-center justify-between border-b border-xelora-border bg-white px-4 sm:px-6">
         <XeloraLogo size="sm" />
         <p className="text-xs text-xelora-text-secondary" aria-live="polite">
@@ -667,7 +648,6 @@ export default function OnboardingPage() {
         </p>
       </header>
 
-      {/* ── Progress bar ── */}
       <div className="bg-white px-4 pb-3 pt-2 sm:px-6">
         <Progress
           value={progressValue}
@@ -676,7 +656,6 @@ export default function OnboardingPage() {
         />
       </div>
 
-      {/* ── Main content ── */}
       <main
         ref={mainRef}
         tabIndex={-1}
@@ -685,7 +664,6 @@ export default function OnboardingPage() {
       >
         {renderStep()}
 
-        {/* ── Navigation buttons (for steps that don't manage their own) ── */}
         {!stepHandlesOwnNav && (
           <div className="mt-10 flex items-center justify-between gap-4">
             <Button

@@ -53,9 +53,6 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
   const { user, logout } = useAuthStore();
   const aiPct = getUsagePercentage(mockUsage.aiActionsUsed, mockUsage.aiActionsLimit);
 
-  // Starts false to match server-rendered HTML (avoids a hydration
-  // mismatch), then flips true on mount if we're inside the desktop
-  // app - see src/lib/is-desktop.ts.
   const [showDesktopItems, setShowDesktopItems] = useState(false);
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [loadingChats, setLoadingChats] = useState(false);
@@ -108,7 +105,6 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
       )}
       aria-label="Main navigation"
     >
-      {/* Header */}
       <div className={cn('flex items-center px-4 py-4', collapsed ? 'justify-center' : 'justify-between')}>
         {!collapsed && <XeloraLogo size="sm" />}
         <button
@@ -127,7 +123,6 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
         </button>
       </div>
 
-      {/* Nav */}
       <nav className="flex-1 overflow-y-auto px-2 py-2" aria-label="Dashboard navigation">
         {!collapsed && (
           <Link href="/dashboard/agent?new=1" className="mb-4 flex items-center justify-center gap-2 rounded-lg bg-xelora-deep-green px-3 py-2.5 text-sm font-medium text-white transition-colors hover:bg-xelora-green">
@@ -228,7 +223,6 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
         )}
       </nav>
 
-      {/* Usage bar */}
       {!collapsed && (
         <div className="mx-2 mb-2 rounded-xl border border-xelora-border bg-white px-3 py-3">
           <div className="flex items-center justify-between mb-1.5">

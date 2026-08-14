@@ -47,9 +47,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     if name not in SKILL_REGISTRY:
         return [TextContent(type="text", text=json.dumps({"error": f"Unknown skill '{name}'"}))]
 
-    # No task/workbook context here (an external MCP client isn't running
-    # through agent/core.py's task loop) - default to "whichever Excel
-    # workbook is currently active", same as single-task usage.
     bind_workbook_context(None)
 
     try:

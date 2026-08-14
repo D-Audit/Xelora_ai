@@ -21,8 +21,6 @@ def run():
         seen_in_module = set()
         line = 1
         total_lines = code_module.CountOfLines
-        # ProcOfLine(line, 0) returns the Sub/Function name that line belongs to.
-        # Walk line-by-line (cheap for typical macro sizes) and dedupe by name.
         while line <= total_lines:
             try:
                 proc_name = code_module.ProcOfLine(line, 0)

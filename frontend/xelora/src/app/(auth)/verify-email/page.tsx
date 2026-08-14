@@ -21,7 +21,6 @@ export default function VerifyEmailPage() {
   const [isSending, setIsSending] = useState(false);
   const [sentCount, setSentCount] = useState(0);
 
-  // Tick down the cooldown timer
   useEffect(() => {
     if (cooldown <= 0) return;
     const id = setInterval(() => {
@@ -39,7 +38,6 @@ export default function VerifyEmailPage() {
   const handleResend = useCallback(async () => {
     if (cooldown > 0 || isSending) return;
     setIsSending(true);
-    // Simulate API call — replace with real resend endpoint
     await new Promise((resolve) => setTimeout(resolve, 800));
     setIsSending(false);
     setSentCount((c) => c + 1);
@@ -48,7 +46,6 @@ export default function VerifyEmailPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      {/* Logo */}
       <div className="flex justify-center">
         <Link href="/" aria-label="Go to homepage">
           <XeloraLogo size="lg" />
@@ -70,14 +67,12 @@ export default function VerifyEmailPage() {
         </CardHeader>
 
         <CardContent className="flex flex-col items-center gap-4">
-          {/* Resend feedback */}
           {sentCount > 0 && (
             <p className="text-sm text-xelora-success text-center">
               Verification email resent. Please check your inbox (and spam folder).
             </p>
           )}
 
-          {/* Resend button */}
           <Button
             type="button"
             variant="outline"

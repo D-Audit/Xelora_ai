@@ -29,7 +29,6 @@ export function MarketingNav() {
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
-  // Close mobile menu on resize to desktop
   useEffect(() => {
     const handleResize = () => {
       if (window.innerWidth >= 1024) {
@@ -50,12 +49,10 @@ export function MarketingNav() {
       >
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <div className="flex h-16 items-center justify-between gap-4">
-            {/* Left: Logo */}
             <Link href="/" aria-label="Xelora home" className="flex-shrink-0">
               <XeloraLogo size="sm" />
             </Link>
 
-            {/* Center: Desktop nav links */}
             <nav aria-label="Main navigation" className="hidden lg:flex items-center gap-1">
               {navLinks.map((link) => (
                 <Link
@@ -68,7 +65,6 @@ export function MarketingNav() {
               ))}
             </nav>
 
-            {/* Right: CTA buttons (desktop) */}
             <div className="hidden lg:flex items-center gap-2 flex-shrink-0">
               <Button variant="ghost" size="sm" asChild>
                 <Link href="/login">Sign In</Link>
@@ -78,7 +74,6 @@ export function MarketingNav() {
               </Button>
             </div>
 
-            {/* Mobile: hamburger button */}
             <button
               type="button"
               aria-label={mobileOpen ? 'Close menu' : 'Open menu'}
@@ -93,7 +88,6 @@ export function MarketingNav() {
         </div>
       </header>
 
-      {/* Mobile drawer */}
       <div
         id="mobile-menu"
         role="dialog"
@@ -104,7 +98,6 @@ export function MarketingNav() {
           mobileOpen ? 'pointer-events-auto' : 'pointer-events-none'
         )}
       >
-        {/* Backdrop */}
         <div
           className={cn(
             'absolute inset-0 bg-xelora-black/40 transition-opacity duration-150',
@@ -114,14 +107,12 @@ export function MarketingNav() {
           aria-hidden="true"
         />
 
-        {/* Drawer panel */}
         <div
           className={cn(
             'absolute right-0 top-0 h-full w-72 max-w-full bg-white shadow-xl flex flex-col transition-transform duration-150',
             mobileOpen ? 'translate-x-0' : 'translate-x-full'
           )}
         >
-          {/* Drawer header */}
           <div className="flex items-center justify-between px-4 h-16 border-b border-xelora-border flex-shrink-0">
             <Link href="/" onClick={() => setMobileOpen(false)} aria-label="Xelora home">
               <XeloraLogo size="sm" />
@@ -136,7 +127,6 @@ export function MarketingNav() {
             </button>
           </div>
 
-          {/* Drawer nav links */}
           <nav aria-label="Mobile navigation" className="flex-1 overflow-y-auto px-3 py-4">
             <ul className="space-y-1">
               {navLinks.map((link) => (
@@ -153,7 +143,6 @@ export function MarketingNav() {
             </ul>
           </nav>
 
-          {/* Drawer CTA buttons */}
           <div className="flex-shrink-0 border-t border-xelora-border px-4 py-4 flex flex-col gap-2">
             <Button variant="outline" size="default" className="w-full" asChild>
               <Link href="/login" onClick={() => setMobileOpen(false)}>

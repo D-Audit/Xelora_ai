@@ -152,7 +152,6 @@ export default function RegisterPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      {/* Logo */}
       <div className="flex justify-center">
         <Link href="/" aria-label="Go to homepage">
           <XeloraLogo size="lg" />
@@ -171,7 +170,6 @@ export default function RegisterPage() {
 
         <CardContent>
           <form onSubmit={handleSubmit(onSubmit)} noValidate className="flex flex-col gap-4">
-            {/* Name */}
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="name">Full name</Label>
               <Input
@@ -187,7 +185,6 @@ export default function RegisterPage() {
               )}
             </div>
 
-            {/* Email */}
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="email">Email</Label>
               <Input
@@ -203,7 +200,6 @@ export default function RegisterPage() {
               )}
             </div>
 
-            {/* Password */}
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="password">Password</Label>
               <div className="relative">
@@ -225,7 +221,6 @@ export default function RegisterPage() {
                   {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
-              {/* Strength indicator */}
               {passwordValue.length > 0 && (
                 <div className="flex flex-col gap-1">
                   <div className="flex gap-1">
@@ -250,7 +245,6 @@ export default function RegisterPage() {
               )}
             </div>
 
-            {/* Confirm password */}
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="confirmPassword">Confirm password</Label>
               <div className="relative">
@@ -277,7 +271,6 @@ export default function RegisterPage() {
               )}
             </div>
 
-            {/* Country */}
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="country">Country</Label>
               <Controller
@@ -303,7 +296,6 @@ export default function RegisterPage() {
               )}
             </div>
 
-            {/* Primary use */}
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="primaryUse">Primary use</Label>
               <Controller
@@ -329,7 +321,6 @@ export default function RegisterPage() {
               )}
             </div>
 
-            {/* Terms */}
             <div className="flex flex-col gap-1.5">
               <div className="flex items-start gap-2">
                 <Checkbox
@@ -357,7 +348,6 @@ export default function RegisterPage() {
               )}
             </div>
 
-            {/* Submit */}
             <Button
               type="submit"
               variant="default"
@@ -370,14 +360,12 @@ export default function RegisterPage() {
             </Button>
           </form>
 
-          {/* Divider */}
           <div className="flex items-center gap-3 my-4">
             <div className="flex-1 h-px bg-xelora-border" />
             <span className="text-xs text-xelora-text-muted">or continue with</span>
             <div className="flex-1 h-px bg-xelora-border" />
           </div>
 
-          {/* OAuth buttons */}
           <div className="flex flex-col gap-2">
             <Button variant="outline" size="lg" className="w-full" type="button" onClick={() => { window.location.href = '/api/auth/google/start'; }}>
               <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
@@ -412,7 +400,6 @@ export default function RegisterPage() {
             </Button>
           </div>
 
-          {/* Login link */}
           <p className="text-center text-sm text-xelora-text-secondary mt-4">
             Already have an account?{' '}
             <Link href="/login" className="text-xelora-green font-medium hover:underline">

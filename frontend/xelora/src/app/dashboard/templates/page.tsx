@@ -9,10 +9,6 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { DashboardPageHeader } from '@/components/dashboard/page-header';
 import { StatePanel } from '@/components/site/state-panel';
-// useTemplate is a plain async API call (not a React hook) - aliased on
-// import so its "use"-prefixed name doesn't trip ESLint's react-hooks
-// rules-of-hooks naming heuristic, which otherwise (incorrectly) treats
-// any "use*" identifier as a hook.
 import { getTemplates, useTemplate as applyTemplateApi } from '@/services/workspace';
 import type { WorkflowTemplateItem } from '@/services/workspace';
 

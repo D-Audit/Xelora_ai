@@ -26,6 +26,7 @@ import type {
 const store = new JsonStore('xelora-state.json');
 const protocol = 'xelora';
 let mainWindow: BrowserWindow | null = null;
+let floatingModeEnabled = false;
 let allowWindowClose = false;
 let pendingCloseAfterSave = false;
 
@@ -243,6 +244,18 @@ function createWindow(): BrowserWindow {
   return window;
 }
 
+function setFloatingMode(enabled: boolean): boolean {
+  floatingModeEnabled = enabled;
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return floatingModeEnabled;
+  }
+
+  mainWindow.setAlwaysOnTop(enabled, enabled ? 'screen-saver' : 'normal');
+  mainWindow.setVisibleOnAllWorkspaces(enabled, { visibleOnFullScreen: enabled });
+  mainWindow.webContents.send('window:floating-mode-changed', floatingModeEnabled);
+  return floatingModeEnabled;
+}
+
 function registerIpc(): void {
   ipcMain.handle('app:get-info', async () => getAppInfo());
   ipcMain.handle('app:get-demo-credentials', async () => getDemoCredentials());
@@ -345,6 +358,9 @@ function registerIpc(): void {
     pendingCloseAfterSave = false;
     mainWindow.close();
   });
+
+  ipcMain.handle('window:set-floating-mode', async (_event, enabled: boolean) => setFloatingMode(Boolean(enabled)));
+  ipcMain.handle('window:get-floating-mode', async () => floatingModeEnabled);
 }
 
 function registerProtocolHandlers(): void {

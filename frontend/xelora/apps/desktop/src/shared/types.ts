@@ -249,6 +249,9 @@ export interface XeloraDesktopAPI {
   getSession(): Promise<SessionState | null>;
   logout(): Promise<void>;
   openRecentFile(filePath: string): Promise<OpenWorkbookResult | null>;
+  setFloatingMode(enabled: boolean): Promise<boolean>;
+  getFloatingMode(): Promise<boolean>;
+  onFloatingModeChange(callback: (enabled: boolean) => void): () => void;
 }
 
 declare global {

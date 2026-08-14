@@ -9,7 +9,6 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const { id } = await params;
   const result = await backendFetch(`/workflows/${id}/run`, { method: 'POST', token });
   if (!result.ok) {
-    // 402 = plan limit hit, same real enforcement as the AI Agent page.
     const detail = (result.data as { detail?: string })?.detail || 'Could not start this workflow.';
     return NextResponse.json({ error: detail }, { status: result.status || 500 });
   }

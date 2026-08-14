@@ -17,8 +17,6 @@ export async function POST(req: NextRequest) {
   const token = await getSessionToken();
   if (!token) return NextResponse.json({ error: 'Not signed in.' }, { status: 401 });
 
-  // Multipart body - forwarded as-is, not through the JSON backendFetch
-  // helper, so the file bytes aren't touched.
   const incomingForm = await req.formData();
   const file = incomingForm.get('upload');
   if (!file) {

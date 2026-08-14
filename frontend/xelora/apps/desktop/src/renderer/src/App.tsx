@@ -181,6 +181,13 @@ function App() {
   ] : []);
   const [workflowProgress, setWorkflowProgress] = useState(0);
 
+  const [isFloatingMode, setIsFloatingMode] = useState(false);
+
+  useEffect(() => {
+    void window.xelora.getFloatingMode().then(setIsFloatingMode);
+    return window.xelora.onFloatingModeChange(setIsFloatingMode);
+  }, []);
+
   const loginForm = useForm<LoginFormInput, unknown, LoginFormValues>({
     resolver: zodResolver(loginSchema),
     defaultValues: {
@@ -422,6 +429,8 @@ function App() {
         onReports={() => store.setScreen('reports')}
         onCleaning={() => store.setScreen('cleaning')}
         onHome={() => store.setScreen('home')}
+        onFloatingMode={() => void window.xelora.setFloatingMode(!isFloatingMode)}
+        isFloatingOpen={isFloatingMode}
       />
 
       <div className="grid min-h-0 flex-1 grid-cols-[280px_minmax(0,1fr)_360px] gap-0 overflow-hidden">
@@ -716,6 +725,8 @@ function TopBar({
   onReports,
   onCleaning,
   onHome,
+  onFloatingMode,
+  isFloatingOpen,
 }: {
   workbook: SpreadsheetWorkbook | null;
   sessionName: string;
@@ -732,6 +743,8 @@ function TopBar({
   onReports: () => void;
   onCleaning: () => void;
   onHome: () => void;
+  onFloatingMode: () => void;
+  isFloatingOpen: boolean;
 }) {
   return (
     <div className="flex items-center justify-between border-b border-[#DDE5E2] bg-white/90 px-4 py-3 backdrop-blur">
@@ -757,6 +770,13 @@ function TopBar({
         <ToolButton label="Reports" icon={<Table2 className="h-4 w-4" />} onClick={onReports} />
         <ToolButton label="Clean Data" icon={<Filter className="h-4 w-4" />} onClick={onCleaning} />
         <ToolButton label="Settings" icon={<Settings2 className="h-4 w-4" />} onClick={onSettings} />
+        <button
+          type="button"
+          onClick={onFloatingMode}
+          className="rounded-full border border-[#DDE5E2] bg-white px-3 py-1 text-xs text-[#5C6C75] hover:bg-[#F2F6F4]"
+        >
+          {isFloatingOpen ? 'Exit Floating Mode' : 'Floating Mode'}
+        </button>
       </div>
     </div>
   );

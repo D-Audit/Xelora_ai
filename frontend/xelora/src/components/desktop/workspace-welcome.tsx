@@ -60,7 +60,6 @@ export function WelcomeWorkspace({ user, tasks, onSelectTask, onOpenSpreadsheet 
           Open a workbook or describe the task you want Xelora to complete.
         </p>
 
-        {/* Composer */}
         <div className="mt-8 w-full rounded-xl border border-xelora-border bg-white shadow-sm overflow-hidden">
           <textarea
             value={input}
@@ -98,7 +97,6 @@ export function WelcomeWorkspace({ user, tasks, onSelectTask, onOpenSpreadsheet 
           </div>
         </div>
 
-        {/* Suggestions */}
         <div className="mt-4 flex flex-wrap justify-center gap-2">
           {suggestions.map(s => (
             <button
@@ -112,7 +110,6 @@ export function WelcomeWorkspace({ user, tasks, onSelectTask, onOpenSpreadsheet 
         </div>
       </div>
 
-      {/* Recent tasks */}
       {tasks.length > 0 && (
         <div className="border-t border-xelora-border px-6 py-5 max-w-2xl mx-auto w-full">
           <p className="text-xs font-semibold uppercase tracking-wider text-xelora-text-muted mb-3">Recent tasks</p>

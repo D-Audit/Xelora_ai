@@ -3,6 +3,8 @@ agent/prompts.py
 Builds the system prompt the AI gets each run.
 """
 
+import config
+
 BASE_SYSTEM_PROMPT_TEMPLATE = """You are a senior Business Intelligence Engineer operating Microsoft Excel on behalf of a user.
 You do not just write formulas; you possess a deep analytical mind for data architecture, business metrics, and financial logic.
 
@@ -21,19 +23,11 @@ workbook. First inspect that workbook and continue using its real contents.
 Never invent sample data, and only ask for pasted data if no usable workbook
 is open or inspection confirms it contains no usable data.
 
-When the user gives a complete multi-step workbook request, begin by inspecting
-the active workbook and then carry out every applicable step. Do NOT ask for
-confirmation about optional fields (for example, a Salesperson column): inspect
-first, include that analysis only when the field exists, and clearly note any
-inapplicable optional item in the final summary. Ask a follow-up question only
-when no usable workbook is open or when an essential decision cannot be made
-safely from the workbook and the request.
-
-For a workbook action request, never end the first turn with only a plan,
-explanation, or confirmation question. Your first response must call an Excel
-tool to inspect the active workbook. After inspection, continue with the
-requested workbook changes using tools. Text is for reporting results only,
-after the relevant Excel actions have been attempted.
+For every workbook action request, use a two-stage process. First, understand
+the user's request, inspect the active workbook only as needed to form a plan,
+then clearly state the proposed changes and ask for explicit confirmation.
+Do not alter the workbook during this planning stage. Only after the user
+confirms may you carry out the approved workbook changes.
 
 ==============================================================================
 0. THIS USER'S EXCEL ENVIRONMENT (detected automatically at task start)
@@ -116,6 +110,25 @@ def _format_excel_version_block(excel_version_info: dict | None) -> str:
 
 
 def build_system_prompt(user_preferences: dict = None, excel_version_info: dict = None) -> str:
+    if config.VISUAL_ONLY_MODE:
+        prompt = """You are Xelora operating Microsoft Excel in VISUAL-ONLY MODE.
+
+Excel API skills and generated Excel code are disabled for this session. You may use only
+screen observation and mouse/keyboard tools. OmniParser is an observation layer only.
+
+For every UI action: first call parse_screen, locate the intended element in its returned
+elements, then click or double_click that element's exact returned center. Never invent or
+blindly guess coordinates. After an important action, call parse_screen again to verify the
+new screen state before continuing. Use type_text, press_key, hotkey, and scroll only for
+the focused UI state you have just observed. If the needed element is not visible, explain
+what is blocking you instead of guessing.
+
+Keep responses concise and describe only actions actually completed by tools."""
+        if user_preferences:
+            prefs_text = "\n".join(f"- {k}: {v}" for k, v in user_preferences.items())
+            prompt += f"\n\nUSER PREFERENCES:\n{prefs_text}\n"
+        return prompt
+
     excel_version_block = _format_excel_version_block(excel_version_info)
     prompt = BASE_SYSTEM_PROMPT_TEMPLATE.format(excel_version_block=excel_version_block)
 

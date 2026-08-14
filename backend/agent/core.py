@@ -15,7 +15,8 @@ from codegen.executor import run_generated_code
 from agent import providers
 from agent.prompts import build_system_prompt
 
-VISUAL_TOOL_NAMES = {"screenshot_active_window", "click_at", "type_text", "press_key"}
+VISUAL_TOOL_NAMES = {"take_screenshot", "parse_screen", "click", "double_click", "type_text", "press_key", "hotkey", "scroll"}
+READ_ONLY_TOOL_NAMES = {"take_screenshot", "parse_screen"}
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -63,31 +64,22 @@ class AgentTask:
         self.retry_counts = {}
         self.gemini_model_index = 0
         self.final_response = None
-        # This is the display-safe conversation saved for the frontend.
-        # Provider messages are deliberately not exposed because their shape
-        # differs between Claude and Gemini.
         self.chat_transcript = [{"role": "user", "text": instruction}]
         self.excel_version_info = None  # filled in once at task start, see run_task()
-        # A provider may occasionally ignore available tools and return a
-        # text-only plan. One corrective turn keeps an Excel request from
-        # being incorrectly treated as completed without doing any work.
         self.text_only_action_retry_used = False
-        # Enforced in run_task as well as requested in the system prompt, so
-        # a confident text-only response cannot skip final verification.
         self.final_verification_requested = False
+        self.awaiting_approval = True
 
     def pause(self):
         self.is_paused = True
 
     def resume(self, correction: str = None):
         self.is_paused = False
-        # A completed task must be made runnable again before its next
-        # message.  Without this reset, run_task() exits immediately and the
-        # progress endpoint returns the previous final_response, making every
-        # follow-up look like a duplicate of the first reply.
         self.is_done = False
         self.final_response = None
         if correction:
+            if self.awaiting_approval and _is_explicit_approval(correction):
+                self.awaiting_approval = False
             self.messages.append({"role": "user", "content": correction})
             self.chat_transcript.append({"role": "user", "text": correction})
 
@@ -96,7 +88,21 @@ class AgentTask:
         print(message)
 
 
+def _is_explicit_approval(message: str) -> bool:
+    normalized = " ".join(message.lower().strip().split())
+    return normalized in {
+        "confirm", "confirmed", "approve", "approved", "yes", "yes proceed",
+        "yes, proceed", "go ahead", "go ahead and do it", "proceed", "do it",
+    }
+
+
 def dispatch_action(tool_name: str, tool_input: dict):
+    if config.VISUAL_ONLY_MODE:
+        if tool_name not in VISUAL_TOOL_NAMES:
+            return {"error": "VISUAL_ONLY_MODE blocks Excel API and code-generation tools.", "verified": False}, "blocked", None
+        from vision import ui_control
+        return getattr(ui_control, tool_name)(**tool_input), "visual", None
+
     if has_skill(tool_name):
         return _run_skill_with_timeout(tool_name, tool_input), "skill", None
 
@@ -143,6 +149,8 @@ def _detect_excel_version_once(task: AgentTask):
     Cached on the task so a resumed conversation doesn't re-detect
     every turn.
     """
+    if config.VISUAL_ONLY_MODE:
+        return {"verified": True, "label": "visual-only mode", "supports_dynamic_arrays": False}
     if task.excel_version_info is not None:
         return task.excel_version_info
     try:
@@ -201,10 +209,19 @@ def _build_final_response_reality_check(task: AgentTask, ai_final_text: str) -> 
 def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences: dict = None):
     excel_version_info = _detect_excel_version_once(task)
     system_prompt = build_system_prompt(user_preferences, excel_version_info)
+    if task.awaiting_approval:
+        system_prompt += (
+            "\n\nCURRENT MODE: PLANNING ONLY. You may use only read-only workbook tools "
+            "to understand the request and workbook. Do not change Excel. Summarize the "
+            "proposed changes and ask the user to reply Confirm before execution."
+        )
+    else:
+        system_prompt += "\n\nCURRENT MODE: EXECUTION APPROVED. Apply only the plan the user confirmed."
     steps_taken = 0
 
-    from skills.excel_shared import bind_workbook_context
-    bind_workbook_context(task.workbook_name)
+    if not config.VISUAL_ONLY_MODE:
+        from skills.excel_shared import bind_workbook_context
+        bind_workbook_context(task.workbook_name)
 
     from knowledge.rag import bind_user_context
     bind_user_context(task.user_id)
@@ -229,6 +246,14 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 task.structured_steps.append({"type": "reasoning", "text": text})
 
         if not tool_calls:
+            if task.awaiting_approval:
+                task.is_done = True
+                task.final_response = text_blocks[-1] if text_blocks else (
+                    "I need to understand the requested workbook change before proceeding. "
+                    "Please clarify what you would like changed."
+                )
+                task.chat_transcript.append({"role": "assistant", "text": task.final_response})
+                break
             has_attempted_action = any(step.get("type") == "action" for step in task.structured_steps)
             if not has_attempted_action and not task.text_only_action_retry_used:
                 task.text_only_action_retry_used = True
@@ -245,17 +270,20 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             action_steps = [
                 step for step in task.structured_steps if step.get("type") == "action"
             ]
-            read_only_tools = {"get_excel_version", "inspect_workbook", "read_range", "screenshot_active_window"}
+            read_only_tools = (
+                {"take_screenshot", "parse_screen"}
+                if config.VISUAL_ONLY_MODE
+                else {"get_excel_version", "inspect_workbook", "read_range", "screenshot_active_window"}
+            )
+            verification_tool = "parse_screen" if config.VISUAL_ONLY_MODE else "inspect_workbook"
             last_workbook_change = max(
                 (index for index, step in enumerate(action_steps)
                  if step.get("tool_name") not in read_only_tools),
                 default=-1,
             )
-            # The inspection must be after the last workbook change. An
-            # initial inspection before the edits does not qualify.
             has_final_inspection = any(
                 index > last_workbook_change
-                and step.get("tool_name") == "inspect_workbook"
+                and step.get("tool_name") == verification_tool
                 and step.get("status") == "success"
                 and isinstance(step.get("result"), dict)
                 and step["result"].get("verified") is True
@@ -267,8 +295,8 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 task.messages.append({
                     "role": "user",
                     "content": (
-                        "Before giving a final answer, call inspect_workbook now as the final verification "
-                        "step. Compare the live workbook to every requested deliverable. Fix any gaps you "
+                        f"Before giving a final answer, call {verification_tool} now as the final verification "
+                        "step. Compare the live state to every requested deliverable. Fix any gaps you "
                         "find; if you cannot fix them, respond INCOMPLETE with the missing items."
                     ),
                 })
@@ -281,9 +309,6 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                     "so the requested work cannot be verified.\n\n" + final_text
                 )
             task.final_response = _build_final_response_reality_check(task, final_text)
-            # Persist an assistant turn for every completed run. Without
-            # this, /tasks/{id} returned an empty transcript and the UI had
-            # nothing to render when a user clicked a Recent conversation.
             task.chat_transcript.append({"role": "assistant", "text": task.final_response})
 
             unresolved = [
@@ -313,15 +338,23 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             tool_name = tool_call.name
             tool_input = dict(tool_call.input) if config.AI_PROVIDER == "claude" else providers.gemini_tool_input(tool_call)
 
+            if task.awaiting_approval and tool_name not in READ_ONLY_TOOL_NAMES:
+                result = {
+                    "verified": False,
+                    "error": "Workbook changes are locked until the user explicitly confirms the proposed plan.",
+                }
+                task.structured_steps.append({
+                    "type": "action", "tool_name": tool_name, "execution_layer": "approval_gate",
+                    "input": tool_input, "result": result, "status": "blocked",
+                })
+                if config.AI_PROVIDER == "claude":
+                    providers.submit_claude_tool_result(task, tool_call, result)
+                else:
+                    providers.submit_gemini_tool_result(task, tool_call, result)
+                continue
+
             task.log_step(f"⏳ Running: {tool_name} {tool_input}")
 
-            # FIXED: a raw exception (e.g. from write_table's row-length
-            # crash) used to be marked "failed" on the FIRST attempt,
-            # skipping the retry_counts accounting that verified:false
-            # results go through - meaning a genuine exception never got
-            # the same "try once more, then let codegen take over" chance
-            # as an ordinary reported failure. Both paths now go through
-            # identical accounting.
             try:
                 result, execution_layer, generated_code = dispatch_action(tool_name, tool_input)
                 status = "success"

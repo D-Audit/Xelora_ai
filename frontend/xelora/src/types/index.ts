@@ -20,7 +20,6 @@ export interface User {
   isAdmin?: boolean;
 }
 
-// ─── Organisation ─────────────────────────────────────────────────────────────
 
 export interface Organisation {
   id: string;
@@ -31,7 +30,6 @@ export interface Organisation {
   memberCount: number;
 }
 
-// ─── Subscription & Plans ─────────────────────────────────────────────────────
 
 export type PlanTier = 'trial' | 'starter' | 'professional' | 'business';
 export type BillingCycle = 'monthly' | 'annual';
@@ -77,7 +75,6 @@ export interface Subscription {
   trialEndsAt?: string;
 }
 
-// ─── Usage ────────────────────────────────────────────────────────────────────
 
 export interface UsageLimits {
   aiActionsUsed: number;
@@ -100,7 +97,6 @@ export interface DailyUsage {
   fileOperations: number;
 }
 
-// ─── Files ────────────────────────────────────────────────────────────────────
 
 export type FileStatus = 'ready' | 'processing' | 'completed' | 'needs_review' | 'failed' | 'archived';
 export type FileType = 'xlsx' | 'xls' | 'csv' | 'ods' | 'tsv';
@@ -132,7 +128,6 @@ export interface FileVersion {
   isAutoSave: boolean;
 }
 
-// ─── Workflows ────────────────────────────────────────────────────────────────
 
 export type WorkflowStatus = 'draft' | 'published' | 'archived' | 'running';
 export type StepType =
@@ -212,7 +207,6 @@ export interface WorkflowRunEvent {
   type: 'info' | 'success' | 'warning' | 'error';
 }
 
-// ─── Devices ──────────────────────────────────────────────────────────────────
 
 export type DeviceOS = 'windows' | 'macos' | 'linux';
 export type DeviceStatus = 'active' | 'inactive' | 'pending' | 'removed';
@@ -230,7 +224,6 @@ export interface Device {
   authorisedAt: string;
 }
 
-// ─── Team ─────────────────────────────────────────────────────────────────────
 
 export type MemberStatus = 'active' | 'invited' | 'suspended' | 'removed';
 
@@ -249,7 +242,6 @@ export interface TeamMember {
   avatarUrl?: string;
 }
 
-// ─── Notifications ────────────────────────────────────────────────────────────
 
 export type NotificationCategory = 'workflow' | 'billing' | 'account' | 'team' | 'product';
 export type NotificationPriority = 'low' | 'medium' | 'high';
@@ -267,7 +259,6 @@ export interface Notification {
   actionLabel?: string;
 }
 
-// ─── Billing & Invoices ───────────────────────────────────────────────────────
 
 export type InvoiceStatus = 'paid' | 'pending' | 'failed' | 'refunded';
 
@@ -285,7 +276,6 @@ export interface Invoice {
   periodEnd: string;
 }
 
-// ─── Desktop Releases ─────────────────────────────────────────────────────────
 
 export type ReleaseStatus = 'stable' | 'beta' | 'deprecated' | 'coming_soon';
 export type ReleaseOS = 'windows' | 'macos' | 'linux';
@@ -303,7 +293,6 @@ export interface DesktopRelease {
   checksum?: string;
 }
 
-// ─── Templates ────────────────────────────────────────────────────────────────
 
 export type TemplateCategory =
   | 'accounting'
@@ -332,7 +321,6 @@ export interface Template {
   tags?: string[];
 }
 
-// ─── Admin ────────────────────────────────────────────────────────────────────
 
 export interface AdminStats {
   totalUsers: number;

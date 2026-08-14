@@ -11,7 +11,6 @@ export async function GET() {
   const result = await backendFetch<Record<string, unknown>>('/auth/me', { token });
 
   if (!result.ok) {
-    // Token expired/invalid on the backend - clear the stale cookie too.
     await clearSessionCookie();
     return NextResponse.json({ user: null }, { status: 200 });
   }

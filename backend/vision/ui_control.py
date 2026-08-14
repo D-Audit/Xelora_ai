@@ -19,6 +19,8 @@ Phase 2 (see README "What's scaffolded vs implemented").
 
 import time
 
+from vision.omniparser_client import parse_image
+
 try:
     import pyautogui
     _HAS_PYAUTOGUI = True
@@ -31,6 +33,8 @@ try:
 except Exception:
     _HAS_PYWINAUTO = False
 
+_last_elements: list[dict] = []
+
 
 def _require_display():
     if not _HAS_PYAUTOGUI:
@@ -41,14 +45,13 @@ def _require_display():
         )
 
 
-def screenshot_active_window(save_path: str) -> dict:
+def take_screenshot() -> dict:
     """Captures the current screen (Intelligent Window Capture, simplified
     to whole-screen for portability - swap in pywinauto's per-window
     capture on Windows for the 'window-specific screenshot' variant)."""
     _require_display()
     img = pyautogui.screenshot()
-    img.save(save_path)
-    return {"path": save_path, "size": img.size, "verified": True}
+    return {"screen_size": list(img.size), "verified": True}
 
 
 def click_at(x: int, y: int, double: bool = False) -> dict:
@@ -61,6 +64,33 @@ def click_at(x: int, y: int, double: bool = False) -> dict:
     return {"clicked_at": [x, y], "double": double, "verified": True}
 
 
+def parse_screen() -> dict:
+    """Capture the screen, send it to local OmniParser, and remember valid targets."""
+    _require_display()
+    global _last_elements
+    parsed = parse_image(pyautogui.screenshot())
+    _last_elements = parsed["elements"]
+    return {**parsed, "verified": True}
+
+
+def _validated_target(x: int, y: int) -> dict:
+    for element in _last_elements:
+        cx, cy = element["center"]
+        if abs(x - cx) <= 12 and abs(y - cy) <= 12:
+            return element
+    raise ValueError("Coordinates must be the center of an element from the latest parse_screen result.")
+
+
+def click(x: int, y: int) -> dict:
+    element = _validated_target(x, y)
+    return {**click_at(x, y), "element": element}
+
+
+def double_click(x: int, y: int) -> dict:
+    element = _validated_target(x, y)
+    return {**click_at(x, y, double=True), "element": element}
+
+
 def type_text(text: str, interval: float = 0.02) -> dict:
     _require_display()
     pyautogui.typewrite(text, interval=interval)
@@ -71,6 +101,18 @@ def press_key(key: str) -> dict:
     _require_display()
     pyautogui.press(key)
     return {"pressed": key, "verified": True}
+
+
+def hotkey(keys: list[str]) -> dict:
+    _require_display()
+    pyautogui.hotkey(*keys)
+    return {"pressed": keys, "verified": True}
+
+
+def scroll(clicks: int) -> dict:
+    _require_display()
+    pyautogui.scroll(clicks)
+    return {"scrolled": clicks, "verified": True}
 
 
 def list_open_windows() -> dict:

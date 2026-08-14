@@ -21,15 +21,6 @@ def run(sheet_name: str, cell: str, url: str, json_path: str = None):
         for part in json_path.split("."):
             value = value[part]
 
-    # The bug that broke B12: many public APIs (exchange rates, weather,
-    # etc.) return a nested object with dozens of fields, not one plain
-    # number - if json_path wasn't given (or pointed at the wrong level),
-    # `value` here is still a dict/list, and writing THAT into one cell
-    # crashes with a raw, unhelpful xlwings error ("must be real number,
-    # not dict"). Catch it here instead, before touching Excel at all, and
-    # tell the AI exactly what to pick from - so it can retry with the
-    # correct json_path instead of silently giving up or hardcoding a
-    # fake number.
     if isinstance(value, dict):
         return {
             "sheet": sheet_name, "cell": cell, "url": url,

@@ -59,6 +59,13 @@ const api: XeloraDesktopAPI = {
   getSession: () => ipcRenderer.invoke('auth:get-session') as Promise<SessionState | null>,
   logout: () => ipcRenderer.invoke('auth:logout'),
   openRecentFile: (filePath: string) => ipcRenderer.invoke('files:open-recent', filePath) as Promise<OpenWorkbookResult | null>,
+  setFloatingMode: (enabled: boolean) => ipcRenderer.invoke('window:set-floating-mode', enabled) as Promise<boolean>,
+  getFloatingMode: () => ipcRenderer.invoke('window:get-floating-mode') as Promise<boolean>,
+  onFloatingModeChange: (callback: (enabled: boolean) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, enabled: boolean) => callback(enabled);
+    ipcRenderer.on('window:floating-mode-changed', handler);
+    return () => ipcRenderer.removeListener('window:floating-mode-changed', handler);
+  },
 };
 
 contextBridge.exposeInMainWorld('xelora', api);

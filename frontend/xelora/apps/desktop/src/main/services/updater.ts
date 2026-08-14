@@ -16,7 +16,6 @@ function showUpdateNotification(title: string, body: string): void {
   try {
     new Notification({ title, body, silent: false }).show();
   } catch {
-    // Notification setup is best-effort only.
   }
 }
 

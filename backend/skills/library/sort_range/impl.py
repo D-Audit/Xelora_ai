@@ -12,21 +12,16 @@ def run(sheet_name: str, cell_range: str, sort_columns: list):
     sheet = wb.sheets[sheet_name]
     rng = sheet.range(cell_range)
 
-    # Get total columns inside the selected boundaries to prevent out-of-range crashes
     total_range_columns = rng.columns.count
 
     sort_obj = sheet.api.Sort
     sort_obj.SortFields.Clear()
     
     for level in sort_columns:
-        # Cast to int to prevent "Indices must be integers" crash
         raw_index = int(level["column_index"])
         
-        # FIX 1: Automatically shift 1-indexed numbers (like 7 for column G) 
-        # to 0-indexed positions (6) used by Python range slicing
         col_idx = raw_index - 1 if raw_index >= 1 else raw_index
         
-        # Guardrail check against boundaries to prevent unhandled background errors
         if col_idx < 0 or col_idx >= total_range_columns:
             return {
                 "sheet": sheet_name, "range": cell_range, "sort_columns": sort_columns,
@@ -44,8 +39,6 @@ def run(sheet_name: str, cell_range: str, sort_columns: list):
 
     sort_obj.SetRange(rng.api)
     
-    # FIX 2: Dynamically detect if row 1 is included to handle headers properly.
-    # If sorting from row 2 (e.g., A2:G4), there is no header row inside this specific range selection.
     if rng.row == 1:
         sort_obj.Header = 1  # 1 = xlYes
     else:

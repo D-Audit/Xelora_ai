@@ -82,7 +82,6 @@ def _serialize_run(r: WorkflowRun, workflow_name: str = "") -> dict:
     }
 
 
-# --- workflow CRUD -----------------------------------------------------
 
 @router.get("")
 def list_workflows(user_id: int = Depends(get_current_user_id), db: Session | None = Depends(get_db_or_503)):
@@ -145,7 +144,6 @@ def delete_workflow(workflow_id: int, user_id: int = Depends(get_current_user_id
     return {"deleted": True}
 
 
-# --- running a workflow --------------------------------------------------
 
 def _instruction_from_steps(workflow: Workflow) -> str:
     enabled = [s for s in (workflow.steps or []) if s.get("isEnabled", True)]
@@ -176,9 +174,6 @@ def run_workflow(
         headers["Authorization"] = authorization
 
     try:
-        # Real internal call to the existing /task endpoint - goes
-        # through the exact same plan-limit middleware and agent
-        # pipeline as any direct call from the frontend.
         resp = requests.post(
             f"{INTERNAL_BASE_URL}/task",
             json={"instruction": instruction, "user_id": user_id},
@@ -189,8 +184,6 @@ def run_workflow(
         raise HTTPException(status_code=502, detail="Could not reach the agent task endpoint.")
 
     if resp.status_code == 402:
-        # Plan limit hit - surface the same message the direct /task
-        # call would have given.
         raise HTTPException(status_code=402, detail=resp.json().get("error", "Plan limit reached."))
     if not resp.ok:
         raise HTTPException(status_code=resp.status_code, detail="Could not start the workflow run.")
@@ -237,7 +230,6 @@ def get_run(
     if not run:
         raise HTTPException(status_code=404, detail="Run not found.")
 
-    # Sync with the live task, if it's still in flight.
     if run.status == "running" and run.task_id:
         headers = {}
         if LOCAL_API_KEY:
@@ -271,7 +263,6 @@ def get_run(
     return _serialize_run(run, workflow_name=workflow.name if workflow else "")
 
 
-# --- templates -------------------------------------------------------------
 
 @router.get("/templates/list")
 def list_templates(db: Session | None = Depends(get_db_or_503)):

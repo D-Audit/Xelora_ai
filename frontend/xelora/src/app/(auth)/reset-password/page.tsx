@@ -51,7 +51,6 @@ export default function ResetPasswordPage() {
   });
 
   const onSubmit = async () => {
-    // Simulate API call — replace with real reset endpoint
     await new Promise((resolve) => setTimeout(resolve, 900));
     toast.success('Password updated. You can now sign in with your new password.');
     router.push('/login');
@@ -59,7 +58,6 @@ export default function ResetPasswordPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      {/* Logo */}
       <div className="flex justify-center">
         <Link href="/" aria-label="Go to homepage">
           <XeloraLogo size="lg" />
@@ -78,7 +76,6 @@ export default function ResetPasswordPage() {
 
         <CardContent>
           <form onSubmit={handleSubmit(onSubmit)} noValidate className="flex flex-col gap-4">
-            {/* New password */}
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="password">New password</Label>
               <div className="relative">
@@ -105,7 +102,6 @@ export default function ResetPasswordPage() {
               )}
             </div>
 
-            {/* Confirm password */}
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="confirmPassword">Confirm new password</Label>
               <div className="relative">

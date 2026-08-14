@@ -42,22 +42,8 @@ class Task(Base):
     status = Column(String, default="running")
     created_at = Column(DateTime, default=_now)
     completed_at = Column(DateTime, nullable=True)
-    # Real chat history (not mock data): a JSON-encoded list of
-    # {role, text, timestamp} turns - see AgentTask.chat_transcript in
-    # agent/core.py, which is what actually gets written here after each
-    # run. Powers GET /tasks and GET /tasks/{id} for the chat sidebar.
     transcript = Column(Text, nullable=True)
-    # The full raw provider-format conversation (task.messages), needed
-    # to genuinely RESUME a task after a server restart - not just show
-    # a read-only transcript. transcript above is a simplified display
-    # copy; this is the real working memory the AI needs back to
-    # actually continue the conversation. See main.py's
-    # _get_or_reconstruct_task().
     raw_messages = Column(Text, nullable=True)
-    # Needed to correctly rebind the Excel workbook context when
-    # reconstructing a task from the DB (see agent/core.py's
-    # bind_workbook_context) - previously only lived in the in-memory
-    # AgentTask object, lost on restart along with everything else.
     workbook_name = Column(String, nullable=True)
     is_read = Column(Boolean, default=False, nullable=False)
 

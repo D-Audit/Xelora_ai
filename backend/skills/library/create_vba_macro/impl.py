@@ -32,7 +32,6 @@ def run(module_name: str, vba_code: str):
 
     vb_project = wb.api.VBProject
 
-    # Remove an existing module of the same name first so re-runs don't fail on a duplicate.
     for component in list(vb_project.VBComponents):
         if component.Name == module_name:
             vb_project.VBComponents.Remove(component)

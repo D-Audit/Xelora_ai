@@ -13,7 +13,6 @@
  */
 declare global {
   interface Window {
-    // The current Electron preload exposes this API.
     xelora?: {
       getAppInfo?: () => Promise<unknown>;
     };
@@ -22,6 +21,9 @@ declare global {
       version: string;
       isDesktopApp: boolean;
       reload: () => void;
+      setFloatingMode: (enabled: boolean) => Promise<boolean>;
+      getFloatingMode: () => Promise<boolean>;
+      onFloatingModeChange: (callback: (enabled: boolean) => void) => () => void;
     };
   }
 }

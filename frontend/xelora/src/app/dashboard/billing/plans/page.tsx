@@ -43,13 +43,10 @@ export default function BillingPlansPage() {
     try {
       const result = await startCheckout(tier, 'monthly');
       if (result.checkout_url) {
-        // Real Stripe checkout - hand off to Stripe's hosted page.
         // eslint-disable-next-line no-restricted-globals -- external redirect to
-        // Stripe's domain; next/navigation's router cannot navigate off-site.
         window.location.href = result.checkout_url;
         return;
       }
-      // Dev mode - already activated on the backend.
       toast.success(`Switched to the ${tier} plan.`);
       router.push('/dashboard/billing');
     } catch (err) {

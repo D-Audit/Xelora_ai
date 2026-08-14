@@ -36,7 +36,6 @@ export function SpreadsheetWorkspace({ fileName, onClose }: Props) {
 
   return (
     <div className="flex h-full flex-col bg-white overflow-hidden">
-      {/* Compact toolbar */}
       <div className="flex items-center gap-1 border-b border-xelora-border px-3 py-1.5 bg-xelora-surface-2 shrink-0 flex-wrap">
         <button onClick={() => toast.success('File saved.')} className="toolbar-btn" title="Save"><Save className="h-3.5 w-3.5" /></button>
         <div className="h-4 w-px bg-xelora-border mx-1" />
@@ -61,7 +60,6 @@ export function SpreadsheetWorkspace({ fileName, onClose }: Props) {
         </button>
       </div>
 
-      {/* Formula bar */}
       <div className="flex items-center gap-2 border-b border-xelora-border px-3 py-1.5 shrink-0">
         <span className="w-10 text-center rounded border border-xelora-border bg-xelora-surface-2 px-2 py-0.5 text-xs font-mono text-xelora-text-secondary shrink-0">
           {selectedCell ?? ''}
@@ -76,7 +74,6 @@ export function SpreadsheetWorkspace({ fileName, onClose }: Props) {
         />
       </div>
 
-      {/* Grid */}
       <div className="flex-1 overflow-auto">
         <table className="text-xs border-collapse min-w-full">
           <thead className="sticky top-0 z-10">
@@ -122,7 +119,6 @@ export function SpreadsheetWorkspace({ fileName, onClose }: Props) {
         </table>
       </div>
 
-      {/* Sheet tabs */}
       <div className="flex items-center gap-0.5 border-t border-xelora-border px-3 py-1 bg-xelora-surface-2 shrink-0 overflow-x-auto">
         {SHEETS.map(sheet => (
           <button

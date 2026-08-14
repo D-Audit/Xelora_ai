@@ -20,7 +20,6 @@ export interface BackendResult<T = unknown> {
   data: T;
 }
 
-/** Build authenticated server-to-server headers for non-JSON requests. */
 export function backendHeaders(token?: string | null): Record<string, string> {
   const headers: Record<string, string> = {};
   if (BACKEND_API_KEY) headers['X-API-Key'] = BACKEND_API_KEY;
@@ -28,7 +27,6 @@ export function backendHeaders(token?: string | null): Record<string, string> {
   return headers;
 }
 
-/** Resolve a backend path without exposing the backend URL to the browser. */
 export function backendUrl(path: string): string {
   return `${BACKEND_URL}${path.startsWith('/') ? path : `/${path}`}`;
 }

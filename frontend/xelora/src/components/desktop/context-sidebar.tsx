@@ -42,7 +42,6 @@ export function DesktopContextSidebar({ view, tasks, activeTask, onSelectTask, o
 
   return (
     <aside className="flex h-full w-full flex-col bg-white border-r border-xelora-border overflow-hidden">
-      {/* New Task button */}
       <div className="px-3 pt-3 pb-2 shrink-0">
         <button
           onClick={onNewTask}

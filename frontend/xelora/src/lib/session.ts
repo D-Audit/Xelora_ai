@@ -75,7 +75,6 @@ export function clearOAuthStateCookie(response: NextResponse) {
   return response;
 }
 
-/** Reads and deletes the OAuth state cookie in one step - it's only ever meant to be checked once. */
 export async function consumeOAuthState(): Promise<string | null> {
   const store = await cookies();
   const value = store.get(OAUTH_STATE_COOKIE)?.value ?? null;

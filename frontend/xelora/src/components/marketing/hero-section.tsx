@@ -38,9 +38,7 @@ export function HeroSection() {
           </p>
         </div>
 
-        {/* Product interface preview */}
         <div className="mt-16 rounded-xl border border-xelora-border bg-white shadow-sm overflow-hidden">
-          {/* Browser chrome */}
           <div className="flex items-center gap-2 px-4 py-3 bg-xelora-surface-2 border-b border-xelora-border">
             <div className="flex gap-1.5">
               <span className="h-3 w-3 rounded-full bg-[#ff5f57]" />
@@ -54,9 +52,7 @@ export function HeroSection() {
             </div>
           </div>
 
-          {/* App shell preview */}
           <div className="flex h-[420px] sm:h-[480px]">
-            {/* Sidebar */}
             <div className="hidden sm:flex w-52 flex-col bg-xelora-nav border-r border-white/10 py-4">
               <div className="px-4 mb-6">
                 <div className="flex items-center gap-2">
@@ -79,7 +75,6 @@ export function HeroSection() {
               ))}
             </div>
 
-            {/* Main content */}
             <div className="flex-1 p-5 overflow-hidden">
               <div className="flex items-center justify-between mb-4">
                 <div>
@@ -92,7 +87,6 @@ export function HeroSection() {
                 </div>
               </div>
 
-              {/* Workflow steps panel */}
               <div className="rounded-lg border border-xelora-border bg-white p-4 mb-3">
                 <div className="flex items-center gap-2 mb-3">
                   <div className="h-4 w-4 rounded-full bg-xelora-green" />
@@ -121,7 +115,6 @@ export function HeroSection() {
                 </div>
               </div>
 
-              {/* Approval prompt */}
               <div className="rounded-lg border border-xelora-info bg-xelora-info-bg p-3 flex items-start gap-3">
                 <div className="h-4 w-4 rounded-full bg-xelora-info shrink-0 mt-0.5" />
                 <div className="flex-1">

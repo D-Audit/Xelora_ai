@@ -67,7 +67,6 @@ export const getTaskProgress = (taskId: number) =>
   request<TaskProgressResponse>(`/api/task/${taskId}/progress`);
 export const getTaskReveal = (taskId: number) => request(`/api/task/${taskId}/reveal`);
 
-// Compatibility aliases used by the desktop workspace components.
 export type BackendTaskSummary = ChatSummary;
 export type BackendTaskDetail = ChatDetail;
 export type BackendProgress = TaskProgressResponse;

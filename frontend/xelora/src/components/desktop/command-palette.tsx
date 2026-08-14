@@ -45,7 +45,6 @@ export function DesktopCommandPalette({ onClose, onViewChange, onNewTask }: Prop
     <div className="fixed inset-0 z-50 flex items-start justify-center pt-24 px-4" role="dialog" aria-modal="true" aria-label="Command palette">
       <div className="absolute inset-0 bg-xelora-black/40" onClick={onClose} />
       <div className="relative w-full max-w-lg rounded-xl border border-xelora-border bg-white shadow-xl overflow-hidden">
-        {/* Search input */}
         <div className="flex items-center gap-3 border-b border-xelora-border px-4 py-3">
           <Search className="h-4 w-4 text-xelora-text-muted shrink-0" />
           <input
@@ -63,7 +62,6 @@ export function DesktopCommandPalette({ onClose, onViewChange, onNewTask }: Prop
           </button>
         </div>
 
-        {/* Results */}
         <ul className="py-1 max-h-80 overflow-y-auto" role="listbox">
           {filtered.length === 0 && (
             <li className="px-4 py-6 text-center text-sm text-xelora-text-muted">No commands found for &quot;{query}&quot;</li>

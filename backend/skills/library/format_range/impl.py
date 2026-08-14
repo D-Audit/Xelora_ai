@@ -29,7 +29,6 @@ def run(
     
     cell_range = sheet.range(range)
     
-    # Font formatting
     if bold is not None:
         cell_range.font.bold = bold
     
@@ -37,17 +36,14 @@ def run(
         cell_range.font.size = font_size
     
     if font_color:
-        # Convert color name or hex to RGB
         cell_range.font.color = _parse_color(font_color)
     
     if bg_color:
         cell_range.color = _parse_color(bg_color)
     
-    # Number formatting
     if number_format:
         cell_range.number_format = number_format
     
-    # Alignment
     alignment_map_h = {
         'left': -4131,
         'center': -4108,
@@ -65,9 +61,7 @@ def run(
     if align_vertical and align_vertical.lower() in alignment_map_v:
         cell_range.api.VerticalAlignment = alignment_map_v[align_vertical.lower()]
     
-    # Borders
     if borders:
-        # Apply borders to all edges
         for edge in [7, 8, 9, 10]:  # xlEdgeLeft, xlEdgeTop, xlEdgeBottom, xlEdgeRight
             cell_range.api.Borders(edge).LineStyle = 1
             cell_range.api.Borders(edge).Weight = 2
@@ -84,7 +78,6 @@ def run(
 
 def _parse_color(color: str):
     """Parse color string to RGB tuple or hex value."""
-    # Common color names
     color_map = {
         'red': (255, 0, 0),
         'blue': (0, 0, 255),
@@ -103,7 +96,6 @@ def _parse_color(color: str):
     if color_lower in color_map:
         return color_map[color_lower]
     
-    # Try to parse hex color
     if color.startswith('#'):
         hex_color = color[1:]
         if len(hex_color) == 6:
@@ -112,5 +104,4 @@ def _parse_color(color: str):
             b = int(hex_color[4:6], 16)
             return (r, g, b)
     
-    # Default to black if can't parse
     return (0, 0, 0)

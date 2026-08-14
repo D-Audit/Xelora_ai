@@ -19,11 +19,6 @@ _HEAVY_FUNCTIONS = ("SUMIFS(", "XLOOKUP(", "SORT(", "UNIQUE(", "FILTER(",
 _DYNAMIC_ARRAY_ONLY_FUNCTIONS = ("UNIQUE(", "SORT(", "FILTER(", "SEQUENCE(", "RANDARRAY(",
                                   "XLOOKUP(", "LET(")
 
-# [@ColumnName] "current row" structured self-references - proven, repeat
-# hang trigger across multiple runs, even though the syntax itself is
-# valid and old (Excel 2007+). A plain cell reference (=E2*F2) has always
-# worked in every case we've seen, so this is blocked outright rather
-# than risked.
 _AT_COLUMN_REF_RE = re.compile(r"\[@[^\]]+\]")
 
 _STRUCTURED_REF_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\[([^\[\]]+)\]")
@@ -121,7 +116,6 @@ def run(sheet_name: str, cell: str, formula: str):
     sheet = wb.sheets[sheet_name]
     rng = sheet.range(cell)
 
-    # 1. [@Column] "current row" self-references - blocked outright, proven repeat hang trigger.
     if _AT_COLUMN_REF_RE.search(formula):
         found = _AT_COLUMN_REF_RE.findall(formula)
         return {
@@ -135,9 +129,6 @@ def run(sheet_name: str, cell: str, formula: str):
             ),
         }
 
-    # 2. Functions that only exist in Excel 365/2021+ - tested live against
-    # THIS user's actual Excel, not assumed from a version number (which
-    # Excel itself can't reliably report - 2016/2019/365 all say "16.0").
     upper_formula = formula.upper()
     if any(fn in upper_formula for fn in _DYNAMIC_ARRAY_ONLY_FUNCTIONS) and not supports_dynamic_arrays(wb.app):
         used = [fn.rstrip("(") for fn in _DYNAMIC_ARRAY_ONLY_FUNCTIONS if fn in upper_formula]
@@ -154,7 +145,6 @@ def run(sheet_name: str, cell: str, formula: str):
             ),
         }
 
-    # 3. Complexity limit - too many heavy functions combined in one cell.
     complexity_ok, complexity_error = _check_complexity(formula)
     if not complexity_ok:
         return {
@@ -163,7 +153,6 @@ def run(sheet_name: str, cell: str, formula: str):
             "verification_note": complexity_error,
         }
 
-    # 4. Structured references to columns that don't actually exist.
     refs_ok, ref_error = _validate_structured_references(wb, formula)
     if not refs_ok:
         return {
@@ -172,7 +161,6 @@ def run(sheet_name: str, cell: str, formula: str):
             "verification_note": ref_error,
         }
 
-    # 5. Spill area overlap check.
     if _formula_may_spill(formula):
         is_clear, blocking_cell = _check_spill_area_is_clear(sheet, cell)
         if not is_clear:

@@ -19,9 +19,7 @@ def run(
     wb = get_active_workbook()
     sheet = wb.sheets[sheet_name]
     
-    # Get the chart
     try:
-        # xlwings uses 1-based indexing
         chart = sheet.charts[chart_index - 1]
     except IndexError:
         return {
@@ -30,22 +28,18 @@ def run(
             "verified": False
         }
     
-    # Get position from cell
     cell = sheet.range(top_left_cell)
     
-    # Position and size the chart
     chart.left = cell.left
     chart.top = cell.top
     chart.width = width
     chart.height = height
     
-    # Set title if provided
     if title:
         try:
             chart.api.SetElement(2)  # msoElementChartTitleAboveChart
             chart.api.ChartTitle.Text = title
         except Exception as e:
-            # Title setting can fail for some chart types, but positioning still worked
             pass
     
     wb.save()

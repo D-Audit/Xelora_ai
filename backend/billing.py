@@ -124,7 +124,6 @@ def _serialize_plan(plan: dict) -> dict:
     }
 
 
-# --- routes ----------------------------------------------------------------
 
 @router.get("/plans")
 def list_plans():
@@ -210,7 +209,6 @@ def checkout(req: CheckoutRequest, user_id: int = Depends(get_current_user_id), 
         )
         return {"checkout_url": session.url, "dev_mode": False}
 
-    # --- dev mode: activate immediately, no payment -----------------------
     start, end = _period_bounds(req.billing_cycle)
     sub.plan_tier = req.plan_tier
     sub.billing_cycle = req.billing_cycle
@@ -259,10 +257,6 @@ async def stripe_webhook(request: Request, db: Session | None = Depends(get_db_o
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
     except Exception:
-        # Covers both a malformed payload (ValueError) and a bad/missing
-        # signature (stripe.error.SignatureVerificationError in older
-        # SDKs, stripe.SignatureVerificationError in newer ones) without
-        # pinning behavior to one SDK layout.
         raise HTTPException(status_code=400, detail="Invalid Stripe webhook signature.")
 
     obj = event["data"]["object"]
