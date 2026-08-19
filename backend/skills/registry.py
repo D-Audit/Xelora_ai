@@ -1,4 +1,4 @@
-"""
+r"""
 skills/registry.py
 Turns the SKILL_REGISTRY into the tool-schema formats each AI provider
 expects, and provides the single dispatch function agent/core.py calls

@@ -1,0 +1,21 @@
+ WARNING: running with ALLOW_NO_AUTH=true and no API key - every endpoint is open to anyone who can reach this server. Only use this for local testing.
+INFO:     127.0.0.1:3157 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3157 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3157 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3157 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3157 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3157 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3157 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3157 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3157 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3157 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3157 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:3157 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:9637 - "GET /auth/me HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:9639 - "GET /auth/me HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:13549 - "GET /auth/google/login?redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fapi%2Fauth%2Fgoogle%2Fcallback&state=3946f6ad-298a-483b-b84b-58af6beabaa9 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:5111 - "GET /auth/google/login?redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fapi%2Fauth%2Fgoogle%2Fcallback&state=663e23db-2488-4317-96f3-5f18ea24e7b2 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:8583 - "GET /auth/google/login?redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fapi%2Fauth%2Fgoogle%2Fcallback&state=748373ed-aa3e-4b4f-af55-46309c05262c HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:6574 - "GET /auth/google/login?redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fapi%2Fauth%2Fgoogle%2Fcallback&state=4abd608c-9ecb-40a9-acad-970416b8fe0f HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:6587 - "GET /auth/google/login?redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fapi%2Fauth%2Fgoogle%2Fcallback&state=8ee694be-6d80-4cf4-b6d5-6ec29cee56fd HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:14859 - "GET /auth/google/login?redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fapi%2Fauth%2Fgoogle%2Fcallback&state=9986c428-a788-4d99-964b-2b9e5f7b5119 HTTP/1.1" 404 Not Found

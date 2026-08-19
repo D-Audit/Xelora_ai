@@ -11,6 +11,8 @@ documented.
 Run with:  uvicorn main:app --reload
 """
 
+import threading
+
 from fastapi import FastAPI, Request, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -19,7 +21,7 @@ from sqlalchemy.orm import Session
 
 import config
 import security
-from agent.core import AgentTask, run_task
+from agent.core import AgentTask, get_task_completion_status, run_task
 from agent.reveal import reveal_workflow, progress_snapshot
 from auth import decode_token
 from database import init_db, get_db
@@ -39,6 +41,10 @@ if config.ALLOWED_ORIGINS:
 
 ACTIVE_TASKS = {}
 _next_local_id = 1
+# Excel automation drives one active desktop application. Serializing complete
+# task runs prevents two background requests from interleaving clicks or
+# workbook operations against the same active Excel window.
+_TASK_EXECUTION_LOCK = threading.Lock()
 
 
 @app.on_event("startup")
@@ -106,6 +112,17 @@ def _assert_task_owner(task_user_id: int | None, current_user_id: int | None):
         raise HTTPException(status_code=403, detail="This task belongs to a different user.")
 
 
+def _assert_user_scope(requested_user_id: int, current_user_id: int | None):
+    """Keep legacy API-key-only clients working while scoping JWT callers.
+
+    The Next.js app always supplies a JWT. It must never be able to read or
+    write preference, pattern, or knowledge records for a different account
+    simply by changing a numeric user id in a request.
+    """
+    if current_user_id is not None and requested_user_id != current_user_id:
+        raise HTTPException(status_code=403, detail="This data belongs to a different user.")
+
+
 class InstructionRequest(BaseModel):
     instruction: str
     user_id: int | None = None
@@ -156,42 +173,68 @@ def start_task(
 
 
 def _start_task_in_background(task, task_id, user_id, user_preferences):
-    import threading
-
     def _worker():
         import json
+        from datetime import datetime, timezone
         from database import SessionLocal
-        db = SessionLocal() if SessionLocal is not None else None
+        acquired_immediately = _TASK_EXECUTION_LOCK.acquire(blocking=False)
+        if not acquired_immediately:
+            wait_message = "Waiting for the current Excel task to finish before this task can safely use the workbook."
+            task.log_step(wait_message)
+            task.structured_steps.append({"type": "reasoning", "text": wait_message})
+            _TASK_EXECUTION_LOCK.acquire()
+
+        db = None
         try:
+            db = SessionLocal() if SessionLocal is not None else None
             run_task(task, db=db, db_task_id=task_id if db is not None else None, user_preferences=user_preferences)
-            if db is not None and task.is_done:
-                from models import Task
-                from datetime import datetime, timezone
-                db.query(Task).filter_by(id=task_id).update({
-                    "status": "done",
-                    "completed_at": datetime.now(timezone.utc),
-                    "transcript": json.dumps(task.chat_transcript, default=str),
-                    "raw_messages": json.dumps(task.messages, default=str),
-                })
-                db.commit()
         except Exception as e:
-            task.log_step(f"Task crashed: {e}")
+            task.log_step(f"Task stopped unexpectedly: {e}")
             task.is_done = True
+            task.final_response = (
+                "INCOMPLETE: The task stopped before its result could be verified. "
+                f"Reason: {e}"
+            )
+            task.chat_transcript.append({"role": "assistant", "text": task.final_response})
         finally:
-            if db is not None:
-                db.close()
+            try:
+                if db is not None:
+                    try:
+                        from models import Task
+
+                        values = {
+                            "status": get_task_completion_status(task),
+                            "transcript": json.dumps(task.chat_transcript, default=str),
+                            "raw_messages": json.dumps(task.messages, default=str),
+                        }
+                        if task.is_done:
+                            values["completed_at"] = datetime.now(timezone.utc)
+                        db.query(Task).filter_by(id=task_id).update(values)
+                        db.commit()
+                    finally:
+                        db.close()
+            finally:
+                _TASK_EXECUTION_LOCK.release()
 
     thread = threading.Thread(target=_worker, daemon=True)
     thread.start()
 
 
 @app.post("/task/{task_id}/pause", dependencies=_AUTH)
-def pause_task(task_id: int, jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
+def pause_task(
+    task_id: int,
+    db: Session = Depends(_get_db_optional),
+    jwt_user_id: int | None = Depends(_current_user_id_from_jwt),
+):
     task = ACTIVE_TASKS.get(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found.")
     _assert_task_owner(task.user_id, jwt_user_id)
     task.pause()
+    if db is not None:
+        from models import Task
+        db.query(Task).filter_by(id=task_id).update({"status": "paused"})
+        db.commit()
     return {"task_id": task_id, "is_paused": True}
 
 
@@ -253,6 +296,10 @@ def resume_task(
 
     user_prefs = get_all_preferences(db, task.user_id) if (db and task.user_id) else {}
     task.resume(correction=req.correction)
+    if db is not None:
+        from models import Task
+        db.query(Task).filter_by(id=task_id).update({"status": "running"})
+        db.commit()
     _start_task_in_background(task, task_id, task.user_id, user_prefs)
 
     return {"task_id": task_id, "status": "resumed",
@@ -269,7 +316,7 @@ def get_status(task_id: int, jwt_user_id: int | None = Depends(_current_user_id_
         "task_id": task_id,
         "is_done": task.is_done,
         "is_paused": task.is_paused,
-        "status": "paused" if task.is_paused else ("done" if task.is_done else "running"),
+        "status": get_task_completion_status(task),
         "progress_log": task.progress_log,
         "final_response": task.final_response,
     }
@@ -287,6 +334,7 @@ def get_reveal_workflow(task_id: int, jwt_user_id: int | None = Depends(_current
         "final_response": task.final_response,
         "is_done": task.is_done,
         "is_paused": task.is_paused,
+        "status": get_task_completion_status(task),
     }
 
 
@@ -299,6 +347,7 @@ def get_progress(task_id: int, jwt_user_id: int | None = Depends(_current_user_i
     snapshot = progress_snapshot(task.structured_steps, task.is_done, task.final_response)
     snapshot["task_id"] = task_id
     snapshot["is_paused"] = task.is_paused
+    snapshot["status"] = get_task_completion_status(task)
     snapshot["progress_log"] = task.progress_log
     return snapshot
 
@@ -407,24 +456,39 @@ def delete_task(
 
 
 @app.post("/preferences", dependencies=_AUTH)
-def save_preference(req: PreferenceRequest, db: Session = Depends(_get_db_optional)):
+def save_preference(
+    req: PreferenceRequest,
+    db: Session = Depends(_get_db_optional),
+    jwt_user_id: int | None = Depends(_current_user_id_from_jwt),
+):
     if db is None:
         raise HTTPException(status_code=400, detail="DATABASE_URL is not configured - preferences require persistence.")
+    _assert_user_scope(req.user_id, jwt_user_id)
     pref = set_preference(db, req.user_id, req.category, req.key, req.value)
     return {"id": pref.id, "category": pref.category, "key": pref.key, "value": pref.value}
 
 
 @app.get("/preferences/{user_id}", dependencies=_AUTH)
-def list_preferences(user_id: int, db: Session = Depends(_get_db_optional)):
+def list_preferences(
+    user_id: int,
+    db: Session = Depends(_get_db_optional),
+    jwt_user_id: int | None = Depends(_current_user_id_from_jwt),
+):
     if db is None:
         raise HTTPException(status_code=400, detail="DATABASE_URL is not configured.")
+    _assert_user_scope(user_id, jwt_user_id)
     return get_all_preferences(db, user_id)
 
 
 @app.post("/patterns/{user_id}/mine", dependencies=_AUTH)
-def mine_user_patterns(user_id: int, db: Session = Depends(_get_db_optional)):
+def mine_user_patterns(
+    user_id: int,
+    db: Session = Depends(_get_db_optional),
+    jwt_user_id: int | None = Depends(_current_user_id_from_jwt),
+):
     if db is None:
         raise HTTPException(status_code=400, detail="DATABASE_URL is not configured.")
+    _assert_user_scope(user_id, jwt_user_id)
     newly_promotable = mine_patterns(db, user_id)
     return {
         "newly_promotable": [
@@ -435,9 +499,14 @@ def mine_user_patterns(user_id: int, db: Session = Depends(_get_db_optional)):
 
 
 @app.get("/patterns/{user_id}", dependencies=_AUTH)
-def list_promotable_patterns(user_id: int, db: Session = Depends(_get_db_optional)):
+def list_promotable_patterns(
+    user_id: int,
+    db: Session = Depends(_get_db_optional),
+    jwt_user_id: int | None = Depends(_current_user_id_from_jwt),
+):
     if db is None:
         raise HTTPException(status_code=400, detail="DATABASE_URL is not configured.")
+    _assert_user_scope(user_id, jwt_user_id)
     patterns = promotable_patterns(db, user_id)
     return [
         {"id": p.id, "action_sequence": p.action_sequence, "occurrence_count": p.occurrence_count}
@@ -459,8 +528,10 @@ class KnowledgeSearchRequest(BaseModel):
 
 
 @app.post("/knowledge/add", dependencies=_AUTH)
-def add_knowledge_document(req: KnowledgeAddRequest):
+def add_knowledge_document(req: KnowledgeAddRequest, jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
     from knowledge.rag import KnowledgeBase
+
+    _assert_user_scope(req.user_id, jwt_user_id)
 
     if req.text:
         text = req.text
@@ -480,15 +551,17 @@ def add_knowledge_document(req: KnowledgeAddRequest):
 
 
 @app.post("/knowledge/search", dependencies=_AUTH)
-def search_knowledge(req: KnowledgeSearchRequest):
+def search_knowledge(req: KnowledgeSearchRequest, jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
     from knowledge.rag import KnowledgeBase
+    _assert_user_scope(req.user_id, jwt_user_id)
     kb = KnowledgeBase(req.user_id)
     return {"results": kb.search(req.query, top_k=req.top_k)}
 
 
 @app.get("/knowledge/{user_id}/documents", dependencies=_AUTH)
-def list_knowledge_documents(user_id: int):
+def list_knowledge_documents(user_id: int, jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
     from knowledge.rag import KnowledgeBase
+    _assert_user_scope(user_id, jwt_user_id)
     kb = KnowledgeBase(user_id)
     return {"documents": kb.list_documents()}
 
@@ -496,4 +569,6 @@ def list_knowledge_documents(user_id: int):
 @app.get("/")
 def health_check():
     return {"status": "backend is running", "ai_provider": config.AI_PROVIDER,
-            "persistence": bool(config.DATABASE_URL), "visual_fallback": config.ENABLE_VISUAL_FALLBACK}
+            "persistence": bool(config.DATABASE_URL), "visual_fallback": config.ENABLE_VISUAL_FALLBACK,
+            "visual_only_mode": config.VISUAL_ONLY_MODE,
+            "codegen_layer": config.ENABLE_CODEGEN_LAYER}

@@ -1,5 +1,5 @@
 'use client';
-
+;
 import Link from 'next/link';
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
@@ -7,7 +7,7 @@ import { ArrowRight, Bot, CheckCircle2, FileSpreadsheet, FolderOpen, Play, Plus,
 import { useAuthStore } from '@/stores/auth-store';
 import { mockFiles } from '@/data/mock-files';
 import { mockUsage } from '@/data/mock-usage';
-import { mockWorkflowRuns, mockWorkflows } from '@/data/mock-workflows';
+import { mockWorkflowRuns, mockWorkflows } from '@/data/mock-workflows';<q></q>
 import { formatFileSize, formatRelativeTime, getUsagePercentage } from '@/lib/utils';
 import { DashboardPageHeader } from '@/components/dashboard/page-header';
 import { Badge } from '@/components/ui/badge';

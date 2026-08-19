@@ -1,0 +1,7 @@
+INFO:     Will watch for changes in these directories: ['C:\\Users\\HP\\Downloads\\xelora-integrated\\xelora-merged\\backend']
+INFO:     Uvicorn running on http://127.0.0.1:8001 (Press CTRL+C to quit)
+INFO:     Started reloader process [18876] using StatReload
+INFO:     Started server process [8144]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+WARNING:  StatReload detected changes in 'config.py'. Reloading...

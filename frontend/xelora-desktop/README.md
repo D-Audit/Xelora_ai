@@ -27,7 +27,8 @@ server, running the fully-wired dashboard.
 ## Pointing it at a deployed app
 
 Once your frontend is deployed somewhere real (Vercel, your own
-server, etc.), point the desktop app at it instead of localhost:
+server, etc.), you can point the desktop app at it instead of localhost
+for the dashboard UI:
 
 ```bash
 # macOS/Linux
@@ -61,9 +62,15 @@ before shipping this to real users:
 This is not a separate product with its own backend integration - the
 authentication, billing, plan limits, files, and workflows you see in
 this window are the identical ones from the web app, running through
-the identical Next.js API routes and FastAPI backend. There's nothing
-extra to wire up here; if a feature works in the browser, it works in
-this window.
+the identical Next.js API routes and FastAPI backend.
+
+One important boundary: the wrapper does not bundle or start the Python
+Excel agent. Excel control happens on the machine that runs FastAPI. For
+local desktop automation, run FastAPI on the same Windows computer as
+this Electron app, as in the development steps above. A deployed web
+app can still provide the dashboard, but it cannot control a user's
+local Excel instance until you add a local companion agent or bundle
+the backend with the desktop installer.
 
 See the root `INTEGRATION.md` for the other desktop-related folders
 that were **not** wired up as part of this integration

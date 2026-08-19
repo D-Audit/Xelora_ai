@@ -20,7 +20,7 @@ from auth_billing_models import Subscription
 
 router = APIRouter(prefix="/team", tags=["team"])
 
-
+0
 class InviteRequest(BaseModel):
     email: EmailStr
     role: str = "viewer"

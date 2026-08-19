@@ -20,6 +20,7 @@ and burns an extra AI call (with an image) per use.
 
 import base64
 import json
+import os
 import tempfile
 
 import config
@@ -91,23 +92,48 @@ def click_on_screen_element(element_description: str, double_click: bool = False
         screenshot_path = f.name
 
     try:
-        ui_control.screenshot_active_window(screenshot_path)
+        capture = ui_control.screenshot_active_window(screenshot_path)
     except RuntimeError as e:
         return {"status": "no_display", "verified": False, "error": str(e)}
 
-    location = _ask_model_for_coordinates(screenshot_path, element_description)
+    try:
+        location = _ask_model_for_coordinates(screenshot_path, element_description)
 
-    if not location.get("found"):
-        return {"status": "not_found", "verified": False, "element_description": element_description,
-                "reasoning": location.get("reasoning", "Model could not locate the element.")}
+        if not location.get("found"):
+            return {"status": "not_found", "verified": False, "element_description": element_description,
+                    "reasoning": location.get("reasoning", "Model could not locate the element.")}
 
-    click_result = ui_control.click_at(location["x"], location["y"], double=double_click)
+        try:
+            relative_x, relative_y = int(location["x"]), int(location["y"])
+        except (KeyError, TypeError, ValueError):
+            return {"status": "invalid_coordinates", "verified": False,
+                    "error": "The visual model did not return usable click coordinates."}
 
-    return {
-        "status": "clicked", "element_description": element_description,
-        "coordinates": {"x": location["x"], "y": location["y"]},
-        "reasoning": location.get("reasoning"), "verified": True,
-        "verification_note": "Clicked at the model's identified coordinates - this does not "
-            "confirm the click had the intended effect, only that a click occurred there. "
-            "Follow up with inspect_workbook or read_range to confirm the actual result.",
-    }
+        width, height = capture["screen_size"]
+        if not (0 <= relative_x < width and 0 <= relative_y < height):
+            return {"status": "invalid_coordinates", "verified": False,
+                    "error": "The visual model returned a point outside the captured Excel window."}
+
+        origin_x, origin_y = capture["origin"]
+        absolute_x, absolute_y = origin_x + relative_x, origin_y + relative_y
+        click_result = ui_control.click_at(
+            absolute_x,
+            absolute_y,
+            double=double_click,
+            expected_window_handle=capture["window"]["handle"],
+        )
+
+        return {
+            "status": "clicked", "element_description": element_description,
+            "coordinates": {"x": absolute_x, "y": absolute_y},
+            "reasoning": location.get("reasoning"), "verified": True,
+            "verification_note": "Clicked a validated point inside the captured Excel window. This confirms "
+                "the click occurred, not that Excel completed the intended operation; inspect the workbook "
+                "afterwards to verify the result.",
+            "click_result": click_result,
+        }
+    finally:
+        try:
+            os.remove(screenshot_path)
+        except OSError:
+            pass

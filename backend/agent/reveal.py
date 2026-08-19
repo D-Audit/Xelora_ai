@@ -46,6 +46,18 @@ NATIVE_FEATURE_NAMES = {
     "click_at": "Mouse click",
     "type_text": "Keyboard input",
     "press_key": "Keyboard shortcut",
+    "create_new_workbook": "Creating a new Excel workbook",
+    "create_sheet": "Adding a worksheet",
+    "rename_sheet": "Renaming a worksheet",
+    "write_cell": "Writing to a cell",
+    "write_table": "Writing a data table",
+    "insert_formula": "Calculating with an Excel formula",
+    "apply_formatting": "Applying workbook formatting",
+    "conditional_formatting": "Applying conditional formatting",
+    "freeze_panes": "Freezing header rows or columns",
+    "auto_fit_columns": "Sizing columns to fit the content",
+    "create_chart": "Creating an Excel chart",
+    "create_pivot_table": "Creating a PivotTable",
 }
 
 
@@ -75,6 +87,7 @@ def progress_snapshot(structured_steps: list, is_done: bool, final_response: str
     Progress Visualization capability."""
     completed = [s for s in structured_steps if s.get("type") == "action" and s.get("status") == "success"]
     reasoning = [s["text"] for s in structured_steps if s.get("type") == "reasoning"]
+    visual_checkpoints = [s for s in structured_steps if s.get("type") == "visual_checkpoint"]
 
     current_task = reasoning[-1] if reasoning and not is_done else ("Done" if is_done else "Starting up...")
 
@@ -83,6 +96,10 @@ def progress_snapshot(structured_steps: list, is_done: bool, final_response: str
         "completed_action_count": len(completed),
         "completed_actions": [
             {"tool_name": s["tool_name"], "execution_layer": s.get("execution_layer")} for s in completed
+        ],
+        "visual_checkpoints": [
+            {"after_tool": s.get("after_tool"), "filename": s.get("filename")}
+            for s in visual_checkpoints
         ],
         "decision_explanations": reasoning,
         "is_done": is_done,

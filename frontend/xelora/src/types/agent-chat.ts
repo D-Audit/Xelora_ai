@@ -8,6 +8,7 @@ export type ChatMessage =
       steps: string[];
       currentTask?: string;
       response?: string;
+      completionStatus?: string;
       status: 'running' | 'paused' | 'done' | 'error';
       error?: string;
     };

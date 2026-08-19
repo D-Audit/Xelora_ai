@@ -76,6 +76,11 @@ check response, plus you can hit `http://localhost:8000/docs` for the
 full interactive API (original agent routes + new `/auth` and
 `/billing` routes together).
 
+If you enable `VISUAL_ONLY_MODE` or `ENABLE_VISUAL_FALLBACK`, start
+OmniParser as a separate local service and set `OMNIPARSER_URL` to its
+`/parse/` endpoint. Do not point it at port 8000: that is the FastAPI
+backend's default port, not the parser service.
+
 ## 3. Frontend setup
 
 ```bash
@@ -134,6 +139,12 @@ npm start
 A window opens showing your real dashboard. See
 `frontend/xelora-desktop/README.md` for pointing it at a deployed URL
 and building a Windows installer.
+
+Excel automation runs where the FastAPI backend runs. The wrapper can
+control local Excel in the documented development setup because both
+the desktop app and backend run on the same Windows PC. Pointing the
+wrapper at a deployed web app changes only the UI location; it does not
+turn a remote backend into a local Excel agent.
 
 Two other desktop-related folders are included but were **not** wired
 up - `frontend/xelora/apps/desktop/` and `frontend/desktop-runtime/`.

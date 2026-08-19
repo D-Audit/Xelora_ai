@@ -25,8 +25,10 @@ export interface TaskProgressResponse {
   task_id: number;
   is_done: boolean;
   is_paused: boolean;
+  status: 'running' | 'paused' | 'awaiting_approval' | 'completed' | 'completed_with_warnings' | 'failed';
   current_task?: string;
   completed_actions?: { tool_name: string }[];
+  visual_checkpoints?: { after_tool: string; filename: string }[];
   progress_log: string[];
   final_response: string | null;
 }

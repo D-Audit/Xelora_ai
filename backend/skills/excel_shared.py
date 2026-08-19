@@ -57,6 +57,33 @@ def restore_screen_updating(app):
         pass
 
 
+def keep_workbook_visible(wb=None) -> dict:
+    """Keep the workbook on the user's desktop while automation runs.
+
+    Skills still use Excel's object model for reliable edits, but they should
+    never make the work feel hidden.  This helper restores redraw, ensures the
+    Excel instance is visible, and asks Excel to activate the target workbook.
+    It deliberately does not force-focus the window, so it cannot steal a
+    keystroke from the Xelora chat while a task is running.
+    """
+    wb = wb or get_active_workbook()
+    app = wb.app
+    try:
+        app.visible = True
+    except Exception:
+        pass
+    restore_screen_updating(app)
+    try:
+        wb.activate()
+    except Exception:
+        pass
+    return {
+        "workbook": wb.name,
+        "visible": True,
+        "screen_updating": True,
+    }
+
+
 def set_calculation_mode(app, mode: str):
     """mode is 'manual' or 'automatic'. Always pair a 'manual' call with a
     guaranteed 'automatic' call afterward via try/finally at the call site."""

@@ -23,6 +23,34 @@ import type { ChatMessage } from '@/types/agent-chat';
 
 const POLL_INTERVAL_MS = 1500;
 
+const ACTION_LABELS: Record<string, string> = {
+  create_new_workbook: 'Creating a new Excel workbook',
+  create_sheet: 'Adding a worksheet',
+  rename_sheet: 'Renaming a worksheet',
+  write_cell: 'Writing to a cell',
+  write_table: 'Writing a data table',
+  insert_formula: 'Calculating with an Excel formula',
+  apply_formatting: 'Applying workbook formatting',
+  conditional_formatting: 'Applying conditional formatting',
+  freeze_panes: 'Freezing header rows or columns',
+  auto_fit_columns: 'Sizing columns to fit the content',
+  create_chart: 'Creating an Excel chart',
+  create_pivot_table: 'Creating a PivotTable',
+  activate_ribbon_tab: 'Opening the requested Excel tab',
+  go_to_range: 'Selecting the requested cell or range',
+  hotkey: 'Using an Excel keyboard shortcut',
+  press_key: 'Using an Excel key command',
+  type_text: 'Entering information in Excel',
+  parse_screen: 'Checking the relevant Excel area',
+  click: 'Selecting an Excel control',
+  double_click: 'Opening an Excel control',
+  scroll: 'Navigating Excel',
+};
+
+function actionLabel(toolName: string) {
+  return ACTION_LABELS[toolName] ?? 'Completing an Excel action';
+}
+
 const QUICK_ACTIONS = [
   { label: 'Clean up data', instruction: 'Remove blank rows, trim whitespace, and delete duplicate rows in the active sheet.' },
   { label: 'Build a pivot table', instruction: 'Build a pivot table summarising the data by the most relevant category, then add a chart.' },
@@ -79,15 +107,22 @@ export default function AgentPage() {
     const checkProgress = async () => {
       try {
         const data: TaskProgressResponse = await getTaskProgress(taskId);
-        const stepNames = (data.completed_actions ?? []).map((s) => s.tool_name);
+        const stepNames = (data.completed_actions ?? []).map((s) => actionLabel(s.tool_name));
+        const checkpointSteps = (data.visual_checkpoints ?? []).map(
+          (checkpoint) => `Capturing a visible Excel checkpoint after ${actionLabel(checkpoint.after_tool).toLowerCase()}`
+        );
         updateAgentMessage(messageId, {
-          steps: stepNames,
+          steps: [...stepNames, ...checkpointSteps],
           currentTask: data.is_done ? undefined : data.current_task,
           response: data.final_response ?? undefined,
         });
         if (data.is_done) {
           if (pollRef.current) clearInterval(pollRef.current);
-          updateAgentMessage(messageId, { status: 'done', response: data.final_response ?? undefined });
+          updateAgentMessage(messageId, {
+            status: 'done',
+            response: data.final_response ?? undefined,
+            completionStatus: data.status,
+          });
           refreshChatList(); // this conversation just changed - refresh its entry (title/status) in the sidebar
         }
       } catch {
@@ -140,7 +175,10 @@ export default function AgentPage() {
       const restored: ChatMessage[] = savedTurns.map((turn, i) => (
         turn.role === 'user'
           ? { id: `${chatId}-${i}-u`, role: 'user', text: turn.text }
-          : { id: `${chatId}-${i}-a`, role: 'agent', taskId: chatId, steps: [], response: turn.text, status: 'done' }
+          : {
+              id: `${chatId}-${i}-a`, role: 'agent', taskId: chatId, steps: [],
+              response: turn.text, status: 'done', completionStatus: chat.status,
+            }
       ));
       if (requestId !== chatRequestRef.current) return;
       setMessages(restored);
@@ -158,10 +196,11 @@ export default function AgentPage() {
             ...current,
             {
               id: `${chatId}-recovered-response`, role: 'agent', taskId: chatId,
-              steps: (progress.completed_actions ?? []).map((step) => step.tool_name),
+              steps: (progress.completed_actions ?? []).map((step) => actionLabel(step.tool_name)),
               currentTask: progress.is_done ? undefined : progress.current_task,
               response: recoveredResponse ?? undefined,
               status: progress.is_done ? 'done' : 'running',
+              completionStatus: progress.is_done ? progress.status : undefined,
             },
           ]);
           if (!progress.is_done && !progress.is_paused) {
@@ -474,7 +513,23 @@ export default function AgentPage() {
                         {msg.status === 'done' && (
                           <>
                             {msg.response && <p className="mt-3 whitespace-pre-wrap text-xelora-text">{msg.response}</p>}
-                            <p className="mt-2 text-xs font-medium text-xelora-success">Done.</p>
+                            <p className={`mt-2 text-xs font-medium ${
+                              msg.completionStatus === 'completed'
+                                ? 'text-xelora-success'
+                                : msg.completionStatus === 'awaiting_approval'
+                                  ? 'text-xelora-warning'
+                                  : 'text-xelora-error'
+                            }`}>
+                              {msg.completionStatus === 'completed'
+                                ? 'Completed and verified.'
+                                : msg.completionStatus === 'awaiting_approval'
+                                  ? 'Plan ready — reply Confirm to apply it.'
+                                  : msg.completionStatus === 'completed_with_warnings'
+                                    ? 'Completed with warnings — review the result before relying on it.'
+                                    : msg.completionStatus === 'failed'
+                                      ? 'Not completed — no unverified work is marked as done.'
+                                      : 'Task finished.'}
+                            </p>
                           </>
                         )}
                         {msg.status === 'paused' && (

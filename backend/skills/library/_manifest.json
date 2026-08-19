@@ -36,7 +36,7 @@
   },
   "apply_formatting": {
     "category": "format",
-    "sha256_impl": "76f99746bae9154f83600f2047a2f55541e546837c021099831604e99c544469",
+    "sha256_impl": "470646f680911dfa60a56a114bcb6f7680eda37b1a85b797983f0d78f0646998",
     "sha256_skill_md": "eb155b5a99681ff06231110be948bd5b657883d334e1d81894883046007e1eee"
   },
   "auto_fit_columns": {
@@ -71,12 +71,12 @@
   },
   "copy_sheet": {
     "category": "structure",
-    "sha256_impl": "25026e2d53d2a80bdfd000bb1b4cdc80050be0edd587cf40b60ef6ece415697d",
+    "sha256_impl": "0e00fb417de848b2dad2cc6623c8391f8881249610fb0ece1d2b3f18fe206801",
     "sha256_skill_md": "c4774c8af17eb6e97408cc150736e28cdcd2a99fabe860df8014bfba3ab2934e"
   },
   "create_chart": {
     "category": "analysis",
-    "sha256_impl": "ea26c725c390070b8d2eda41769f24b2c3d898a22064bddd61db06251be8fc17",
+    "sha256_impl": "49fc4dab330a21dbfa8a3112d8bbf8883c9bf9333ff3d77ac4c2d76c6f4ce7aa",
     "sha256_skill_md": "2967e8000ee91844568f24240a6d0ca838593a52f4ea89718094c47a64cb206a"
   },
   "create_named_range": {
@@ -91,7 +91,7 @@
   },
   "create_pivot_table": {
     "category": "analysis",
-    "sha256_impl": "9c4e863009e034da68942e6523d6499ff025b85e3f5b7fd04f3a62e653ebc48f",
+    "sha256_impl": "0a50e9ff1117127f4654a872bd16634c4188186cd75f74dfed7d627c2d29aa08",
     "sha256_skill_md": "8efdb0883528966e5212037544deb2000bfc347a828e37b84fa2b930645c681d"
   },
   "create_power_query_connection": {
@@ -106,7 +106,7 @@
   },
   "create_vba_macro": {
     "category": "vba",
-    "sha256_impl": "fbc6d05436caf6b6fb955c10c4b90190e2049fc17ffeb0ad1853c125e210a8ea",
+    "sha256_impl": "be56f9243ce0b47fa8a87ca4468b41e5ed2c4d286bcbc3ebe2abe452885208ec",
     "sha256_skill_md": "ca08ad8167f92fc9b4dfbaa0a813f938d5f16fa04ae16d184139b75b019cd241"
   },
   "data_bar_formatting": {
@@ -151,7 +151,7 @@
   },
   "fetch_live_data": {
     "category": "advanced",
-    "sha256_impl": "04515d0e1c35d86e739c21c7abc80cb9355aab0f2c572b083d7fa48586524f55",
+    "sha256_impl": "996501d98221d2885ccb9e3666a6add9515a47081f3a132eedb095f3235aba46",
     "sha256_skill_md": "1fefed582ba1fedb8f0a9ddae88c7a172b530a2a2b27141d857615caa35925d4"
   },
   "filter_data": {
@@ -166,7 +166,7 @@
   },
   "format_range": {
     "category": "formatting",
-    "sha256_impl": "7df16cafa6fca7f5dfee6c7936296c07e2b97ae446ef70a8c42483e79084cec9",
+    "sha256_impl": "4f750f0a6a17168a579a6a2628f66045dec7a15f8160d526e3c5d6ce17ab9e35",
     "sha256_skill_md": "a577cb80f233557191e78a74500158eb425732abb9092c2407ed7fb1f682b41d"
   },
   "freeze_panes": {
@@ -176,7 +176,7 @@
   },
   "get_excel_version": {
     "category": "read",
-    "sha256_impl": "93fae4dfd049baa0c0adcb61ce3815ad8b724d6c11a68a5459539ed364977fcd",
+    "sha256_impl": "7cd001ee2cb9ae4ea4f3eab5d20de080bff864fdf8bc7612195a892f23218c84",
     "sha256_skill_md": "dd4b43ac58b30dd624f041cb7ac1020da8a4cce4f524e0398f99902c73becb8a"
   },
   "group_rows_columns": {
@@ -206,7 +206,7 @@
   },
   "insert_formula": {
     "category": "write",
-    "sha256_impl": "3a9c19ada17bd389193355b6f9853bf55dc8dc07f5b0a8bf90faab7b5320f13c",
+    "sha256_impl": "75e0d9de8d5f3fcb38256b92e548d3e139e5e4d1e12a37501f40a74b31b65b63",
     "sha256_skill_md": "b96ae8ac04423b1fb3acc68c2a9c22d6ad80271bf0ae1c6c8575127a6370edcf"
   },
   "insert_picture": {
@@ -221,12 +221,12 @@
   },
   "inspect_workbook": {
     "category": "read",
-    "sha256_impl": "2fbf58163587fc1915c99d5b9329d0c4b93a90a65b52bd4ecc2477a4c5aeb91d",
+    "sha256_impl": "7cb72bb4df1492248e1fad855a08a999136666ac92db20b7fbca2fc0f265dc8a",
     "sha256_skill_md": "0bdb94f8053ed840ac18da6acd5a8b51ad6327f9cdc31bcc0ff9050be2d3587e"
   },
   "list_vba_macros": {
     "category": "vba",
-    "sha256_impl": "de70ab8a98964aa209d20f4a182015a9046dce26596b35df0e6f963132d38be4",
+    "sha256_impl": "4f28a705cf13697c3c4a28c779517b430e836dbd1d7fcf4b21feec216f146ecf",
     "sha256_skill_md": "36a61612a3b653f4f90ff3f35cfeacf2915303a876e20bbb16b67aa6afec72ba"
   },
   "merge_cells": {
@@ -251,7 +251,7 @@
   },
   "position_chart": {
     "category": "charts",
-    "sha256_impl": "9ed46dde7f53567513dc37fa12702fc7b883034445bd1f9f3531ddd4483b0da5",
+    "sha256_impl": "cc6f9fbbc1f85a1a1c7d037466bc133927cf1cb07c08143ffe46c6ee4ecc045e",
     "sha256_skill_md": "c6b9a60f7a3f2ac4803d1030e490132a164ef87054b3755c09ca2c0546dbbc1b"
   },
   "protect_sheet": {
@@ -316,7 +316,7 @@
   },
   "sort_range": {
     "category": "data",
-    "sha256_impl": "f990b74830cbe9cd8d36f4ff4d89bf935c59966d832df75923efc6db8248d4ce",
+    "sha256_impl": "3a96055632b2f1012ec38ebd30a2c9a8ea803a04e2f0dbd010a40e9c5a418d57",
     "sha256_skill_md": "9fe4cc580866e5397aa8756a054ad36a75410a660bfcd21831fd7aadcb409f57"
   },
   "split_column": {
@@ -341,7 +341,7 @@
   },
   "write_table": {
     "category": "write",
-    "sha256_impl": "289cffc733576a8fad61f7fcef4fdba351e5f4a6d35b6c84b2c7d5ba8e868a71",
+    "sha256_impl": "9c241bb12c90fbeb8467c83031009f5d36eb37e67e708f8575ba2036ded6398b",
     "sha256_skill_md": "0347c415be40b065371b158c5eff77030abc9ef67ae11fe4da654730d714d963"
   }
 }

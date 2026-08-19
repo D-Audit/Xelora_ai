@@ -22,6 +22,7 @@ export default function BillingInvoicesPage() {
       .finally(() => setIsLoading(false));
   }, []);
 
+
   return (
     <div className="space-y-6">
       <DashboardPageHeader

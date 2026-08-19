@@ -108,7 +108,7 @@ def create_workflow(req: WorkflowIn, user_id: int = Depends(get_current_user_id)
     return _serialize(w)
 
 
-@router.get("/{workflow_id}")
+@router.get("/{workflow_id:int}")
 def get_workflow(workflow_id: int, user_id: int = Depends(get_current_user_id), db: Session | None = Depends(get_db_or_503)):
     db = _require_db(db)
     w = db.query(Workflow).filter(Workflow.id == workflow_id, Workflow.user_id == user_id).first()
@@ -117,7 +117,7 @@ def get_workflow(workflow_id: int, user_id: int = Depends(get_current_user_id), 
     return _serialize(w)
 
 
-@router.patch("/{workflow_id}")
+@router.patch("/{workflow_id:int}")
 def update_workflow(workflow_id: int, req: WorkflowIn, user_id: int = Depends(get_current_user_id), db: Session | None = Depends(get_db_or_503)):
     db = _require_db(db)
     w = db.query(Workflow).filter(Workflow.id == workflow_id, Workflow.user_id == user_id).first()
@@ -133,7 +133,7 @@ def update_workflow(workflow_id: int, req: WorkflowIn, user_id: int = Depends(ge
     return _serialize(w)
 
 
-@router.delete("/{workflow_id}")
+@router.delete("/{workflow_id:int}")
 def delete_workflow(workflow_id: int, user_id: int = Depends(get_current_user_id), db: Session | None = Depends(get_db_or_503)):
     db = _require_db(db)
     w = db.query(Workflow).filter(Workflow.id == workflow_id, Workflow.user_id == user_id).first()
@@ -153,7 +153,25 @@ def _instruction_from_steps(workflow: Workflow) -> str:
     return f"Run the following steps on the active workbook, in order:\n" + "\n".join(lines)
 
 
-@router.post("/{workflow_id}/run")
+def _workflow_run_status(progress: dict) -> str:
+    """Map the agent's truthful task state to a workflow-run state.
+
+    A stopped worker is not automatically a completed workflow: it may be
+    waiting for confirmation, paused, have failed, or have finished with
+    verification warnings.
+    """
+    task_status = str(progress.get("status", ""))
+    if task_status in {"completed", "completed_with_warnings", "failed", "awaiting_approval", "paused"}:
+        return task_status
+    if progress.get("is_paused"):
+        return "paused"
+    if progress.get("is_done"):
+        final_response = str(progress.get("final_response") or "").lstrip().upper()
+        return "completed_with_warnings" if final_response.startswith("INCOMPLETE:") else "completed"
+    return "running"
+
+
+@router.post("/{workflow_id:int}/run")
 def run_workflow(
     workflow_id: int,
     user_id: int = Depends(get_current_user_id),
@@ -230,31 +248,40 @@ def get_run(
     if not run:
         raise HTTPException(status_code=404, detail="Run not found.")
 
-    if run.status == "running" and run.task_id:
+    if run.status in {"running", "paused", "awaiting_approval"} and run.task_id:
         headers = {}
         if LOCAL_API_KEY:
             headers["X-API-Key"] = LOCAL_API_KEY
+        if authorization:
+            headers["Authorization"] = authorization
         try:
             resp = requests.get(f"{INTERNAL_BASE_URL}/task/{run.task_id}/progress", headers=headers, timeout=10)
             if resp.ok:
                 data = resp.json()
-                steps = data.get("steps", [])
-                run.steps_completed = len(steps)
-                run.ai_actions_used = len(steps)
-                if data.get("is_done"):
-                    run.status = "completed"
+                completed_actions = data.get("completed_actions", [])
+                run.steps_completed = min(len(completed_actions), run.total_steps)
+                run.ai_actions_used = len(completed_actions)
+                run_status = _workflow_run_status(data)
+                run.status = run_status
+                if run_status in {"completed", "completed_with_warnings", "failed"}:
                     run.completed_at = datetime.now(timezone.utc)
                     if run.started_at:
                         run.duration_seconds = int((run.completed_at - run.started_at).total_seconds())
                     workflow = db.query(Workflow).filter(Workflow.id == run.workflow_id).first()
                     if workflow:
-                        workflow.status = "published"
-                        workflow.last_run_status = "completed"
+                        if run_status in {"completed", "completed_with_warnings"}:
+                            workflow.status = "published"
+                        workflow.last_run_status = run_status
                         completed_runs = db.query(WorkflowRun).filter(
                             WorkflowRun.workflow_id == workflow.id, WorkflowRun.status == "completed"
                         ).count()
                         workflow.success_rate = round(100 * completed_runs / max(workflow.total_runs, 1), 1)
-                    notify(db, user_id, "workflow", "Workflow finished", "Your workflow run has completed.", priority="medium")
+                    if run_status == "completed":
+                        notify(db, user_id, "workflow", "Workflow finished", "Your workflow run completed and was verified.", priority="medium")
+                    elif run_status == "completed_with_warnings":
+                        notify(db, user_id, "workflow", "Workflow needs review", "Your workflow stopped with verification warnings. Review the task result before relying on it.", priority="high")
+                    else:
+                        notify(db, user_id, "workflow", "Workflow failed", "Your workflow stopped before its result could be verified.", priority="high")
                 db.commit()
         except requests.RequestException:
             pass  # leave status as-is; frontend will retry on next poll
