@@ -8,6 +8,7 @@ layers: skill library, code generation, or visual fallback.
 import concurrent.futures
 import json
 import os
+from datetime import datetime, timezone
 
 import config
 from skills.registry import has_skill, run_skill
@@ -355,6 +356,17 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
 
             task.log_step(f"⏳ Running: {tool_name} {tool_input}")
 
+            # Make the in-flight action observable before the potentially slow
+            # Excel call begins. The same dictionary is updated on completion,
+            # so progress readers see a clean running -> terminal transition.
+            action_step = {
+                "type": "action", "tool_name": tool_name,
+                "execution_layer": "dispatching", "input": tool_input,
+                "result": None, "status": "running",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            }
+            task.structured_steps.append(action_step)
+
             try:
                 result, execution_layer, generated_code = dispatch_action(tool_name, tool_input)
                 status = "success"
@@ -378,9 +390,9 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             else:
                 task.log_step(f"✅ Done: {tool_name} ({execution_layer}) -> {result}")
 
-            task.structured_steps.append({
-                "type": "action", "tool_name": tool_name, "execution_layer": execution_layer,
-                "input": tool_input, "result": result, "status": status,
+            action_step.update({
+                "execution_layer": execution_layer, "result": result, "status": status,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
             })
 
             if db is not None and db_task_id is not None:

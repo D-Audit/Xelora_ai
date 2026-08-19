@@ -21,7 +21,9 @@ import type { TaskProgressResponse } from '@/services/agent';
 import type { FileItem } from '@/services/workspace';
 import type { ChatMessage } from '@/types/agent-chat';
 
-const POLL_INTERVAL_MS = 1500;
+// The workbook changes in the live Excel application. Keep this observer panel
+// close behind each action while the session JWT remains in its httpOnly cookie.
+const POLL_INTERVAL_MS = 500;
 
 const QUICK_ACTIONS = [
   { label: 'Clean up data', instruction: 'Remove blank rows, trim whitespace, and delete duplicate rows in the active sheet.' },
@@ -79,10 +81,10 @@ export default function AgentPage() {
     const checkProgress = async () => {
       try {
         const data: TaskProgressResponse = await getTaskProgress(taskId);
-        const stepNames = (data.completed_actions ?? []).map((s) => s.tool_name);
+        const stepNames = (data.completed_actions ?? []).map((s) => s.label ?? s.tool_name);
         updateAgentMessage(messageId, {
           steps: stepNames,
-          currentTask: data.is_done ? undefined : data.current_task,
+          currentTask: data.is_done ? undefined : (data.active_action?.label ?? data.current_task),
           response: data.final_response ?? undefined,
         });
         if (data.is_done) {
@@ -158,8 +160,8 @@ export default function AgentPage() {
             ...current,
             {
               id: `${chatId}-recovered-response`, role: 'agent', taskId: chatId,
-              steps: (progress.completed_actions ?? []).map((step) => step.tool_name),
-              currentTask: progress.is_done ? undefined : progress.current_task,
+              steps: (progress.completed_actions ?? []).map((step) => step.label ?? step.tool_name),
+              currentTask: progress.is_done ? undefined : (progress.active_action?.label ?? progress.current_task),
               response: recoveredResponse ?? undefined,
               status: progress.is_done ? 'done' : 'running',
             },
@@ -411,6 +413,12 @@ export default function AgentPage() {
           <span className="ml-2 text-sm text-xelora-text-muted">
             {currentTaskId !== null ? `Conversation #${currentTaskId}` : 'New task'}
           </span>
+          {conversationBusy && (
+            <span className="flex items-center gap-1.5 rounded-full bg-xelora-success-bg px-2.5 py-1 text-xs font-medium text-xelora-green">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-xelora-green" />
+              Live Excel observer
+            </span>
+          )}
           <div className="ml-auto flex items-center gap-2">
             {floatingModeButton}
           </div>
@@ -468,7 +476,7 @@ export default function AgentPage() {
                         )}
                         {msg.status === 'running' && msg.currentTask && (
                           <p className="mt-2 flex items-center gap-2 text-xs text-xelora-text-muted">
-                            <Loader2 className="h-3 w-3 animate-spin" /> {msg.currentTask}
+                            <Loader2 className="h-3 w-3 animate-spin" /> Working in Excel: {msg.currentTask}
                           </p>
                         )}
                         {msg.status === 'done' && (

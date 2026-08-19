@@ -49,6 +49,11 @@ NATIVE_FEATURE_NAMES = {
 }
 
 
+def native_feature_name(tool_name: str) -> str:
+    """Return an accountant-friendly label for an internal agent tool."""
+    return NATIVE_FEATURE_NAMES.get(tool_name, tool_name.replace("_", " ").title())
+
+
 def reveal_workflow(structured_steps: list) -> list:
     """Returns an ordered list of {step, native_feature, detail} for
     every action in the log - the on-demand replay view."""
@@ -60,7 +65,7 @@ def reveal_workflow(structured_steps: list) -> list:
         tool_name = step["tool_name"]
         revealed.append({
             "step": step_num,
-            "native_feature": NATIVE_FEATURE_NAMES.get(tool_name, tool_name),
+            "native_feature": native_feature_name(tool_name),
             "tool_name": tool_name,
             "execution_layer": step.get("execution_layer"),
             "succeeded": step.get("status") == "success",
@@ -73,16 +78,44 @@ def progress_snapshot(structured_steps: list, is_done: bool, final_response: str
     """A compact 'what is the AI doing right now' view - Current task /
     Completed actions / Decision explanations, per the Intelligent
     Progress Visualization capability."""
-    completed = [s for s in structured_steps if s.get("type") == "action" and s.get("status") == "success"]
+    actions = [s for s in structured_steps if s.get("type") == "action"]
+    completed = [s for s in actions if s.get("status") == "success"]
     reasoning = [s["text"] for s in structured_steps if s.get("type") == "reasoning"]
 
-    current_task = reasoning[-1] if reasoning and not is_done else ("Done" if is_done else "Starting up...")
+    active = next((s for s in reversed(actions) if s.get("status") == "running"), None)
+
+    if active:
+        current_task = native_feature_name(active["tool_name"])
+    else:
+        current_task = reasoning[-1] if reasoning and not is_done else ("Done" if is_done else "Starting up...")
 
     return {
         "current_task": current_task,
         "completed_action_count": len(completed),
         "completed_actions": [
-            {"tool_name": s["tool_name"], "execution_layer": s.get("execution_layer")} for s in completed
+            {
+                "tool_name": s["tool_name"],
+                "label": native_feature_name(s["tool_name"]),
+                "execution_layer": s.get("execution_layer"),
+                "verified": isinstance(s.get("result"), dict) and s["result"].get("verified") is True,
+            }
+            for s in completed
+        ],
+        "active_action": ({
+            "tool_name": active["tool_name"],
+            "label": native_feature_name(active["tool_name"]),
+            "execution_layer": active.get("execution_layer"),
+            "started_at": active.get("started_at"),
+        } if active else None),
+        "action_events": [
+            {
+                "tool_name": s["tool_name"],
+                "label": native_feature_name(s["tool_name"]),
+                "execution_layer": s.get("execution_layer"),
+                "status": s.get("status"),
+                "verified": isinstance(s.get("result"), dict) and s["result"].get("verified") is True,
+            }
+            for s in actions
         ],
         "decision_explanations": reasoning,
         "is_done": is_done,

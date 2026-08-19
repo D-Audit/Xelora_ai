@@ -26,7 +26,9 @@ export interface TaskProgressResponse {
   is_done: boolean;
   is_paused: boolean;
   current_task?: string;
-  completed_actions?: { tool_name: string }[];
+  completed_actions?: { tool_name: string; label?: string; verified?: boolean }[];
+  active_action?: { tool_name: string; label: string; execution_layer?: string; started_at?: string } | null;
+  action_events?: { tool_name: string; label: string; status: string; verified: boolean }[];
   progress_log: string[];
   final_response: string | null;
 }
@@ -74,7 +76,7 @@ export const listTasks = listChats;
 export const getTaskDetail = getChat;
 export const getProgress = getTaskProgress;
 
-export function pollProgress(taskId: number, onUpdate: (snapshot: TaskProgressResponse) => void, intervalMs = 1500): () => void {
+export function pollProgress(taskId: number, onUpdate: (snapshot: TaskProgressResponse) => void, intervalMs = 500): () => void {
   let cancelled = false;
   const tick = async () => {
     if (cancelled) return;
