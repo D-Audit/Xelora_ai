@@ -330,7 +330,7 @@ export default function RegisterPage() {
                   onCheckedChange={(checked) =>
                     setValue('agreeToTerms', checked === true, { shouldValidate: true })
                   }
-                  className="mt-0.5"
+                  className="auth-terms-checkbox mt-0.5"
                 />
                 <Label htmlFor="agreeToTerms" className="font-normal cursor-pointer leading-snug">
                   I agree to the{' '}

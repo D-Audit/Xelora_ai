@@ -14,7 +14,7 @@ import {
   MoreHorizontal, Check, Trash2, ChevronDown, LogOut, User, CreditCard,
   Activity, MonitorSpeaker, HelpCircle, Globe
 } from 'lucide-react';
-import { mockUsage } from '@/data/mock-usage';
+import { getSubscription } from '@/services/billing';
 import { formatRelativeTime, getInitials, getUsagePercentage } from '@/lib/utils';
 import { isDesktopApp } from '@/lib/is-desktop';
 import { deleteChat, listChats, markChatRead } from '@/services/agent';
@@ -51,13 +51,20 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
   const searchParams = useSearchParams();
   const { toggleSidebarCollapsed, setSidebarOpen } = useUIStore();
   const { user, logout } = useAuthStore();
-  const aiPct = getUsagePercentage(mockUsage.aiActionsUsed, mockUsage.aiActionsLimit);
+  const [usage, setUsage] = useState({ aiActionsUsed: 0, aiActionsLimit: 0 as number | 'unlimited' });
+  const aiPct = usage.aiActionsLimit === 'unlimited' ? 0 : getUsagePercentage(usage.aiActionsUsed, usage.aiActionsLimit);
 
   const [showDesktopItems, setShowDesktopItems] = useState(false);
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [loadingChats, setLoadingChats] = useState(false);
   const isChatWorkspace = pathname === '/dashboard/agent';
-  useEffect(() => setShowDesktopItems(isDesktopApp()), []);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => setShowDesktopItems(isDesktopApp()));
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+  useEffect(() => {
+    getSubscription().then((data) => setUsage(data.usage)).catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     if (!isChatWorkspace || collapsed) return;
@@ -227,7 +234,7 @@ export function Sidebar({ collapsed = false }: SidebarProps) {
         <div className="mx-2 mb-2 rounded-xl border border-xelora-border bg-white px-3 py-3">
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-xs text-xelora-text-secondary">AI actions</span>
-            <span className="text-xs text-xelora-text-muted">{mockUsage.aiActionsUsed} / {mockUsage.aiActionsLimit}</span>
+            <span className="text-xs text-xelora-text-muted">{usage.aiActionsUsed} / {usage.aiActionsLimit}</span>
           </div>
           <Progress value={aiPct} className="h-1.5 bg-xelora-surface-2" indicatorClassName="bg-xelora-green" />
           <div className="mt-3 flex items-center justify-between">

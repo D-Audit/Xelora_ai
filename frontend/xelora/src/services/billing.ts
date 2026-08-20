@@ -45,6 +45,19 @@ export interface UsageSummary {
   resetDate: string | null;
 }
 
+export interface DetailedUsageSummary extends UsageSummary {
+  storageUsedGB: number;
+  storageLimitGB: number | 'unlimited';
+  devicesUsed: number;
+  devicesLimit: number | 'unlimited';
+}
+
+export interface UsageAnalytics {
+  summary: DetailedUsageSummary;
+  daily: { date: string; aiActions: number; workflowRuns: number; fileOperations: number }[];
+  byOperation: { operation: string; aiActions: number }[];
+}
+
 export interface InvoiceSummary {
   id: string;
   amount: number;
@@ -71,6 +84,11 @@ export async function getPlans(): Promise<{ plans: PlanSummary[]; stripe_enabled
 
 export async function getSubscription(): Promise<{ subscription: SubscriptionSummary; usage: UsageSummary }> {
   const res = await fetch('/api/billing/subscription', { cache: 'no-store' });
+  return parseOrThrow(res);
+}
+
+export async function getUsageAnalytics(): Promise<UsageAnalytics> {
+  const res = await fetch('/api/billing/usage', { cache: 'no-store' });
   return parseOrThrow(res);
 }
 

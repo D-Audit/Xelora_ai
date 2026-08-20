@@ -18,29 +18,28 @@ import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { DashboardPageHeader } from '@/components/dashboard/page-header';
 import { StatePanel } from '@/components/site/state-panel';
-import { getUsage } from '@/services/dashboard';
-import { mockUsageByOperation } from '@/data/mock-usage';
+import { getUsageAnalytics, type DetailedUsageSummary } from '@/services/billing';
 import { formatDate } from '@/lib/utils';
-import type { UsageLimits } from '@/types';
-
-type UsageSummary = UsageLimits;
 
 export default function UsagePage() {
   const [loading, setLoading] = useState(true);
   const [daily, setDaily] = useState<{ date: string; aiActions: number; workflowRuns: number; fileOperations: number }[]>([]);
-  const [summary, setSummary] = useState<UsageSummary | null>(null);
+  const [summary, setSummary] = useState<DetailedUsageSummary | null>(null);
+  const [byOperation, setByOperation] = useState<{ operation: string; aiActions: number }[]>([]);
+  const [error, setError] = useState('');
 
   useEffect(() => {
-    getUsage().then((data) => {
+    getUsageAnalytics().then((data) => {
       setSummary(data.summary);
       setDaily(data.daily);
-      setLoading(false);
-    });
+      setByOperation(data.byOperation);
+    }).catch((err) => setError(err instanceof Error ? err.message : 'Could not load usage.')).finally(() => setLoading(false));
   }, []);
 
   if (loading) {
     return <StatePanel kind="loading" title="Loading usage" description="Preparing chart data and summary metrics." />;
   }
+  if (error) return <StatePanel kind="error" title="Could not load usage" description={error} />;
 
   return (
     <div className="space-y-6">
@@ -95,7 +94,7 @@ export default function UsagePage() {
           <h2 className="text-base font-semibold text-xelora-text">Usage by operation</h2>
           <div className="mt-4 h-72">
             <ResponsiveContainer width="100%" height="100%">
-              <ReBarChart data={mockUsageByOperation}>
+              <ReBarChart data={byOperation}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#DDE5E2" />
                 <XAxis dataKey="operation" tick={{ fontSize: 12, fill: '#5C6C75' }} />
                 <YAxis tick={{ fontSize: 12, fill: '#5C6C75' }} />

@@ -6,12 +6,16 @@ import { useUIStore } from '@/stores/ui-store';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Menu, Bell, Search } from 'lucide-react';
-import { mockNotifications } from '@/data/mock-notifications';
+import { getNotifications } from '@/services/workspace';
+import { useEffect, useState } from 'react';
 
 export function Topbar() {
   const { user } = useAuthStore();
   const { toggleSidebar } = useUIStore();
-  const unreadCount = mockNotifications.filter((notification) => !notification.isRead).length;
+  const [unreadCount, setUnreadCount] = useState(0);
+  useEffect(() => {
+    getNotifications().then((items) => setUnreadCount(items.filter((item) => !item.isRead).length)).catch(() => setUnreadCount(0));
+  }, []);
 
   const planLabel = user?.plan === 'professional' ? 'Professional' :
     user?.plan === 'starter' ? 'Starter' :

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { Plus, Save, PlayCircle, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -13,10 +13,22 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { StatePanel } from '@/components/site/state-panel';
-import { mockWorkflows } from '@/data/mock-workflows';
-import type { WorkflowStep, StepType } from '@/types';
+import { getWorkflowById, runWorkflow, updateWorkflow, type WorkflowItem, type WorkflowStepItem } from '@/services/workspace';
+import type { StepType } from '@/types';
 
-type DraftStep = WorkflowStep & { localId: string };
+type DraftStep = WorkflowStepItem & { localId: string };
+
+function toPersistedStep(step: DraftStep): WorkflowStepItem {
+  return {
+    name: step.name,
+    description: step.description,
+    type: step.type,
+    isEnabled: step.isEnabled,
+    requiresApproval: step.requiresApproval,
+    errorBehaviour: step.errorBehaviour,
+    estimatedAiActions: step.estimatedAiActions,
+  };
+}
 
 export default function EditWorkflowPage() {
   const params = useParams<{ id: string }>();
@@ -24,29 +36,21 @@ export default function EditWorkflowPage() {
   const [steps, setSteps] = useState<DraftStep[]>([]);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-
-  const workflow = useMemo(() => mockWorkflows.find((item) => item.id === params.id), [params.id]);
+  const [workflow, setWorkflow] = useState<WorkflowItem | null>(null);
+  const [error, setError] = useState('');
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      if (workflow) {
-        setName(workflow.name);
-        setDescription(workflow.description);
-        setSteps(workflow.steps.map((step) => ({ ...step, localId: step.id })));
-      }
-      setLoading(false);
-    }, 400);
-    return () => clearTimeout(timer);
-  }, [workflow]);
+    getWorkflowById(params.id).then((item) => {
+      setWorkflow(item); setName(item.name); setDescription(item.description);
+      setSteps(item.steps.map((step, index) => ({ ...step, localId: `${index}-${step.name}` })));
+    }).catch((err) => setError(err instanceof Error ? err.message : 'Workflow not found.')).finally(() => setLoading(false));
+  }, [params.id]);
 
   const addStep = () => {
     setSteps((current) => [
       ...current,
       {
         localId: `local-${Date.now()}`,
-        id: `local-${Date.now()}`,
-        workflowId: workflow?.id ?? 'draft',
-        order: current.length + 1,
         name: 'New step',
         description: '',
         type: 'custom',
@@ -59,7 +63,7 @@ export default function EditWorkflowPage() {
   };
 
   if (!loading && !workflow) {
-    return <StatePanel kind="empty" title="Workflow not found" description="This workflow is not part of the mock dataset." />;
+    return <StatePanel kind="empty" title="Workflow not found" description={error || 'This workflow does not exist.'} />;
   }
 
   if (loading || !workflow) {
@@ -71,7 +75,7 @@ export default function EditWorkflowPage() {
   };
 
   const removeStep = (localId: string) => {
-    setSteps((current) => current.filter((step) => step.localId !== localId).map((step, index) => ({ ...step, order: index + 1 })));
+    setSteps((current) => current.filter((step) => step.localId !== localId));
   };
 
   return (
@@ -79,14 +83,14 @@ export default function EditWorkflowPage() {
       <DashboardPageHeader
         eyebrow="Workflows"
         title={`Editing ${workflow.name}`}
-        description="Adjust the mock workflow and save it as a draft."
+        description="Adjust the persisted workflow and save your changes."
         actions={
           <>
-            <Button variant="outline" onClick={() => toast.info('Test run completed with mock data.')}>
+            <Button variant="outline" onClick={() => runWorkflow(workflow.id).then(() => toast.success('Test run started.')).catch((err) => toast.error(err.message))}>
               <PlayCircle className="h-4 w-4" />
               Test run
             </Button>
-            <Button onClick={() => toast.success('Workflow saved.')}><Save className="h-4 w-4" />Save draft</Button>
+            <Button onClick={() => updateWorkflow(workflow.id, { name, description, steps: steps.map(toPersistedStep), tags: workflow.tags }).then(setWorkflow).then(() => toast.success('Workflow saved.')).catch((err) => toast.error(err.message))}><Save className="h-4 w-4" />Save draft</Button>
           </>
         }
       />

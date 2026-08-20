@@ -186,6 +186,9 @@ a[href], button:not(:disabled), [role="button"]:not([aria-disabled="true"]), sum
 .auth-card button[type='submit']:hover { background:#071f1a; transform:translateY(-1px); }
 .auth-card button[type='button'].border { height:44px; border-radius:12px; background:#fff; font-size:12px; }
 .auth-card button[type='button'].border:hover { border-color:#adc1b8; background:#f5f8f6; }
+.auth-card .auth-terms-checkbox { width:16px!important; height:16px!important; min-width:16px; padding:0!important; border-radius:5px!important; box-shadow:none!important; }
+.auth-card .auth-terms-checkbox:hover { background:#fff; border-color:#16805e; }
+.auth-card .auth-terms-checkbox[data-state='checked'] { background:#16805e; border-color:#16805e; }
 .auth-card a { font-weight:700; }
 .auth-register-page { max-width:560px; }
 .auth-register-page .auth-card-header { padding-bottom:18px!important; }

@@ -27,14 +27,19 @@ export interface FileItem {
   rowCount: number | null;
   columnCount: number | null;
   tags: string[];
-  uploadedAt: string | null;
-  lastModifiedAt: string | null;
+  uploadedAt: string;
+  lastModifiedAt: string;
 }
 
 export async function getFiles(): Promise<FileItem[]> {
   const res = await fetch('/api/files', { cache: 'no-store' });
   const data = await parseOrThrow<{ files: FileItem[] }>(res);
   return data.files;
+}
+
+export async function getFileById(id: string): Promise<{ file: FileItem; versions: never[] }> {
+  const res = await fetch(`/api/files/${id}`, { cache: 'no-store' });
+  return parseOrThrow(res);
 }
 
 export async function uploadFile(file: File): Promise<FileItem> {
@@ -83,6 +88,11 @@ export async function inviteTeamMember(email: string, role: string): Promise<Tea
 export async function removeTeamMember(id: string): Promise<void> {
   const res = await fetch(`/api/team/${id}`, { method: 'DELETE' });
   await parseOrThrow(res);
+}
+
+export async function resendTeamInvitation(id: string): Promise<TeamMemberItem> {
+  const res = await fetch(`/api/team/${id}/resend`, { method: 'POST' });
+  return parseOrThrow(res);
 }
 
 

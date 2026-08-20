@@ -8,11 +8,10 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { DashboardPageHeader } from '@/components/dashboard/page-header';
 import { StatePanel } from '@/components/site/state-panel';
-import { getWorkflowRuns } from '@/services/dashboard';
+import { getWorkflowRuns, type WorkflowRunItem } from '@/services/workspace';
 import { formatDate, formatRelativeTime } from '@/lib/utils';
-import type { WorkflowRun } from '@/types';
 
-const statusMap: Record<WorkflowRun['status'], { label: string; variant: 'success' | 'warning' | 'error' | 'info' | 'default'; icon: React.ComponentType<{ className?: string }> }> = {
+const statusMap: Record<string, { label: string; variant: 'success' | 'warning' | 'error' | 'info' | 'default'; icon: React.ComponentType<{ className?: string }> }> = {
   completed: { label: 'Completed', variant: 'success', icon: CheckCircle2 },
   completed_with_warnings: { label: 'Warnings', variant: 'warning', icon: AlertTriangle },
   failed: { label: 'Failed', variant: 'error', icon: XCircle },
@@ -25,7 +24,7 @@ const statusMap: Record<WorkflowRun['status'], { label: string; variant: 'succes
 const statusFilters = ['all', 'completed', 'completed_with_warnings', 'failed', 'cancelled', 'paused', 'awaiting_approval'] as const;
 
 export default function HistoryPage() {
-  const [runs, setRuns] = useState<WorkflowRun[]>([]);
+  const [runs, setRuns] = useState<WorkflowRunItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState<(typeof statusFilters)[number]>('all');
@@ -39,7 +38,7 @@ export default function HistoryPage() {
 
   const filtered = useMemo(() => {
     return runs.filter((run) => {
-      const matchesSearch = `${run.workflowName} ${run.fileName} ${run.userName}`.toLowerCase().includes(search.toLowerCase());
+      const matchesSearch = run.workflowName.toLowerCase().includes(search.toLowerCase());
       const matchesStatus = status === 'all' || run.status === status;
       return matchesSearch && matchesStatus;
     });
@@ -78,7 +77,7 @@ export default function HistoryPage() {
       </Card>
 
       {loading ? (
-        <StatePanel kind="loading" title="Loading history" description="Retrieving the mock automation runs." />
+        <StatePanel kind="loading" title="Loading history" description="Retrieving your automation runs." />
       ) : filtered.length === 0 ? (
         <StatePanel kind="empty" title="No history found" description="Try a different search term or filter." />
       ) : (
@@ -98,18 +97,18 @@ export default function HistoryPage() {
               </thead>
               <tbody className="divide-y divide-xelora-border bg-white">
                 {filtered.map((run) => {
-                  const config = statusMap[run.status];
+                  const config = statusMap[run.status] ?? statusMap.running;
                   const StatusIcon = config.icon;
                   return (
                     <tr key={run.id} className="hover:bg-xelora-surface-2">
                       <td className="px-5 py-3">
                         <Link href={`/dashboard/history/${run.id}`} className="font-medium text-xelora-text hover:text-xelora-green">
-                          {run.fileName}
+                          {run.workflowName || 'Workflow run'}
                         </Link>
                       </td>
                       <td className="px-4 py-3 text-xelora-text-secondary">{run.workflowName}</td>
-                      <td className="px-4 py-3 text-xelora-text-secondary">{run.userName}</td>
-                      <td className="px-4 py-3 text-xelora-text-secondary">{formatDate(run.startedAt)}</td>
+                      <td className="px-4 py-3 text-xelora-text-secondary">Current user</td>
+                      <td className="px-4 py-3 text-xelora-text-secondary">{run.startedAt ? formatDate(run.startedAt) : 'Unknown'}</td>
                       <td className="px-4 py-3 text-xelora-text-secondary">{run.stepsCompleted}/{run.totalSteps}</td>
                       <td className="px-4 py-3 text-xelora-text-secondary">{run.aiActionsUsed} AI actions</td>
                       <td className="px-4 py-3">
@@ -117,7 +116,7 @@ export default function HistoryPage() {
                           <StatusIcon className="mr-1 h-3.5 w-3.5" />
                           {config.label}
                         </Badge>
-                        <p className="mt-1 text-xs text-xelora-text-muted">{formatRelativeTime(run.startedAt)}</p>
+                        <p className="mt-1 text-xs text-xelora-text-muted">{run.startedAt ? formatRelativeTime(run.startedAt) : 'Unknown'}</p>
                       </td>
                     </tr>
                   );
