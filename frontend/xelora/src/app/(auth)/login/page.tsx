@@ -70,20 +70,21 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex justify-center">
+    <div className="auth-page auth-login-page flex flex-col gap-6">
+      <div className="hidden">
         <Link href="/" aria-label="Go to homepage">
           <XeloraLogo size="lg" />
         </Link>
       </div>
 
-      <Card>
-        <CardHeader className="text-center pb-2">
-          <CardTitle className="text-xl font-semibold text-xelora-text">
-            Sign in to Xelora
+      <Card className="auth-card">
+        <CardHeader className="auth-card-header pb-2">
+          <span className="auth-form-kicker">Welcome back</span>
+          <CardTitle className="auth-form-title text-xelora-text">
+            Sign in to your workspace
           </CardTitle>
           <CardDescription>
-            Welcome back. Enter your details to continue.
+            Pick up where you left off and put your next workbook on autopilot.
           </CardDescription>
         </CardHeader>
 

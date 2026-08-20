@@ -55,11 +55,11 @@ const registerSchema = z
 type RegisterFormValues = z.infer<typeof registerSchema>;
 
 const COUNTRIES = [
-  { value: 'us', label: 'United States' },
-  { value: 'gb', label: 'United Kingdom' },
-  { value: 'ca', label: 'Canada' },
-  { value: 'au', label: 'Australia' },
-  { value: 'de', label: 'Germany' },
+  { value: 'us', label: 'Rwanda' },
+  { value: 'gb', label: 'Uganda' },
+  { value: 'ca', label: 'Kenya' },
+  { value: 'au', label: 'Burundi' },
+  { value: 'de', label: 'United States' },
   { value: 'fr', label: 'France' },
   { value: 'in', label: 'India' },
   { value: 'br', label: 'Brazil' },
@@ -151,16 +151,17 @@ export default function RegisterPage() {
   };
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex justify-center">
+    <div className="auth-page auth-register-page flex flex-col gap-6">
+      <div className="hidden">
         <Link href="/" aria-label="Go to homepage">
           <XeloraLogo size="lg" />
         </Link>
       </div>
 
-      <Card>
-        <CardHeader className="text-center pb-2">
-          <CardTitle className="text-xl font-semibold text-xelora-text">
+      <Card className="auth-card">
+        <CardHeader className="auth-card-header pb-2">
+          <span className="auth-form-kicker">Create your workspace</span>
+          <CardTitle className="auth-form-title text-xelora-text">
             Create your account
           </CardTitle>
           <CardDescription>
