@@ -5,8 +5,6 @@ __pycache__/
 *.pyd
 
 # Ignore environment files
-.env
-.env.*
 
 # Ignore Node dependencies and lock files
 node_modules/
@@ -25,3 +23,4 @@ yarn-error.log*
 # Ignore build artifacts
 dist/
 .next/
+config.bat
