@@ -33,6 +33,23 @@ export interface TaskProgressResponse {
   final_response: string | null;
 }
 
+export type TaskStreamEvent =
+  | { type: 'task_started'; task_id: number }
+  | { type: 'analysis_started'; message: string }
+  | { type: 'analysis_completed' | 'plan_started' }
+  | { type: 'assistant_started'; provider: string }
+  | { type: 'assistant_delta'; content: string }
+  | { type: 'assistant_completed'; content: string }
+  | { type: 'plan_created'; content: string }
+  | { type: 'awaiting_approval' }
+  | { type: 'action_started'; skill: string; label: string }
+  | { type: 'action_completed' | 'action_failed'; skill: string; label: string; success: boolean }
+  | { type: 'verification_started'; skill: string }
+  | { type: 'verification_completed' | 'verification_failed'; skill: string; success: boolean }
+  | { type: 'task_completed'; content: string }
+  | { type: 'task_failed'; message: string }
+  | { type: 'error'; code: string; message: string };
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   const body = await response.json().catch(() => ({}));
@@ -68,6 +85,47 @@ export const pauseTask = (taskId: number) =>
 export const getTaskProgress = (taskId: number) =>
   request<TaskProgressResponse>(`/api/task/${taskId}/progress`);
 export const getTaskReveal = (taskId: number) => request(`/api/task/${taskId}/reveal`);
+
+export async function streamTaskEvents(
+  taskId: number,
+  onEvent: (event: TaskStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`/api/task/${taskId}/events`, { signal });
+  if (!response.ok || !response.body) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error((body as { error?: string; detail?: string }).error
+      || (body as { detail?: string }).detail
+      || 'Could not open the task event stream.');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const consumeLine = (line: string) => {
+    if (!line.trim()) return;
+    try {
+      onEvent(JSON.parse(line) as TaskStreamEvent);
+    } catch {
+      onEvent({ type: 'error', code: 'stream_protocol_error', message: 'A malformed stream event was ignored.' });
+    }
+  };
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        consumeLine(line);
+      }
+      if (done) break;
+    }
+    consumeLine(buffer);
+  } finally {
+    reader.releaseLock();
+  }
+}
 
 export type BackendTaskSummary = ChatSummary;
 export type BackendTaskDetail = ChatDetail;
