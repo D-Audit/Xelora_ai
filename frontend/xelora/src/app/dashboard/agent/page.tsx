@@ -14,17 +14,16 @@ import { isDesktopApp } from '@/lib/is-desktop';
 import { useAuthStore } from '@/stores/auth-store';
 import {
   startTask, getTaskProgress, pauseTask, resumeTask, getTaskReveal,
-  getChat,
+  getChat, streamTaskEvents,
 } from '@/services/agent';
 import { uploadFile } from '@/services/workspace';
-import type { TaskProgressResponse } from '@/services/agent';
+import type { TaskProgressResponse, TaskStreamEvent } from '@/services/agent';
+import { applyTaskStreamEvent } from '@/services/agent-stream-state';
 import type { FileItem } from '@/services/workspace';
 import type { ChatMessage } from '@/types/agent-chat';
 
 // The workbook changes in the live Excel application. Keep this observer panel
 // close behind each action while the session JWT remains in its httpOnly cookie.
-const POLL_INTERVAL_MS = 500;
-
 const QUICK_ACTIONS = [
   { label: 'Clean up data', instruction: 'Remove blank rows, trim whitespace, and delete duplicate rows in the active sheet.' },
   { label: 'Build a pivot table', instruction: 'Build a pivot table summarising the data by the most relevant category, then add a chart.' },
@@ -51,7 +50,7 @@ export default function AgentPage() {
     void window.xeloraDesktop?.getFloatingMode().then(setIsFloatingMode);
     return window.xeloraDesktop?.onFloatingModeChange(setIsFloatingMode);
   }, [desktop]);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -66,7 +65,7 @@ export default function AgentPage() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+  useEffect(() => () => pollRef.current?.abort(), []);
 
   const refreshChatList = () => window.dispatchEvent(new Event('xelora:chats-updated'));
 
@@ -77,28 +76,49 @@ export default function AgentPage() {
   };
 
   const pollProgress = (messageId: string, taskId: number) => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    const checkProgress = async () => {
-      try {
-        const data: TaskProgressResponse = await getTaskProgress(taskId);
-        const stepNames = (data.completed_actions ?? []).map((s) => s.label ?? s.tool_name);
-        updateAgentMessage(messageId, {
-          steps: stepNames,
-          currentTask: data.is_done ? undefined : (data.active_action?.label ?? data.current_task),
-          response: data.final_response ?? undefined,
-        });
-        if (data.is_done) {
-          if (pollRef.current) clearInterval(pollRef.current);
-          updateAgentMessage(messageId, { status: 'done', response: data.final_response ?? undefined });
-          refreshChatList(); // this conversation just changed - refresh its entry (title/status) in the sidebar
-        }
-      } catch {
-        if (pollRef.current) clearInterval(pollRef.current);
-        updateAgentMessage(messageId, { status: 'error', error: 'Lost connection while checking progress.' });
-      }
+    pollRef.current?.abort();
+    const controller = new AbortController();
+    pollRef.current = controller;
+    let pendingText = '';
+    let frame: number | null = null;
+
+    const flushText = () => {
+      if (!pendingText) return;
+      const delta = pendingText;
+      pendingText = '';
+      setMessages((current) => current.map((message) =>
+        message.id === messageId && message.role === 'agent'
+          ? applyTaskStreamEvent(message, { type: 'assistant_delta', content: delta })
+          : message
+      ));
     };
-    void checkProgress();
-    pollRef.current = setInterval(() => { void checkProgress(); }, POLL_INTERVAL_MS);
+
+    const handleEvent = (event: TaskStreamEvent) => {
+      if (event.type === 'assistant_delta') {
+        pendingText += event.content;
+        if (frame === null) frame = requestAnimationFrame(() => { frame = null; flushText(); });
+        return;
+      }
+      if (frame !== null) cancelAnimationFrame(frame);
+      frame = null;
+      flushText();
+
+      setMessages((current) => current.map((message) =>
+        message.id === messageId && message.role === 'agent'
+          ? applyTaskStreamEvent(message, event)
+          : message
+      ));
+      if (event.type === 'task_completed') refreshChatList();
+    };
+
+    void streamTaskEvents(taskId, handleEvent, controller.signal).catch((error) => {
+      if (controller.signal.aborted) return;
+      flushText();
+      updateAgentMessage(messageId, {
+        status: 'error', streaming: false,
+        error: error instanceof Error ? error.message : 'The response stream was interrupted.',
+      });
+    });
   };
 
   const handleAttachClick = () => fileInputRef.current?.click();
@@ -120,7 +140,7 @@ export default function AgentPage() {
   };
 
   const startNewChat = () => {
-    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current?.abort();
     setCurrentTaskId(null);
     setMessages([]);
     setAttachedFile(null);
@@ -132,7 +152,7 @@ export default function AgentPage() {
     hydratedRouteRef.current = `chat:${chatId}`;
     const requestId = ++chatRequestRef.current;
     setOpeningChatId(chatId);
-    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current?.abort();
     try {
       const chat = await getChat(chatId);
       const transcript = Array.isArray(chat.transcript) ? chat.transcript : [];
@@ -262,7 +282,7 @@ export default function AgentPage() {
     try {
       if (msg.status === 'running') {
         await pauseTask(msg.taskId);
-        if (pollRef.current) clearInterval(pollRef.current);
+        pollRef.current?.abort();
         updateAgentMessage(msg.id, { status: 'paused' });
       } else if (msg.status === 'paused') {
         await resumeTask(msg.taskId);
@@ -449,13 +469,16 @@ export default function AgentPage() {
                   </div>
                   <div className="max-w-[85%] flex-1 space-y-2">
                     {msg.status === 'error' ? (
-                      <div className="flex items-start gap-2 rounded-2xl rounded-tl-sm border border-xelora-error/30 bg-xelora-error-bg px-4 py-3 text-sm">
-                        <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-xelora-error" />
-                        <div>
-                          <p className="text-xelora-text">{msg.error}</p>
-                          <Link href="/dashboard/billing/plans" className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-xelora-green hover:underline">
-                            Upgrade plan <ArrowUpRight className="h-3 w-3" />
-                          </Link>
+                      <div className="space-y-2">
+                        {msg.response && <p className="whitespace-pre-wrap rounded-2xl rounded-tl-sm bg-xelora-surface-2 px-4 py-3 text-sm text-xelora-text">{msg.response}</p>}
+                        <div className="flex items-start gap-2 rounded-xl border border-xelora-error/30 bg-xelora-error-bg px-3 py-2 text-sm">
+                          <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-xelora-error" />
+                          <div>
+                            <p className="text-xelora-text">{msg.error}</p>
+                            <Link href="/dashboard/billing/plans" className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-xelora-green hover:underline">
+                              Upgrade plan <ArrowUpRight className="h-3 w-3" />
+                            </Link>
+                          </div>
                         </div>
                       </div>
                     ) : (
@@ -479,9 +502,14 @@ export default function AgentPage() {
                             <Loader2 className="h-3 w-3 animate-spin" /> Working in Excel: {msg.currentTask}
                           </p>
                         )}
+                        {msg.response && (
+                          <p className="mt-3 whitespace-pre-wrap text-xelora-text">
+                            {msg.response}
+                            {msg.streaming && <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-xelora-green align-text-bottom" aria-label="Streaming response" />}
+                          </p>
+                        )}
                         {msg.status === 'done' && (
                           <>
-                            {msg.response && <p className="mt-3 whitespace-pre-wrap text-xelora-text">{msg.response}</p>}
                             <p className="mt-2 text-xs font-medium text-xelora-success">Done.</p>
                           </>
                         )}
