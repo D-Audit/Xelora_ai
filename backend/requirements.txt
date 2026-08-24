@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 anthropic
-google-generativeai
+google-genai
 xlwings
 openpyxl
 python-dotenv

@@ -56,6 +56,11 @@ def on_startup():
     if config.ALLOW_NO_AUTH and not config.LOCAL_API_KEY:
         print("WARNING: running with ALLOW_NO_AUTH=true and no API key - every endpoint "
               "is open to anyone who can reach this server. Only use this for local testing.")
+    if config.OMNIPARSER_ONLY_MODE and not config.OMNIPARSER_URL:
+        print("REFUSING TO START: OMNIPARSER_ONLY_MODE=true requires OMNIPARSER_URL to point "
+              "to the separately running OmniParser /parse/ endpoint. Do not use this "
+              "backend's own port.")
+        raise SystemExit(1)
 
     if config.DATABASE_URL:
         init_db()

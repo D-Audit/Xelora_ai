@@ -24,7 +24,7 @@ _AT_COLUMN_REF_RE = re.compile(r"\[@[^\]]+\]")
 _STRUCTURED_REF_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\[([^\[\]]+)\]")
 _SPILL_REF_RE = re.compile(r"[A-Za-z]+\d+#")
 
-MAX_HEAVY_FUNCTIONS_PER_FORMULA = 1
+MAX_HEAVY_FUNCTIONS_PER_FORMULA = 2
 
 
 def _is_excel_error(value) -> bool:
@@ -111,10 +111,32 @@ def _validate_structured_references(wb, formula: str):
     return True, None
 
 
-def run(sheet_name: str, cell: str, formula: str):
+def run(sheet_name: str, cell: str, formula: str, fill_to: str | None = None):
     wb = get_active_workbook()
     sheet = wb.sheets[sheet_name]
     rng = sheet.range(cell)
+
+    fill_range = None
+    fill_end = None
+    if fill_to:
+        try:
+            fill_end = sheet.range(fill_to)
+        except Exception as exc:
+            return {
+                "sheet": sheet_name, "cell": cell, "formula": formula, "fill_to": fill_to,
+                "status": "invalid_fill_target", "verified": False,
+                "verification_note": f"Could not resolve fill_to '{fill_to}': {exc}",
+            }
+        if fill_end.column != rng.column or fill_end.row < rng.row:
+            return {
+                "sheet": sheet_name, "cell": cell, "formula": formula, "fill_to": fill_to,
+                "status": "invalid_fill_target", "verified": False,
+                "verification_note": (
+                    "fill_to must be in the same column as cell and at or below it. "
+                    f"Received {cell} through {fill_to}."
+                ),
+            }
+        fill_range = sheet.range(cell, fill_to)
 
     if _AT_COLUMN_REF_RE.search(formula):
         found = _AT_COLUMN_REF_RE.findall(formula)
@@ -175,54 +197,131 @@ def run(sheet_name: str, cell: str, formula: str):
             }
 
     attempts = []
+    # Formula2 avoids Excel's legacy implicit-intersection behaviour for
+    # dynamic-array formulas.  Use it first whenever the formula can spill
+    # or uses a modern function, then retain a legacy fallback for older
+    # installs and ordinary formulas.
+    prefers_formula2 = _formula_may_spill(formula) or any(
+        fn in upper_formula for fn in _DYNAMIC_ARRAY_ONLY_FUNCTIONS
+    )
+    write_methods = (
+        (("formula2", "formula"), "activate+formula2")
+        if prefers_formula2 else (("formula", "formula2"), "activate+formula2")
+    )
     set_calculation_mode(wb.app, "manual")
     try:
-        try:
-            rng.formula = formula
-            attempts.append("formula")
-        except Exception:
+        written = False
+        for attribute in write_methods[0]:
             try:
-                rng.formula2 = formula
-                attempts.append("formula2")
+                setattr(rng, attribute, formula)
+                attempts.append(attribute)
+                written = True
+                break
             except Exception:
-                try:
-                    sheet.activate()
-                    rng.select()
-                    rng.formula2 = formula
-                    attempts.append("activate+formula2")
-                except Exception as e:
-                    return {
-                        "sheet": sheet_name, "cell": cell, "formula": formula,
-                        "status": "write_failed", "verified": False, "attempts": attempts,
-                        "error": str(e),
-                        "verification_note": "Formula could not be written via .formula, .formula2, or activate+.formula2.",
-                    }
+                continue
+        if not written:
+            try:
+                sheet.activate()
+                rng.select()
+                rng.formula2 = formula
+                attempts.append(write_methods[1])
+                written = True
+            except Exception as e:
+                return {
+                    "sheet": sheet_name, "cell": cell, "formula": formula,
+                    "status": "write_failed", "verified": False, "attempts": attempts,
+                    "error": str(e),
+                    "verification_note": "Formula could not be written via .formula, .formula2, or activate+.formula2.",
+                }
+
+        if fill_range is not None and fill_end.row > rng.row:
+            try:
+                fill_range.api.FillDown()
+            except Exception as exc:
+                return {
+                    "sheet": sheet_name, "cell": cell, "formula": formula, "fill_to": fill_to,
+                    "status": "fill_down_failed", "verified": False, "attempts": attempts,
+                    "error": str(exc),
+                    "verification_note": (
+                        "The starting formula was written, but Excel could not fill it down "
+                        f"through {fill_to}."
+                    ),
+                }
 
         try:
             if _formula_may_spill(formula):
                 wb.app.calculate()
             else:
-                rng.api.Calculate()
+                (fill_range if fill_range is not None else rng).api.Calculate()
         except Exception:
             pass
 
         calculated_value = rng.value
+        fill_end_value = fill_end.value if fill_end is not None else None
+        try:
+            stored_formula = rng.formula2 if prefers_formula2 else rng.formula
+        except Exception:
+            stored_formula = None
+        try:
+            fill_end_formula = (
+                fill_end.formula2 if prefers_formula2 else fill_end.formula
+            ) if fill_end is not None else None
+        except Exception:
+            fill_end_formula = None
     finally:
         set_calculation_mode(wb.app, "automatic")
 
-    if _is_excel_error(calculated_value):
+    if _is_excel_error(calculated_value) or _is_excel_error(fill_end_value):
+        return {
+            "sheet": sheet_name, "cell": cell, "formula": formula, "fill_to": fill_to,
+            "calculated_value": calculated_value, "fill_end_value": fill_end_value,
+            "status": "formula_error",
+            "attempts": attempts, "verified": False,
+            "verification_note": (
+                "Formula was stored but calculates to an Excel error at the starting or "
+                f"final filled cell ({calculated_value}, {fill_end_value}). Fix the formula itself."
+            ),
+        }
+
+    def _normalise_formula(value):
+        return re.sub(r"\\s+", "", str(value or "")).upper()
+
+    if _normalise_formula(stored_formula) != _normalise_formula(formula):
         return {
             "sheet": sheet_name, "cell": cell, "formula": formula,
-            "calculated_value": calculated_value, "status": "formula_error",
-            "attempts": attempts, "verified": False,
-            "verification_note": f"Formula was stored but calculates to {calculated_value}. Fix the formula itself.",
+            "stored_formula": stored_formula, "calculated_value": calculated_value,
+            "status": "formula_not_preserved", "attempts": attempts, "verified": False,
+            "verification_note": (
+                "Excel accepted the write but the stored formula differs from the requested formula; "
+                "the agent will not treat that as a completed formula change."
+            ),
+        }
+
+    if fill_end is not None and not (
+        isinstance(fill_end_formula, str) and fill_end_formula.startswith("=")
+    ):
+        return {
+            "sheet": sheet_name, "cell": cell, "formula": formula, "fill_to": fill_to,
+            "stored_formula": stored_formula, "fill_end_formula": fill_end_formula,
+            "calculated_value": calculated_value, "fill_end_value": fill_end_value,
+            "status": "fill_down_not_preserved", "attempts": attempts, "verified": False,
+            "verification_note": (
+                f"Excel did not preserve a formula at the final fill target {fill_to}; "
+                "the calculated column cannot be treated as complete."
+            ),
         }
 
     wb.save()
 
     return {
-        "sheet": sheet_name, "cell": cell, "formula": formula,
-        "calculated_value": calculated_value, "status": "formula_written",
+        "sheet": sheet_name, "cell": cell, "formula": formula, "fill_to": fill_to,
+        "calculated_value": calculated_value, "fill_end_value": fill_end_value,
+        "status": "formula_written",
         "attempts": attempts, "verified": True,
-        "verification_note": "Confirmed formula stored AND calculates without an Excel error.",
+        "stored_formula": stored_formula, "fill_end_formula": fill_end_formula,
+        "verification_note": (
+            "Confirmed the requested formula is stored and calculates without an Excel error."
+            if fill_end is None else
+            f"Confirmed the formula is stored at {cell}, filled through {fill_to}, and both endpoints calculate without an Excel error."
+        ),
     }

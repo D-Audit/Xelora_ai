@@ -6,9 +6,11 @@ layers: skill library, code generation, or visual fallback.
 """
 
 import concurrent.futures
+import contextvars
 import json
 import os
 import re
+import sys
 
 import config
 from skills.registry import has_skill, run_skill
@@ -21,12 +23,17 @@ READ_ONLY_TOOL_NAMES = {"take_screenshot", "parse_screen"}
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-SKILL_TIMEOUT_SECONDS = 15
+SKILL_TIMEOUT_SECONDS = config.SKILL_TIMEOUT_SECONDS
 
 
 def _run_skill_with_timeout(tool_name: str, tool_input: dict, timeout: int = SKILL_TIMEOUT_SECONDS):
     ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = ex.submit(run_skill, tool_name, **tool_input)
+    # The selected workbook is stored in a ContextVar.  New threads do not
+    # inherit it automatically, which previously let a skill fall back to
+    # whichever Excel workbook happened to be active.  Run each skill inside
+    # a copy of the task context so all calls target the same workbook.
+    task_context = contextvars.copy_context()
+    future = ex.submit(task_context.run, run_skill, tool_name, **tool_input)
     timed_out = False
     try:
         return future.result(timeout=timeout)
@@ -42,9 +49,8 @@ def _run_skill_with_timeout(tool_name: str, tool_input: dict, timeout: int = SKI
             recovery_note = f"Attempted auto-recovery but it also failed: {recovery_error}"
 
         return {
-            "error": f"'{tool_name}' timed out after {timeout}s. Excel appeared to be "
-                     f"permanently blocked (a hung dynamic-array/spilling formula is the most "
-                     f"common cause). {recovery_note}",
+            "error": f"'{tool_name}' did not finish within {timeout}s. "
+                     f"Excel was restarted to recover the automation session. {recovery_note}",
             "verified": False,
             "status": "timeout_recovered",
         }
@@ -69,6 +75,17 @@ class AgentTask:
         self.excel_version_info = None  # filled in once at task start, see run_task()
         self.text_only_action_retry_used = False
         self.final_verification_requested = False
+        # Gemini may return several parallel function calls in one response.
+        # Their results must be returned together, otherwise a later unsigned
+        # call is treated as a malformed new tool turn.
+        self.gemini_expected_function_responses = 0
+        self.gemini_function_response_order = []
+        self.gemini_function_response_batch = []
+        # A failed, eligible skill is escalated to a single code-generation
+        # attempt on the next model turn. Keeping this explicit task state
+        # lets both providers enforce the fallback instead of merely hoping
+        # the model remembers a sentence in the prompt.
+        self.pending_codegen_fallback = None
         self.successful_visual_actions = set()
         self.successful_action_signatures = set()
         self.visual_checkpoints = []
@@ -77,7 +94,15 @@ class AgentTask:
         # already state the action the user wants.  Start those tasks in
         # execution mode; descriptive or exploratory requests still begin
         # with the existing plan-and-confirm safeguard.
-        self.awaiting_approval = not _is_direct_action_instruction(instruction)
+        # A request may start with an imperative ("create a dashboard") but
+        # still explicitly require a plan and the user's approval before
+        # Excel is opened or changed. That instruction must override the
+        # otherwise convenient direct-action shortcut.
+        self.defer_excel_until_approval = _requires_explicit_plan_approval(instruction)
+        self.awaiting_approval = (
+            self.defer_excel_until_approval
+            or not _is_direct_action_instruction(instruction)
+        )
         # True when the very first message was already an imperative
         # ("click the Insert tab"), so execution was approved from the start.
         # Used by run_task to stop visual-mode tasks after the one requested
@@ -137,7 +162,11 @@ class AgentTask:
                 # model/tool history so a previous failure cannot poison the
                 # next task (the old "cache" behaviour).
                 self.instruction = correction
-                self.awaiting_approval = not _is_direct_action_instruction(correction)
+                self.defer_excel_until_approval = _requires_explicit_plan_approval(correction)
+                self.awaiting_approval = (
+                    self.defer_excel_until_approval
+                    or not _is_direct_action_instruction(correction)
+                )
                 self.started_in_execution_mode = not self.awaiting_approval
                 self.messages = [{"role": "user", "content": correction}]
             # These values describe a completed attempt.  They must not leak
@@ -148,6 +177,10 @@ class AgentTask:
             self.retry_counts = {}
             self.text_only_action_retry_used = False
             self.final_verification_requested = False
+            self.gemini_expected_function_responses = 0
+            self.gemini_function_response_order = []
+            self.gemini_function_response_batch = []
+            self.pending_codegen_fallback = None
             self.successful_visual_actions = set()
             self.successful_action_signatures = set()
             self.visual_checkpoints = []
@@ -156,7 +189,16 @@ class AgentTask:
 
     def log_step(self, message: str):
         self.progress_log.append(message)
-        print(message)
+        try:
+            print(message)
+        except UnicodeEncodeError:
+            # Windows consoles can still use a legacy code page even when the
+            # API and UI fully support Unicode.  Progress logging must never
+            # terminate a workbook task merely because a provider used an
+            # emoji or another non-ASCII character.
+            encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+            safe_message = message.encode(encoding, errors="backslashreplace").decode(encoding)
+            print(safe_message)
 
 
 def _is_explicit_approval(message: str) -> bool:
@@ -180,6 +222,23 @@ def _is_plan_acknowledgement(message: str) -> bool:
     }
 
 
+def _requires_explicit_plan_approval(message: str) -> bool:
+    """Whether the user expressly prohibited starting Excel work yet."""
+    normalized = " ".join(message.lower().strip().split())
+    approval_markers = (
+        "wait for my approval",
+        "wait for explicit approval",
+        "wait for my explicit approval",
+        "only after i approve",
+        "only after approval",
+        "do not modify excel immediately",
+        "do not change excel immediately",
+        "do not open excel immediately",
+        "plan first and wait",
+    )
+    return any(marker in normalized for marker in approval_markers)
+
+
 def _is_direct_action_instruction(message: str) -> bool:
     """Recognize a new imperative as approval to execute an existing plan.
 
@@ -188,6 +247,8 @@ def _is_direct_action_instruction(message: str) -> bool:
     planning mode until the user explicitly asks the agent to act.
     """
     normalized = " ".join(message.lower().strip().split())
+    if _requires_explicit_plan_approval(normalized):
+        return False
     return normalized.startswith((
         "click ", "double click ", "open ", "close ", "insert ", "add ",
         "delete ", "remove ", "update ", "change ", "edit ", "write ",
@@ -213,6 +274,41 @@ def _is_one_step_navigation_request(message: str) -> bool:
         "table", "data", "save", "delete", "remove", "change", "edit",
     )
     return not any(marker in normalized for marker in multi_step_markers)
+
+
+def _order_tool_calls_by_sheet_dependency(tool_calls):
+    """Run a requested create_sheet call before calls that target that sheet.
+
+    Providers can return multiple function calls together. They do not always
+    preserve the workbook dependency (for example, write_table('Sales Data')
+    before create_sheet('Sales Data')). Reordering only those direct
+    dependencies keeps the provider's otherwise chosen sequence intact while
+    preventing a guaranteed missing-sheet failure.
+    """
+    calls_with_inputs = []
+    created_sheets = set()
+    targeted_sheets = set()
+    for index, tool_call in enumerate(tool_calls):
+        try:
+            tool_name = tool_call.name
+            tool_input = providers.tool_input(tool_call)
+        except Exception:
+            tool_name, tool_input = "", {}
+        calls_with_inputs.append((index, tool_call, tool_name, tool_input))
+        if tool_name == "create_sheet" and isinstance(tool_input.get("sheet_name"), str):
+            created_sheets.add(tool_input["sheet_name"])
+        elif isinstance(tool_input.get("sheet_name"), str):
+            targeted_sheets.add(tool_input["sheet_name"])
+
+    dependency_sheets = created_sheets & targeted_sheets
+    ordered = sorted(
+        calls_with_inputs,
+        key=lambda item: (
+            0 if item[2] == "create_sheet" and item[3].get("sheet_name") in dependency_sheets else 1,
+            item[0],
+        ),
+    )
+    return [item[1] for item in ordered]
 
 
 def _standard_ribbon_tab_shortcut(instruction: str) -> tuple[str, list[str]] | None:
@@ -307,7 +403,7 @@ def _finish_visual_only_routing_block(task: AgentTask) -> AgentTask:
     return task
 
 
-def dispatch_action(tool_name: str, tool_input: dict):
+def dispatch_action(tool_name: str, tool_input: dict, workbook_name: str | None = None):
     if config.VISUAL_ONLY_MODE:
         if tool_name not in VISUAL_TOOL_NAMES:
             return {"error": "VISUAL_ONLY_MODE blocks Excel API and code-generation tools.", "verified": False}, "blocked", None
@@ -321,6 +417,17 @@ def dispatch_action(tool_name: str, tool_input: dict):
         from vision import ui_control
         return getattr(ui_control, tool_name)(**tool_input), "visual", None
 
+    if tool_name == "write_table" and _write_table_input_contains_formula_values(tool_input):
+        return {
+            "error": (
+                "write_table rows must contain source values only, not formulas. "
+                "Keep the calculated-column headers, use blank values for those cells, "
+                "create the Excel Table, then use insert_formula for each calculated column."
+            ),
+            "verified": False,
+            "status": "formula_values_require_insert_formula",
+        }, "input_guard", None
+
     if has_skill(tool_name):
         return _run_skill_with_timeout(tool_name, tool_input), "skill", None
 
@@ -328,7 +435,22 @@ def dispatch_action(tool_name: str, tool_input: dict):
         if not config.ENABLE_CODEGEN_LAYER:
             return {"error": "The code-generation layer is disabled by configuration.", "verified": False}, "blocked", None
         code = tool_input.get("code", "")
-        result = run_generated_code(code, project_root=PROJECT_ROOT)
+        result = run_generated_code(
+            code,
+            project_root=PROJECT_ROOT,
+            workbook_name=workbook_name,
+        )
+        if result.get("verified") is True:
+            # The codegen runner uses a separate process. Save the same
+            # named workbook again from the task process so a subsequent
+            # timeout recovery has a persisted checkpoint to reopen.
+            try:
+                from skills.excel_shared import bind_workbook_context, save_active_workbook_best_effort
+
+                bind_workbook_context(workbook_name)
+                save_active_workbook_best_effort()
+            except Exception:
+                pass
         return result, "codegen", code
 
     if tool_name in VISUAL_TOOL_NAMES:
@@ -359,6 +481,67 @@ def _log_action_to_db(db, task_id, tool_name, tool_input, execution_layer, gener
     )
     db.add(entry)
     db.commit()
+
+
+def _adopt_workbook_from_result(task: AgentTask, result: dict, db=None, db_task_id: int = None) -> None:
+    """Keep task, worker threads, codegen, and persisted task row on one workbook."""
+    if not isinstance(result, dict) or result.get("verified") is not True:
+        return
+    workbook_name = result.get("workbook_name")
+    if not isinstance(workbook_name, str) or not workbook_name.strip():
+        return
+
+    task.workbook_name = workbook_name
+    try:
+        from skills.excel_shared import bind_workbook_context
+
+        bind_workbook_context(workbook_name)
+    except Exception:
+        pass
+
+    if db is not None and db_task_id is not None:
+        try:
+            from models import Task
+
+            db_task = db.get(Task, db_task_id)
+            if db_task is not None:
+                db_task.workbook_name = workbook_name
+                db.commit()
+        except Exception:
+            # Persistence failure must not discard a verified workbook action.
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+
+def _action_recovery_key(tool_name: str, tool_input: dict) -> str | None:
+    """Identify the workbook target that a later successful call can repair."""
+    target_fields = {
+        "insert_formula": ("sheet_name", "cell", "fill_to"),
+        "write_table": ("sheet_name", "start_cell", "table_name"),
+        "create_pivot_table": ("dest_sheet_name", "dest_cell"),
+        "create_chart": ("sheet_name", "chart_name"),
+    }.get(tool_name)
+    if not target_fields:
+        return None
+    target = tuple(str(tool_input.get(field, "")) for field in target_fields)
+    return json.dumps((tool_name, target), separators=(",", ":"))
+
+
+def _mark_prior_action_recovered(task: AgentTask, tool_name: str, tool_input: dict) -> None:
+    """Resolve failed attempts once the same workbook target is verified."""
+    recovery_key = _action_recovery_key(tool_name, tool_input)
+    if recovery_key is None:
+        return
+    for step in task.structured_steps:
+        if (
+            step.get("type") == "action"
+            and step.get("status") in {"failed", "retried"}
+            and _action_recovery_key(step.get("tool_name", ""), step.get("input", {})) == recovery_key
+        ):
+            step["status"] = "recovered"
+            step["recovery_note"] = "A later verified action completed this same workbook target."
 
 
 def _detect_excel_version_once(task: AgentTask):
@@ -508,6 +691,30 @@ def _live_sheet_names() -> list[str]:
         return []
 
 
+def _is_unresolved_workbook_action(step: dict) -> bool:
+    """Whether an action left a workbook change unresolved.
+
+    A failed observation (for example, version detection) never changes a
+    workbook and should not invalidate verified work.  Likewise, code rejected
+    by the AST gate has not executed at all.  Both still appear in the task
+    log, but only a change that may be missing or unverified belongs in the
+    completion warning.
+    """
+    if step.get("type") != "action" or step.get("tool_name") in _OBSERVATION_TOOL_NAMES:
+        return False
+    if step.get("status") == "recovered":
+        return False
+
+    result = step.get("result")
+    if isinstance(result, dict) and result.get("status") == "rejected_by_sandbox":
+        return False
+
+    return (
+        step.get("status") in {"failed", "retried", "blocked"}
+        or (isinstance(result, dict) and result.get("verified") is False)
+    )
+
+
 def _build_final_response_reality_check(task: AgentTask, ai_final_text: str) -> str:
     """
     The single most important fix from today's testing: the AI's own
@@ -522,18 +729,32 @@ def _build_final_response_reality_check(task: AgentTask, ai_final_text: str) -> 
     prepends a clear, code-generated correction that cannot be
     silently overridden by confident-sounding prose.
     """
+    action_steps = [
+        step for step in task.structured_steps if step.get("type") == "action"
+    ]
     failed_or_unresolved = [
-        step for step in task.structured_steps
-        if step.get("type") == "action"
-        and (
-            step.get("status") in {"failed", "retried"}
-            or (isinstance(step.get("result"), dict) and step["result"].get("verified") is False)
-        )
+        step for step in action_steps if _is_unresolved_workbook_action(step)
+    ]
+    meaningful_verified_actions = [
+        step for step in action_steps
+        if step.get("tool_name") not in _OBSERVATION_TOOL_NAMES
+        and step.get("status") == "success"
+        and isinstance(step.get("result"), dict)
+        and step["result"].get("verified") is True
     ]
 
-    attempted_tools = {
-        step.get("tool_name") for step in task.structured_steps if step.get("type") == "action"
-    }
+    # A completion paragraph is not evidence that Excel changed.  This also
+    # keeps a text-only Gemini response from being shown above a red failure
+    # status, which previously made the user see two contradictory results.
+    if task.started_in_execution_mode and not meaningful_verified_actions:
+        if action_steps:
+            detail = "Xelora did not make a verified workbook change."
+        else:
+            detail = "The model returned a text-only response without running an Excel tool."
+        return (
+            "INCOMPLETE: " + detail + " "
+            "The requested task was not completed and no workbook result should be relied on."
+        )
 
     if not failed_or_unresolved:
         return ai_final_text
@@ -575,6 +796,132 @@ _OBSERVATION_TOOL_NAMES = {
     "take_screenshot", "parse_screen",
 }
 
+# Code generation is deliberately not a substitute for skills whose safety
+# contract cannot be reproduced in the code runner. In particular, formula
+# writes must stay in insert_formula, where capability checks and formula
+# verification are enforced. Read-only tools also have no workbook change to
+# recover, while VBA and workbook-opening failures normally require user
+# configuration or a valid path rather than alternate Python syntax.
+_CODEGEN_FALLBACK_EXCLUDED_SKILLS = _OBSERVATION_TOOL_NAMES | {
+    "insert_formula",
+    "check_vba_access",
+    "create_vba_macro",
+    "delete_vba_macro",
+    "list_vba_macros",
+    "run_macro",
+    "open_workbook",
+    "save_as_macro_enabled",
+}
+
+_CODEGEN_FALLBACK_PREFLIGHT_STATUSES = {
+    "at_column_reference_blocked",
+    "destination_folder_not_found",
+    "field_not_found",
+    "file_not_found",
+    "formula_too_complex",
+    "formula_values_require_insert_formula",
+    "function_not_available_this_excel_version",
+    "invalid_fill_target",
+    "invalid_headers",
+    "invalid_path",
+    "invalid_row_shape",
+    "invalid_structured_reference",
+    "no_data_found",
+    "not_found",
+    "refused",
+    "spill_area_blocked",
+    "trust_not_enabled",
+}
+
+
+def _write_table_input_contains_formula_values(tool_input: dict) -> bool:
+    """Prevent formulas from being bulk-written before their Table exists.
+
+    A formula that refers to a Table's calculated column cannot be valid until
+    the native Table has been created. Sending hundreds of those formulas in
+    the initial value matrix is also a common source of Excel's opaque
+    0x800A03EC COM error. Formula writes therefore stay on insert_formula's
+    verified path after write_table has created the Table.
+    """
+    rows = tool_input.get("rows") if isinstance(tool_input, dict) else None
+    if not isinstance(rows, list):
+        return False
+    return any(
+        isinstance(value, str) and value.lstrip().startswith("=")
+        for row in rows if isinstance(row, list)
+        for value in row
+    )
+
+
+def _should_schedule_codegen_fallback(
+    tool_name: str,
+    result: dict,
+    execution_layer: str,
+) -> bool:
+    """Return whether an unsuccessful skill should get one codegen attempt.
+
+    This is intentionally narrower than "every false result". Bad inputs,
+    unsupported Excel features, and protected VBA operations cannot become
+    correct merely by running generated code. Operational skill failures
+    (for example Excel rejecting a large table write) can often be recovered
+    by a more targeted xlwings/COM implementation, so those are escalated.
+    """
+    if (
+        config.VISUAL_ONLY_MODE
+        or not config.ENABLE_CODEGEN_LAYER
+        or tool_name in _CODEGEN_FALLBACK_EXCLUDED_SKILLS
+        or not has_skill(tool_name)
+        or not isinstance(result, dict)
+        or result.get("verified") is not False
+        # A known skill can raise before dispatch returns its normal "skill"
+        # layer (for example an Excel COM exception). That is still an
+        # eligible skill failure, but unknown/visual dispatch errors are not.
+        or execution_layer not in {"skill", "error"}
+    ):
+        return False
+
+    status = str(result.get("status", "")).strip().lower()
+    if status in _CODEGEN_FALLBACK_PREFLIGHT_STATUSES or status.startswith("invalid_"):
+        return False
+    return True
+
+
+def _schedule_codegen_fallback(task: AgentTask, tool_name: str, tool_input: dict, result: dict) -> None:
+    """Record one forced, traceable fallback without duplicating large inputs."""
+    task.pending_codegen_fallback = {
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+    }
+    result["codegen_fallback"] = {
+        "required": True,
+        "failed_skill": tool_name,
+        "instruction": (
+            "Generate a focused run_excel_code call for the same workbook goal. "
+            "Use the original skill arguments already present in the tool-call history; "
+            "do not repeat the failed skill first."
+        ),
+    }
+
+
+def _mark_codegen_fallback_recovered(task: AgentTask, fallback: dict | None) -> None:
+    """Resolve only the skill attempt that the successful codegen replaced."""
+    if not fallback:
+        return
+    fallback_name = fallback.get("tool_name")
+    fallback_input = fallback.get("tool_input")
+    for step in reversed(task.structured_steps):
+        if (
+            step.get("type") == "action"
+            and step.get("tool_name") == fallback_name
+            and step.get("status") in {"failed", "retried", "fallback_pending"}
+            and step.get("input") == fallback_input
+        ):
+            step["status"] = "recovered"
+            step["recovery_note"] = (
+                "The code-generation fallback completed and verified this same workbook goal."
+            )
+            return
+
 
 def get_task_completion_status(task: AgentTask) -> str:
     """Return the truthful lifecycle state for a task.
@@ -602,11 +949,7 @@ def get_task_completion_status(task: AgentTask) -> str:
         step for step in verified_actions
         if step.get("tool_name") not in _OBSERVATION_TOOL_NAMES
     ]
-    unresolved = [
-        step for step in actions
-        if step.get("status") in {"failed", "retried", "blocked"}
-        or (isinstance(step.get("result"), dict) and step["result"].get("verified") is False)
-    ]
+    unresolved = [step for step in actions if _is_unresolved_workbook_action(step)]
     final_text = (task.final_response or "").lstrip().upper()
     explicitly_incomplete = final_text.startswith("INCOMPLETE:") or "VERIFIED STATUS CHECK:" in final_text
 
@@ -622,8 +965,14 @@ def get_task_completion_status(task: AgentTask) -> str:
 def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences: dict = None):
     if task.is_paused:
         return task
-    if config.VISUAL_ONLY_MODE:
-        if _visual_only_requires_structured_workbook_automation(task.instruction):
+    can_start_excel_session = not (
+        task.awaiting_approval and task.defer_excel_until_approval
+    )
+    if config.VISUAL_ONLY_MODE and can_start_excel_session:
+        if (
+            not config.ALLOW_VISUAL_STRUCTURED_EDITS
+            and _visual_only_requires_structured_workbook_automation(task.instruction)
+        ):
             return _finish_visual_only_routing_block(task)
         from vision import ui_control
         instruction = task.instruction.lower()
@@ -647,14 +996,26 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 task.chat_transcript.append({"role": "assistant", "text": task.final_response})
                 task.log_step(task.final_response)
                 return task
-    excel_version_info = _detect_excel_version_once(task)
+    if not config.VISUAL_ONLY_MODE and can_start_excel_session:
+        from skills.excel_shared import bind_workbook_context
+        bind_workbook_context(task.workbook_name)
+        _keep_excel_visible(task)
+
+    excel_version_info = _detect_excel_version_once(task) if can_start_excel_session else None
     system_prompt = build_system_prompt(user_preferences, excel_version_info)
     if task.awaiting_approval:
-        system_prompt += (
-            "\n\nCURRENT MODE: PLANNING ONLY. You may use only read-only workbook tools "
-            "to understand the request and workbook. Do not change Excel. Summarize the "
-            "proposed changes and ask the user to reply Confirm before execution."
-        )
+        if task.defer_excel_until_approval:
+            system_prompt += (
+                "\n\nCURRENT MODE: PLANNING ONLY. The user explicitly required approval before "
+                "Excel work begins. Do not open, inspect, or modify Excel and do not call any Excel "
+                "tool. Summarize the proposed changes and ask the user to reply Confirm before execution."
+            )
+        else:
+            system_prompt += (
+                "\n\nCURRENT MODE: PLANNING ONLY. You may use only read-only workbook tools "
+                "to understand the request and workbook. Do not change Excel. Summarize the "
+                "proposed changes and ask the user to reply Confirm before execution."
+            )
     else:
         system_prompt += (
             "\n\nCURRENT MODE: EXECUTION APPROVED. Apply only the plan the user confirmed. "
@@ -662,11 +1023,6 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             "Do not ask the user to describe the screen or confirm that Excel should be opened."
         )
     steps_taken = 0
-
-    if not config.VISUAL_ONLY_MODE:
-        from skills.excel_shared import bind_workbook_context
-        bind_workbook_context(task.workbook_name)
-        _keep_excel_visible(task)
 
     from knowledge.rag import bind_user_context
     bind_user_context(task.user_id)
@@ -681,7 +1037,9 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             tool_name, tool_input = "go_to_range", {"reference": go_to_reference}
             task.log_step(f"Using Excel Go To for: {go_to_reference}")
             try:
-                result, execution_layer, generated_code = dispatch_action(tool_name, tool_input)
+                result, execution_layer, generated_code = dispatch_action(
+                    tool_name, tool_input, workbook_name=task.workbook_name
+                )
             except Exception as exc:
                 result = {"error": str(exc), "verified": False}
                 execution_layer, generated_code = "error", None
@@ -703,7 +1061,9 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             tool_input = {"tab": tab, "fallback_keys": keys}
             task.log_step(f"Using Excel shortcut for the {tab.title()} tab: {' + '.join(keys)}")
             try:
-                result, execution_layer, generated_code = dispatch_action(tool_name, tool_input)
+                result, execution_layer, generated_code = dispatch_action(
+                    tool_name, tool_input, workbook_name=task.workbook_name
+                )
             except Exception as exc:
                 result = {"error": str(exc), "verified": False}
                 execution_layer, generated_code = "error", None
@@ -736,8 +1096,6 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
 
         if config.AI_PROVIDER == "claude":
             tool_calls, text_blocks, stop_reason = providers.call_claude(task, system_prompt)
-        elif config.AI_PROVIDER == "openrouter":
-            tool_calls, text_blocks, stop_reason = providers.call_openrouter(task, system_prompt)
         else:
             tool_calls, text_blocks, stop_reason = providers.call_gemini(task, system_prompt)
 
@@ -823,12 +1181,7 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             task.chat_transcript.append({"role": "assistant", "text": task.final_response})
 
             unresolved = [
-                step for step in task.structured_steps
-                if step.get("type") == "action"
-                and (
-                    step.get("status") in {"failed", "retried"}
-                    or (isinstance(step.get("result"), dict) and step["result"].get("verified") is False)
-                )
+                step for step in task.structured_steps if _is_unresolved_workbook_action(step)
             ]
             if unresolved:
                 failed_names = []
@@ -845,7 +1198,7 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 task.log_step("✅ Task complete.")
             break
 
-        for tool_call in tool_calls:
+        for tool_call in _order_tool_calls_by_sheet_dependency(tool_calls):
             if task.is_paused:
                 task.log_step("Task paused before the next workbook action.")
                 break
@@ -916,7 +1269,9 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             task.log_step(f"⏳ Running: {tool_name} {tool_input}")
 
             try:
-                result, execution_layer, generated_code = dispatch_action(tool_name, tool_input)
+                result, execution_layer, generated_code = dispatch_action(
+                    tool_name, tool_input, workbook_name=task.workbook_name
+                )
                 status = "success"
                 is_failure = isinstance(result, dict) and result.get("verified") is False
             except Exception as e:
@@ -925,16 +1280,31 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 status = "success"  # placeholder, corrected by the shared block below
                 is_failure = True
 
+            fallback_being_executed = (
+                task.pending_codegen_fallback
+                if tool_name == "run_excel_code"
+                else None
+            )
+
             if is_failure:
                 task.log_step(f"⚠️ Not verified: {tool_name} -> {result.get('verification_note', result.get('error', 'no details'))}")
-                retries_so_far = task.retry_counts.get(tool_name, 0)
-                if retries_so_far < config.MAX_RETRIES_PER_ACTION:
-                    task.retry_counts[tool_name] = retries_so_far + 1
-                    status = "retried"
-                    task.log_step(f"🔁 Letting the AI decide whether to retry (attempt {retries_so_far + 1}).")
+                if _should_schedule_codegen_fallback(tool_name, result, execution_layer):
+                    _schedule_codegen_fallback(task, tool_name, tool_input, result)
+                    status = "fallback_pending"
+                    task.log_step(
+                        f"🧩 Skill '{tool_name}' could not verify the change; "
+                        "escalating this same goal to code generation."
+                    )
                 else:
-                    status = "failed"
-                    task.log_step(f"❌ Giving up on {tool_name} after {config.MAX_RETRIES_PER_ACTION} attempts.")
+                    retry_key = _action_recovery_key(tool_name, tool_input) or action_signature
+                    retries_so_far = task.retry_counts.get(retry_key, 0)
+                    if retries_so_far < config.MAX_RETRIES_PER_ACTION:
+                        task.retry_counts[retry_key] = retries_so_far + 1
+                        status = "retried"
+                        task.log_step(f"🔁 Letting the AI decide whether to retry (attempt {retries_so_far + 1}).")
+                    else:
+                        status = "failed"
+                        task.log_step(f"❌ Giving up on {tool_name} after {config.MAX_RETRIES_PER_ACTION} attempts.")
             else:
                 task.log_step(f"✅ Done: {tool_name} ({execution_layer}) -> {result}")
 
@@ -944,6 +1314,10 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             })
 
             if status == "success" and isinstance(result, dict) and result.get("verified") is True:
+                if fallback_being_executed:
+                    _mark_codegen_fallback_recovered(task, fallback_being_executed)
+                _mark_prior_action_recovered(task, tool_name, tool_input)
+                _adopt_workbook_from_result(task, result, db, db_task_id)
                 if tool_name not in _OBSERVATION_TOOL_NAMES:
                     task.successful_action_signatures.add(action_signature)
                 _keep_excel_visible(task)
@@ -956,6 +1330,13 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 _log_action_to_db(db, db_task_id, tool_name, tool_input, execution_layer, generated_code, result, status)
 
             providers.submit_tool_result(task, tool_call, result)
+
+            # The fallback is a one-shot recovery attempt. A successful
+            # attempt marks the original skill recovered above; a failed one
+            # remains visibly unresolved rather than trapping the task in an
+            # endless forced-codegen loop.
+            if fallback_being_executed:
+                task.pending_codegen_fallback = None
 
         # VISUAL-MODE COMPLETION GUARD. A direct-action request ("click the
         # Insert tab") is done as soon as that action actually succeeded -

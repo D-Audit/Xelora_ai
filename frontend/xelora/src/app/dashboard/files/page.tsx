@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import type { ChangeEvent } from 'react';
+import Link from 'next/link';
 import {
   Grid2X2, List, Search, Upload, Download, MoreHorizontal, Trash2,
   FileSpreadsheet, Loader2,
@@ -166,6 +167,9 @@ export default function DashboardFilesPage() {
               </div>
               <div className="mt-4 flex flex-wrap gap-2">
                 <Button size="sm" variant="outline" asChild>
+                  <Link href={`/dashboard/files/${file.id}`}>Details</Link>
+                </Button>
+                <Button size="sm" variant="outline" asChild>
                   <a href={fileDownloadUrl(file.id)} target="_blank" rel="noreferrer">
                     <Download className="h-4 w-4" /> Download
                   </a>
@@ -197,7 +201,9 @@ export default function DashboardFilesPage() {
                     <td className="px-5 py-3">
                       <div className="flex items-center gap-3">
                         <FileSpreadsheet className="h-4 w-4 text-xelora-green" />
-                        <span className="font-medium text-xelora-text">{file.name}</span>
+                        <Link href={`/dashboard/files/${file.id}`} className="font-medium text-xelora-text hover:text-xelora-green">
+                          {file.name}
+                        </Link>
                       </div>
                     </td>
                     <td className="px-4 py-3 text-xs uppercase text-xelora-text-secondary">{file.type}</td>

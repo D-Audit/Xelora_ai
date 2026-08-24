@@ -248,10 +248,15 @@ def _start_on_fresh_blank_workbook(window):
         if window.is_minimized():
             window.restore()
         _activate_excel_window(window)
-        window.type_keys("{ESC}", set_foreground=False)  # dismiss Start screen / stray dialog
-        time.sleep(0.4)
-        window.type_keys("^n", set_foreground=False)     # Ctrl+N: guaranteed fresh blank workbook
-        time.sleep(1.0)
+        title = " ".join(window.window_text().split())
+        # Starting Excel with /x normally already creates Book1. Sending
+        # Ctrl+N in that state creates Book2 as another visible Excel window.
+        # Only create a workbook when Excel is actually on its start screen.
+        if not re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
+            window.type_keys("{ESC}", set_foreground=False)  # dismiss Start screen / stray dialog
+            time.sleep(0.4)
+            window.type_keys("^n", set_foreground=False)
+            time.sleep(1.0)
     except Exception:
         pass
 

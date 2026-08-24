@@ -30,6 +30,45 @@ def bind_workbook_context(workbook_name: str | None):
     _RESTART_COUNT.set(0)
 
 
+def normalize_workbook_path(file_path: str) -> str:
+    """Return a real absolute workbook path without creating directories.
+
+    Agents often use the familiar ``~/Desktop/report.xlsx`` spelling.  On
+    Windows that is especially error-prone because a redirected OneDrive
+    Desktop is usually *not* ``C:\\Users\\<user>\\Desktop``.  Excel does not
+    expand ``~`` itself, so passing it through makes Excel interpret it as a
+    folder relative to the backend.  Resolve that shorthand here, before any
+    COM call, and leave missing directories as an explicit, safe failure for
+    the caller to report.
+    """
+    if not isinstance(file_path, str) or not file_path.strip():
+        raise ValueError("file_path must be a non-empty string")
+
+    raw_path = file_path.strip().strip('"').strip("'")
+    expanded = os.path.expandvars(raw_path)
+    if expanded.startswith(("~/", "~\\")):
+        relative_parts = [part for part in expanded[2:].replace("/", os.sep).split(os.sep) if part]
+        home = os.path.expanduser("~")
+        if relative_parts and relative_parts[0].lower() == "desktop":
+            # OneDrive Desktop redirection is the default on many current
+            # Windows setups. Prefer it only when it really exists.
+            one_drive = os.environ.get("OneDrive") or os.environ.get("OneDriveConsumer")
+            redirected_desktop = os.path.join(one_drive, "Desktop") if one_drive else None
+            standard_desktop = os.path.join(home, "Desktop")
+            desktop = (
+                redirected_desktop
+                if redirected_desktop and os.path.isdir(redirected_desktop)
+                else standard_desktop
+            )
+            expanded = os.path.join(desktop, *relative_parts[1:])
+        else:
+            expanded = os.path.join(home, *relative_parts)
+    else:
+        expanded = os.path.expanduser(expanded)
+
+    return os.path.abspath(os.path.normpath(expanded))
+
+
 def _harden_app(app):
     app.display_alerts = False
     try:
@@ -48,6 +87,35 @@ def _harden_app(app):
         app.screen_updating = False
     except Exception:
         pass
+
+
+def _active_or_new_workbook(app):
+    """Use Excel's startup workbook when it already supplied one.
+
+    On Windows, ``xw.App(visible=True)`` frequently opens Book1 by itself.
+    Calling ``books.add()`` immediately afterward creates Book2 in a second
+    Excel window. Reuse Book1 when it exists; only add a workbook when Excel
+    is still on its start screen with no documents.
+    """
+    try:
+        if len(app.books) > 0:
+            return app.books.active
+    except Exception:
+        pass
+    return app.books.add()
+
+
+def _close_startup_books(app) -> None:
+    """Close unsaved documents in a freshly-created, agent-owned app only."""
+    try:
+        books = list(app.books)
+    except Exception:
+        return
+    for book in books:
+        try:
+            book.close(save=False)
+        except Exception:
+            pass
 
 
 def restore_screen_updating(app):
@@ -109,8 +177,14 @@ def supports_dynamic_arrays(app) -> bool:
     sheet = wb.sheets.active
     probe_cell = sheet.range("XFD1048576")  # farthest, almost-never-used corner cell
 
+    original_value = None
+    original_formula = None
     try:
+        # Preserve the formula rather than only the calculated value.  The
+        # previous probe could silently replace a rare existing formula in
+        # this far-corner cell with its result.
         original_value = probe_cell.value
+        original_formula = probe_cell.formula
         probe_cell.formula2 = "=SEQUENCE(1)"
         result = probe_cell.value
         supported = result is not None and str(result).strip().upper() != "#NAME?"
@@ -118,7 +192,10 @@ def supports_dynamic_arrays(app) -> bool:
         supported = False
     finally:
         try:
-            probe_cell.value = original_value
+            if isinstance(original_formula, str) and original_formula.startswith("="):
+                probe_cell.formula = original_formula
+            else:
+                probe_cell.value = original_value
         except Exception:
             pass
 
@@ -243,9 +320,12 @@ def force_restart_excel_and_reopen():
     _DYNAMIC_ARRAY_SUPPORT_CACHE.pop(app.pid, None)  # fresh process - re-probe if/when needed
 
     if _LAST_KNOWN_WORKBOOK_PATH and os.path.exists(_LAST_KNOWN_WORKBOOK_PATH):
+        # This app was created above and contains no user work. Remove the
+        # default Book1 before reopening the task workbook.
+        _close_startup_books(app)
         wb = app.books.open(_LAST_KNOWN_WORKBOOK_PATH)
     else:
-        wb = app.books.add()
+        wb = _active_or_new_workbook(app)
         _ensure_workbook_has_path(wb)
         _LAST_KNOWN_WORKBOOK_PATH = wb.fullname
 
@@ -268,10 +348,18 @@ def get_active_workbook():
                     _LAST_KNOWN_APP_PID = app.pid
                     return book
 
+        # A pinned task must never fall through to an unrelated active
+        # workbook.  It is safer to stop and ask the user to reopen the named
+        # file than to make a correct-looking change to the wrong workbook.
+        raise RuntimeError(
+            f"The task's target workbook '{pinned_name}' is not open in Excel. "
+            "Reopen that workbook and retry the action."
+        )
+
     if len(xw.apps) == 0:
         app = xw.App(visible=True)
         _harden_app(app)
-        wb = app.books.add()
+        wb = _active_or_new_workbook(app)
     else:
         app = xw.apps.active
         _harden_app(app)

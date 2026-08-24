@@ -2,6 +2,19 @@ import { NextResponse } from 'next/server';
 import { backendFetch } from '@/lib/backend';
 import { getSessionToken } from '@/lib/session';
 
+export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const token = await getSessionToken();
+  if (!token) return NextResponse.json({ error: 'Not signed in.' }, { status: 401 });
+
+  const { id } = await params;
+  const result = await backendFetch(`/files/${id}`, { token });
+  if (!result.ok) {
+    const detail = result.data as { detail?: string; error?: string };
+    return NextResponse.json({ error: detail.detail || detail.error || 'Could not load file details.' }, { status: result.status || 500 });
+  }
+  return NextResponse.json(result.data);
+}
+
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const token = await getSessionToken();
   if (!token) return NextResponse.json({ error: 'Not signed in.' }, { status: 401 });
@@ -9,7 +22,8 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   const { id } = await params;
   const result = await backendFetch(`/files/${id}`, { method: 'DELETE', token });
   if (!result.ok) {
-    return NextResponse.json({ error: 'Could not delete file.' }, { status: result.status || 500 });
+    const detail = result.data as { detail?: string; error?: string };
+    return NextResponse.json({ error: detail.detail || detail.error || 'Could not delete file.' }, { status: result.status || 500 });
   }
   return NextResponse.json(result.data);
 }

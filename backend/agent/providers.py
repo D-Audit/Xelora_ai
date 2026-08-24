@@ -9,10 +9,8 @@ visual fallback tools, so the AI genuinely sees all three layers as
 options every turn, in the priority order explained in the system prompt.
 """
 
+import base64
 import json
-from dataclasses import dataclass
-
-import requests
 
 import config
 from skills.registry import claude_tools, gemini_tools
@@ -21,8 +19,14 @@ CODEGEN_TOOL_CLAUDE = {
     "name": "run_excel_code",
     "description": (
         "Runs real Python (xlwings/openpyxl) against the live workbook for anything "
-        "the skill library doesn't cover. Must use native Excel features, never a "
-        "precomputed value. Assign your JSON-serializable result to a variable `result`."
+        "the skill library doesn't cover, or for the exact goal of a skill result that "
+        "explicitly requires codegen fallback. Must use native Excel features, never a "
+        "precomputed value. Allowed imports are xlwings, openpyxl, datetime, math, random, "
+        "re, json, and statistics. Never assign .formula or .formula2 here: use the "
+        "insert_formula skill (with fill_to for a formula column) so formula writes are "
+        "verified safely. Assign a JSON-serializable dictionary to `result`. Only set "
+        "`verified: true` after reading back the changed workbook state, and include a "
+        "non-empty `verification_note` describing that evidence."
     ),
     "input_schema": {
         "type": "object",
@@ -77,129 +81,30 @@ VISION_TOOLS_CLAUDE = [
 ]
 
 
+def _available_vision_tools():
+    """Omit screen recognition when the local OmniParser service is disabled."""
+    if config.OMNIPARSER_URL:
+        return VISION_TOOLS_CLAUDE
+    return [tool for tool in VISION_TOOLS_CLAUDE if tool["name"] != "parse_screen"]
+
+
 def build_claude_tools():
     if config.VISUAL_ONLY_MODE:
-        return VISION_TOOLS_CLAUDE
+        return _available_vision_tools()
     tools = claude_tools()
     if config.ENABLE_CODEGEN_LAYER:
         tools.append(CODEGEN_TOOL_CLAUDE)
     if config.ENABLE_VISUAL_FALLBACK:
-        tools += VISION_TOOLS_CLAUDE
+        tools += _available_vision_tools()
     return tools
-
-
-_OPENROUTER_CORE_TOOLS = {
-    # The minimum reliable workflow for nearly every structured Excel task.
-    "get_excel_version", "inspect_workbook", "read_range", "create_sheet", "rename_sheet",
-    "copy_sheet", "reorder_sheet", "write_cell", "write_table", "clear_range",
-    "insert_formula", "apply_formatting", "format_range", "auto_fit_columns",
-    "conditional_formatting", "create_chart", "modify_chart", "position_chart",
-    "delete_chart", "freeze_panes", "set_autofilter", "sort_range", "filter_data",
-    # This is the universal fallback when a specialised skill is not offered.
-    "run_excel_code",
-}
-
-_OPENROUTER_INTENT_GROUPS = (
-    (
-        {"add_sparkline", "add_slicer", "add_shape", "create_chart", "modify_chart", "position_chart"},
-        ("dashboard", "chart", "graph", "visual", "kpi", "sparkline", "slicer"),
-    ),
-    (
-        {"color_scale_formatting", "data_bar_formatting", "icon_set_formatting", "format_currency", "format_bold", "autofit_columns"},
-        ("format", "colour", "color", "currency", "percent", "percentage", "highlight", "conditional", "professional"),
-    ),
-    (
-        {"create_pivot_table", "refresh_pivot_table", "add_slicer"},
-        ("pivot", "slicer"),
-    ),
-    (
-        {"data_validation", "add_dropdown_control", "remove_duplicates", "find_replace", "split_column", "merge_columns"},
-        ("validation", "dropdown", "duplicate", "replace", "split column", "merge column", "clean data"),
-    ),
-    (
-        {"insert_row", "insert_column", "delete_row", "delete_column", "group_rows_columns", "merge_cells", "unmerge_cells"},
-        ("insert row", "insert column", "delete row", "delete column", "group", "merge cells", "unmerge"),
-    ),
-    (
-        {"create_named_range", "set_sheet_visibility", "protect_sheet", "unprotect_sheet", "set_page_layout", "export_to_pdf"},
-        ("named range", "hide sheet", "show sheet", "protect", "password", "page layout", "print", "pdf"),
-    ),
-    (
-        {"open_workbook", "create_new_workbook", "combine_sheets", "import_from_database", "import_unstructured_document", "fetch_live_data"},
-        ("open workbook", "new workbook", "combine", "database", "import", "pdf document", "live data", "external data"),
-    ),
-    (
-        {"add_comment", "add_hyperlink", "insert_picture"},
-        ("comment", "hyperlink", "link", "picture", "image", "logo"),
-    ),
-    (
-        {"check_vba_access", "create_vba_macro", "delete_vba_macro", "list_vba_macros", "run_macro", "save_as_macro_enabled", "add_macro_button"},
-        ("vba", "macro", "xlsm"),
-    ),
-    (
-        {"parse_screen", "click", "double_click", "type_text", "press_key", "hotkey", "go_to_range", "paste_table", "fill_formula_down", "format_currency", "format_bold", "autofit_columns", "create_clustered_column_chart", "scroll"},
-        ("click", "ribbon", "dialog", "screen", "shortcut", "keyboard", "go to", "visual only"),
-    ),
-)
-
-
-def _openrouter_intent_text(task) -> str:
-    """Use the original goal and later user instructions to select tools."""
-    messages = getattr(task, "messages", []) if task is not None else []
-    text_parts = [str(getattr(task, "instruction", ""))]
-    for message in messages:
-        if message.get("role") != "user":
-            continue
-        content = message.get("content")
-        if isinstance(content, str):
-            text_parts.append(content)
-    return "\n".join(text_parts).lower()
-
-
-def _select_openrouter_tools(tools, task=None):
-    """Fit the task's tools under the provider limit without losing code fallback."""
-    if len(tools) <= config.OPENROUTER_MAX_TOOLS:
-        return tools
-
-    intent = _openrouter_intent_text(task)
-    selected_names = set(_OPENROUTER_CORE_TOOLS)
-    for group_tools, terms in _OPENROUTER_INTENT_GROUPS:
-        if any(term in intent for term in terms):
-            selected_names.update(group_tools)
-
-    selected = [tool for tool in tools if tool["name"] in selected_names]
-    if len(selected) > config.OPENROUTER_MAX_TOOLS:
-        # Core tools occur first so an overly broad request retains the most
-        # dependable tools and can still use run_excel_code for the rest.
-        core = [tool for tool in selected if tool["name"] in _OPENROUTER_CORE_TOOLS]
-        extras = [tool for tool in selected if tool["name"] not in _OPENROUTER_CORE_TOOLS]
-        selected = (core + extras)[:config.OPENROUTER_MAX_TOOLS]
-
-    return selected
-
-
-def build_openrouter_tools(task=None):
-    """Translate only task-relevant Claude-style tools to OpenAI/OpenRouter format."""
-    selected_tools = _select_openrouter_tools(build_claude_tools(), task)
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": tool["name"],
-                "description": tool["description"],
-                "parameters": tool["input_schema"],
-            },
-        }
-        for tool in selected_tools
-    ]
 
 
 _GEMINI_UNSUPPORTED_SCHEMA_KEYS = {"default", "additionalProperties", "$schema"}
 
 
 def _strip_unsupported_schema_keys(schema):
-    """The older google.generativeai SDK's Schema proto is much stricter
-    than plain JSON-schema (which is all Claude requires). It rejects
+    """Gemini's function-schema parser is stricter than plain JSON-schema
+    (which is all Claude requires). It rejects
     unsupported keywords like 'default', AND it requires every array to
     declare 'items' (including nested arrays-of-arrays) and every field
     to declare a 'type' (no bare '{}' for "any value" fields). This walks
@@ -230,40 +135,222 @@ def _strip_unsupported_schema_keys(schema):
     return cleaned
 
 
-def build_gemini_tools():
+def build_gemini_tools(allowed_function_names=None):
+    """Return Gemini declarations, optionally narrowed to a small tool set.
+
+    Gemini compiles function schemas into a constrained decoder when function
+    calling is forced. Sending all 69 Excel schemas in that mode exceeds its
+    state limit, even though the same catalogue is acceptable in AUTO mode.
+    """
+    allowed = set(allowed_function_names or ())
+
+    def include(name):
+        return not allowed or name in allowed
+
+    vision_tools = _available_vision_tools()
     if config.VISUAL_ONLY_MODE:
         return [{"function_declarations": [
             {"name": t["name"], "description": t["description"], "parameters": _strip_unsupported_schema_keys(t["input_schema"])}
-            for t in VISION_TOOLS_CLAUDE
+            for t in vision_tools if include(t["name"])
         ]}]
-    merged = gemini_tools()[0]["function_declarations"]
+    merged = [
+        declaration for declaration in gemini_tools()[0]["function_declarations"]
+        if include(declaration["name"])
+    ]
     merged = [
         {**decl, "parameters": _strip_unsupported_schema_keys(decl["parameters"])}
         for decl in merged
     ]
-    if config.ENABLE_CODEGEN_LAYER:
+    if config.ENABLE_CODEGEN_LAYER and include(CODEGEN_TOOL_CLAUDE["name"]):
         merged.append({
             "name": CODEGEN_TOOL_CLAUDE["name"],
             "description": CODEGEN_TOOL_CLAUDE["description"],
             "parameters": CODEGEN_TOOL_CLAUDE["input_schema"],
         })
     if config.ENABLE_VISUAL_FALLBACK:
-        for t in VISION_TOOLS_CLAUDE:
-            merged.append({"name": t["name"], "description": t["description"], "parameters": t["input_schema"]})
+        for t in vision_tools:
+            if include(t["name"]):
+                merged.append({"name": t["name"], "description": t["description"], "parameters": t["input_schema"]})
     return [{"function_declarations": merged}]
+
+
+_GEMINI_READ_ONLY_TOOL_NAMES = {
+    "get_excel_version", "inspect_workbook", "read_range", "screenshot_active_window",
+    "take_screenshot", "parse_screen",
+}
+
+# This is deliberately small enough to work with Gemini's forced-function
+# decoder. It covers the first substantive step of the normal Excel workflow;
+# after that first verified edit, the model receives the complete catalogue in
+# AUTO mode for specialist operations.
+_GEMINI_INITIAL_MUTATION_TOOLS = {
+    "create_sheet", "write_cell", "write_table", "insert_formula",
+    "apply_formatting", "conditional_formatting", "freeze_panes",
+    "auto_fit_columns", "sort_range", "create_pivot_table", "create_chart",
+}
+
+
+def _is_new_dashboard_build(task) -> bool:
+    """Recognise a new dashboard request that needs its first sheet created."""
+    text = " ".join(
+        str(getattr(task, "instruction", "")).lower().split()
+    )
+    existing_workbook_markers = (
+        "existing workbook", "active workbook", "current workbook", "my workbook",
+        "use the data in", "use my data", "use existing data",
+    )
+    new_work_markers = (
+        "dashboard", "new workbook", "brand-new", "dummy data", "sample data",
+        "demo workbook", "generate data",
+    )
+    return (
+        not any(marker in text for marker in existing_workbook_markers)
+        and any(marker in text for marker in new_work_markers)
+    )
+
+
+def _successful_actions(action_steps, tool_name: str):
+    return [
+        step for step in action_steps
+        if step.get("tool_name") == tool_name
+        and step.get("status") == "success"
+        and isinstance(step.get("result"), dict)
+        and step["result"].get("verified") is True
+    ]
+
+
+def _gemini_tool_config(task):
+    """Require a real tool call at the points where prose is not an answer.
+
+    Gemini defaults to ``AUTO`` tool selection.  That is suitable while a
+    task is waiting for the user's approval, but it allowed an execution task
+    to answer with a detailed fictional completion report without ever
+    touching Excel.  Force one tool call to start approved work, then force
+    the final inspection requested by the core loop.  Calls between those two
+    points remain automatic so Gemini can end the task normally after it has
+    received the final inspection result.
+    """
+    if task.awaiting_approval:
+        return None
+
+    # A real skill ran and could not verify its workbook change. Core records
+    # that one recovery opportunity; force the next Gemini turn to create the
+    # corresponding codegen call instead of allowing another generic skill
+    # retry or a fictional text completion.
+    if getattr(task, "pending_codegen_fallback", None):
+        return {
+            "function_calling_config": {
+                "mode": "ANY",
+                "allowed_function_names": ["run_excel_code"],
+            }
+        }
+
+    action_steps = [
+        step for step in task.structured_steps if step.get("type") == "action"
+    ]
+    if _is_new_dashboard_build(task) and not task.final_verification_requested:
+        created_sheets = _successful_actions(action_steps, "create_sheet")
+        written_tables = _successful_actions(action_steps, "write_table")
+        if not created_sheets:
+            # Do not let Gemini write to an invented sheet name and create it
+            # later in the same function-call batch. Excel must have the
+            # destination sheet before a table can be written.
+            return {
+                "function_calling_config": {
+                    "mode": "ANY",
+                    "allowed_function_names": ["create_sheet"],
+                }
+            }
+        if not written_tables:
+            # A model cannot reliably fit hundreds of generated data rows in
+            # one function-call payload. Let it use the verified codegen path
+            # to populate a large demo dataset, then it will call write_table
+            # with rows=[] to turn that existing data into an Excel Table.
+            data_creation_tools = {"write_table"}
+            if config.ENABLE_CODEGEN_LAYER:
+                data_creation_tools.add("run_excel_code")
+            return {
+                "function_calling_config": {
+                    "mode": "ANY",
+                    "allowed_function_names": sorted(data_creation_tools),
+                }
+            }
+
+    if not action_steps:
+        # Inspection is a safe, universally valid first step. Forcing a
+        # single tiny schema avoids Gemini's state-limit error and gives the
+        # next turn the live workbook facts needed for a write action.
+        return {
+            "function_calling_config": {
+                "mode": "ANY",
+                "allowed_function_names": ["inspect_workbook"],
+            }
+        }
+
+    if task.final_verification_requested:
+        last_workbook_change = max(
+            (
+                index for index, step in enumerate(action_steps)
+                if step.get("tool_name") not in _GEMINI_READ_ONLY_TOOL_NAMES
+            ),
+            default=-1,
+        )
+        final_inspection_succeeded = any(
+            index > last_workbook_change
+            and step.get("tool_name") == "inspect_workbook"
+            and step.get("status") == "success"
+            and isinstance(step.get("result"), dict)
+            and step["result"].get("verified") is True
+            for index, step in enumerate(action_steps)
+        )
+        if not final_inspection_succeeded:
+            return {
+                "function_calling_config": {
+                    "mode": "ANY",
+                    "allowed_function_names": ["inspect_workbook"],
+                }
+            }
+
+    meaningful_actions = [
+        step for step in action_steps
+        if step.get("tool_name") not in _GEMINI_READ_ONLY_TOOL_NAMES
+        and step.get("status") == "success"
+        and isinstance(step.get("result"), dict)
+        and step["result"].get("verified") is True
+    ]
+    if not meaningful_actions:
+        # The first inspection succeeded, but Gemini has not yet changed the
+        # workbook. Require a real, task-relevant Excel operation instead of
+        # accepting another textual completion claim.
+        names = sorted(
+            _GEMINI_INITIAL_MUTATION_TOOLS
+            | ({"run_excel_code"} if config.ENABLE_CODEGEN_LAYER else set())
+        )
+        return {
+            "function_calling_config": {
+                "mode": "ANY",
+                "allowed_function_names": names,
+            }
+        }
+
+    return None
 
 
 def call_claude(task, system_prompt: str):
     from anthropic import Anthropic
 
     client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
-    response = client.messages.create(
+    request = dict(
         model="claude-sonnet-4-6",
         max_tokens=1024,
         system=system_prompt,
-        tools=build_claude_tools(),
+        tools=([] if task.awaiting_approval and getattr(task, "defer_excel_until_approval", False)
+               else build_claude_tools()),
         messages=task.messages,
     )
+    if getattr(task, "pending_codegen_fallback", None):
+        request["tool_choice"] = {"type": "tool", "name": "run_excel_code"}
+    response = client.messages.create(**request)
     def _serialize_block(block):
         if hasattr(block, "model_dump"):
             return block.model_dump()
@@ -286,85 +373,9 @@ def submit_claude_tool_result(task, tool_call, result):
     })
 
 
-@dataclass
-class OpenRouterToolCall:
-    id: str
-    name: str
-    input: dict
-
-
-def call_openrouter(task, system_prompt: str):
-    """Call an OpenRouter model through its OpenAI-compatible chat endpoint."""
-    if not config.OPENROUTER_API_KEY:
-        raise RuntimeError("OPENROUTER_API_KEY is not configured.")
-
-    tools = build_openrouter_tools(task)
-    response = requests.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": config.OPENROUTER_MODEL,
-            "messages": [{"role": "system", "content": system_prompt}, *task.messages],
-            "tools": tools,
-            "tool_choice": "auto",
-            "max_tokens": 1024,
-        },
-        timeout=config.OPENROUTER_TIMEOUT_SECONDS,
-    )
-    try:
-        response.raise_for_status()
-    except requests.HTTPError as exc:
-        detail = response.text[:500]
-        raise RuntimeError(f"OpenRouter request failed ({response.status_code}): {detail}") from exc
-
-    payload = response.json()
-    choices = payload.get("choices") or []
-    if not choices or not isinstance(choices[0].get("message"), dict):
-        raise RuntimeError("OpenRouter returned no assistant message.")
-
-    choice = choices[0]
-    message = choice["message"]
-    # Keep only request-compatible fields; provider response metadata must not
-    # be sent back on the next tool-execution turn.
-    assistant_message = {"role": "assistant", "content": message.get("content")}
-    if message.get("tool_calls"):
-        assistant_message["tool_calls"] = message["tool_calls"]
-    task.messages.append(assistant_message)
-    text = message.get("content")
-    text_blocks = [text] if isinstance(text, str) and text else []
-    tool_calls = []
-
-    for tool_call in message.get("tool_calls") or []:
-        function = tool_call.get("function") or {}
-        name = function.get("name")
-        arguments = function.get("arguments", "{}")
-        if not tool_call.get("id") or not name:
-            continue
-        try:
-            tool_input = json.loads(arguments) if isinstance(arguments, str) else arguments
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"OpenRouter returned invalid arguments for tool '{name}'.") from exc
-        if not isinstance(tool_input, dict):
-            raise RuntimeError(f"OpenRouter returned non-object arguments for tool '{name}'.")
-        tool_calls.append(OpenRouterToolCall(id=tool_call["id"], name=name, input=tool_input))
-
-    return tool_calls, text_blocks, choice.get("finish_reason", "stop")
-
-
-def submit_openrouter_tool_result(task, tool_call, result):
-    task.messages.append({
-        "role": "tool",
-        "tool_call_id": tool_call.id,
-        "content": json.dumps(result, default=str),
-    })
-
-
 def tool_input(tool_call) -> dict:
     """Return a provider-neutral mapping of the tool arguments."""
-    if config.AI_PROVIDER in {"claude", "openrouter"}:
+    if config.AI_PROVIDER == "claude":
         return dict(tool_call.input)
     return gemini_tool_input(tool_call)
 
@@ -373,8 +384,6 @@ def submit_tool_result(task, tool_call, result):
     """Append a tool result in the conversation format expected by the active provider."""
     if config.AI_PROVIDER == "claude":
         submit_claude_tool_result(task, tool_call, result)
-    elif config.AI_PROVIDER == "openrouter":
-        submit_openrouter_tool_result(task, tool_call, result)
     else:
         submit_gemini_tool_result(task, tool_call, result)
 
@@ -387,24 +396,219 @@ def _clean_gemini_value(value):
     return value
 
 
+_GEMINI_FUNCTION_CALLS_KEY = "_gemini_function_calls"
+_GEMINI_FUNCTION_RESPONSES_KEY = "_gemini_function_responses"
+_GEMINI_TEXT_KEY = "_gemini_text"
+_GEMINI_MODEL_PARTS_KEY = "_gemini_model_parts"
+
+
+def _json_safe_gemini_value(value):
+    """Return a value that can be retained in the JSON task transcript.
+
+    ``FunctionCall.args`` is a protobuf map rather than a normal dictionary.
+    Task messages are persisted to the database as JSON, so convert it at the
+    boundary and recreate Gemini's native parts only when making the next API
+    call.
+    """
+    return json.loads(json.dumps(_clean_gemini_value(value), default=str))
+
+
+def _encode_thought_signature(signature):
+    """Store Gemini's opaque reasoning signature without changing its bytes."""
+    if isinstance(signature, bytes):
+        return base64.b64encode(signature).decode("ascii")
+    if isinstance(signature, bytearray):
+        return base64.b64encode(bytes(signature)).decode("ascii")
+    return None
+
+
+def _function_call_record(function_call):
+    """Make the provider's FunctionCall JSON-safe, including its response id."""
+    try:
+        arguments = _json_safe_gemini_value(function_call.args)
+    except Exception:
+        arguments = {}
+    record = {"name": function_call.name, "args": arguments}
+    call_id = getattr(function_call, "id", None)
+    if isinstance(call_id, str) and call_id:
+        record["id"] = call_id
+    return record
+
+
+def _function_call_runtime_key(function_call):
+    """Identify one in-memory call while results are buffered for one turn."""
+    call_id = getattr(function_call, "id", None)
+    return f"id:{call_id}" if isinstance(call_id, str) and call_id else f"object:{id(function_call)}"
+
+
+def _model_part_record(part):
+    """Persist every returned Gemini Part exactly enough to replay it.
+
+    Gemini 3 can attach a thought signature to a text/thought Part *before*
+    a function call. Keeping only FunctionCall objects therefore loses the
+    signature and makes the next request invalid. A stateless client must
+    replay every model Part, in order, with its original signature.
+    """
+    record = {}
+    text = getattr(part, "text", None)
+    if isinstance(text, str):
+        record["text"] = text
+
+    function_call = getattr(part, "function_call", None)
+    if function_call and getattr(function_call, "name", None):
+        record["function_call"] = _function_call_record(function_call)
+
+    thought = getattr(part, "thought", None)
+    if isinstance(thought, bool):
+        record["thought"] = thought
+
+    signature = _encode_thought_signature(getattr(part, "thought_signature", None))
+    if signature is not None:
+        record["thought_signature"] = signature
+
+    return record
+
+
+def _part_from_record(record, gemini_types):
+    """Rebuild one Gemini Part without merging it with adjacent parts."""
+    if not isinstance(record, dict):
+        return None
+
+    kwargs = {}
+    if isinstance(record.get("text"), str):
+        kwargs["text"] = record["text"]
+    if isinstance(record.get("thought"), bool):
+        kwargs["thought"] = record["thought"]
+
+    function_call = record.get("function_call")
+    if isinstance(function_call, dict) and isinstance(function_call.get("name"), str):
+        call_kwargs = {
+            "name": function_call["name"],
+            "args": function_call.get("args") if isinstance(function_call.get("args"), dict) else {},
+        }
+        if isinstance(function_call.get("id"), str) and function_call["id"]:
+            call_kwargs["id"] = function_call["id"]
+        kwargs["function_call"] = gemini_types.FunctionCall(**call_kwargs)
+
+    signature = record.get("thought_signature")
+    if isinstance(signature, str):
+        try:
+            kwargs["thought_signature"] = base64.b64decode(signature, validate=True)
+        except Exception:
+            # A malformed persisted signature cannot be safely invented. Keep
+            # the content usable and let Gemini report the exact history issue.
+            pass
+
+    if not kwargs:
+        return None
+    return gemini_types.Part(**kwargs)
+
+
+def _gemini_parts_from_content(content, gemini_types):
+    """Build native Gemini parts from a JSON-safe task-message payload."""
+    if isinstance(content, str):
+        return [gemini_types.Part(text=content)]
+    if not isinstance(content, dict):
+        return []
+
+    # New-format model history preserves every response part and, crucially,
+    # the thought signature on whichever part originally carried it.
+    model_part_records = content.get(_GEMINI_MODEL_PARTS_KEY)
+    if isinstance(model_part_records, list):
+        return [
+            part for record in model_part_records
+            if (part := _part_from_record(record, gemini_types)) is not None
+        ]
+
+    # Compatibility for tasks persisted before full model-part replay was
+    # added. New calls use the branch above.
+    parts = []
+    for call in content.get(_GEMINI_FUNCTION_CALLS_KEY, []):
+        if not isinstance(call, dict) or not isinstance(call.get("name"), str):
+            continue
+        args = call.get("args")
+        signature = call.get("thought_signature")
+        call_kwargs = {
+            "name": call["name"],
+            "args": args if isinstance(args, dict) else {},
+        }
+        if isinstance(call.get("id"), str) and call["id"]:
+            call_kwargs["id"] = call["id"]
+        try:
+            thought_signature = base64.b64decode(signature) if isinstance(signature, str) else None
+        except Exception:
+            thought_signature = None
+        parts.append(gemini_types.Part(
+            function_call=gemini_types.FunctionCall(**call_kwargs),
+            thought_signature=thought_signature,
+        ))
+    for tool_result in content.get(_GEMINI_FUNCTION_RESPONSES_KEY, []):
+        if not isinstance(tool_result, dict) or not isinstance(tool_result.get("name"), str):
+            continue
+        response = tool_result.get("response")
+        response_kwargs = {
+            "name": tool_result["name"],
+            "response": response if isinstance(response, dict) else {"result": response},
+        }
+        if isinstance(tool_result.get("id"), str) and tool_result["id"]:
+            response_kwargs["id"] = tool_result["id"]
+        parts.append(gemini_types.Part(
+            function_response=gemini_types.FunctionResponse(**response_kwargs),
+        ))
+    text = content.get(_GEMINI_TEXT_KEY)
+    if isinstance(text, str) and text:
+        parts.append(gemini_types.Part(text=text))
+    elif isinstance(text, list):
+        parts.extend(gemini_types.Part(text=part) for part in text if isinstance(part, str) and part)
+    return parts
+
+
 def _convert_history_for_gemini(messages):
+    from google.genai import types
+
     history = []
     for m in messages:
-        if isinstance(m["content"], str):
-            role = "user" if m["role"] == "user" else "model"
-            history.append({"role": role, "parts": [m["content"]]})
+        parts = _gemini_parts_from_content(m.get("content"), types)
+        if parts:
+            role = "user" if m.get("role") == "user" else "model"
+            history.append(types.Content(role=role, parts=parts))
     return history
 
 
 def call_gemini(task, system_prompt: str):
     import time
-    import google.generativeai as genai
-    from google.api_core.exceptions import ResourceExhausted
+    from google import genai
+    from google.genai import errors, types
 
-    genai.configure(api_key=config.GEMINI_API_KEY)
+    client = genai.Client(
+        api_key=config.GEMINI_API_KEY,
+        http_options=types.HttpOptions(timeout=config.GEMINI_TIMEOUT_SECONDS * 1000),
+    )
     last_user_msg = task.messages[-1]["content"]
-    tools = build_gemini_tools()
-    from google.generativeai.types.generation_types import StopCandidateException
+    tool_config = _gemini_tool_config(task)
+    allowed_function_names = None
+    if tool_config is not None:
+        allowed_function_names = tool_config["function_calling_config"].get(
+            "allowed_function_names"
+        )
+    tool_declarations = (
+        []
+        if task.awaiting_approval and getattr(task, "defer_excel_until_approval", False)
+        else build_gemini_tools(allowed_function_names)
+    )
+    tools = [types.Tool(**declaration) for declaration in tool_declarations]
+    generation_config = types.GenerateContentConfig(
+        tools=tools or None,
+        tool_config=(
+            types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    **tool_config["function_calling_config"]
+                )
+            )
+            if tool_config is not None else None
+        ),
+        system_instruction=system_prompt,
+    )
 
     # Desktop work must not appear frozen while an external service waits for
     # quota. Try each configured fallback once, then return the real error.
@@ -414,15 +618,24 @@ def call_gemini(task, system_prompt: str):
     for model_offset in range(len(config.GEMINI_MODEL_CHAIN)):
         model_index = (task.gemini_model_index + model_offset) % len(config.GEMINI_MODEL_CHAIN)
         model_name = config.GEMINI_MODEL_CHAIN[model_index]
-        model = genai.GenerativeModel(model_name, tools=tools, system_instruction=system_prompt)
-        chat = model.start_chat(history=_convert_history_for_gemini(task.messages[:-1]))
+        history = _convert_history_for_gemini(task.messages[:-1])
+        prompt_parts = _gemini_parts_from_content(last_user_msg, types)
+        if not prompt_parts:
+            raise ValueError("Gemini received an empty conversation message.")
+        contents = history + [types.Content(role="user", parts=prompt_parts)]
 
         for attempt in range(RETRIES_PER_MODEL):
             try:
-                response = chat.send_message(last_user_msg)
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=generation_config,
+                )
                 task.gemini_model_index = model_index
                 return _parse_gemini_response(task, response)
-            except ResourceExhausted as e:
+            except errors.ClientError as e:
+                if getattr(e, "code", None) != 429:
+                    raise
                 last_error = e
                 wait_seconds = 15
                 for detail in getattr(e, "details", []) or []:
@@ -435,7 +648,7 @@ def call_gemini(task, system_prompt: str):
                     time.sleep(min(wait_seconds, config.GEMINI_RATE_LIMIT_WAIT_SECONDS))
                 else:
                     task.log_step(f"🔀 '{model_name}' is rate-limited - switching models without waiting.")
-            except StopCandidateException as e:
+            except errors.ServerError as e:
                 last_error = e
                 if attempt < RETRIES_PER_MODEL - 1:
                     task.log_step(f"⚠️ '{model_name}' produced a malformed function call - retrying once more.")
@@ -447,18 +660,44 @@ def call_gemini(task, system_prompt: str):
 
 
 def _parse_gemini_response(task, response):
-    parts = response.candidates[0].content.parts
-    function_calls, text_parts = [], []
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates or not getattr(candidates[0], "content", None):
+        task.messages.append({"role": "assistant", "content": "Gemini returned no usable response."})
+        return [], ["Gemini returned no usable response."], "end_turn"
+
+    parts = candidates[0].content.parts or []
+    function_calls, function_call_parts, text_parts = [], [], []
     for part in parts:
         fc = getattr(part, "function_call", None)
         if fc and fc.name:
             function_calls.append(fc)
+            function_call_parts.append(part)
         else:
             t = getattr(part, "text", None)
             if t:
                 text_parts.append(t)
 
     if function_calls:
+        # Keep the full response-part sequence, not just function calls.
+        # Gemini 3 validates the original position of every thought signature.
+        # In a parallel function-call response only the first call may carry a
+        # signature; flattening or reordering those Parts produces a 400 on
+        # the next model turn.
+        model_part_records = [_model_part_record(part) for part in parts]
+        task.messages.append({
+            "role": "assistant",
+            "content": {
+                _GEMINI_MODEL_PARTS_KEY: model_part_records,
+            },
+        })
+        # Function calls in one model response are parallel from Gemini's
+        # perspective. Buffer every result and submit one user Content with
+        # all FunctionResponse Parts after core has executed them all.
+        task.gemini_expected_function_responses = len(function_calls)
+        task.gemini_function_response_order = [
+            _function_call_runtime_key(function_call) for function_call in function_calls
+        ]
+        task.gemini_function_response_batch = []
         return function_calls, text_parts, "tool_use"
 
     combined_text = " ".join(text_parts)
@@ -467,11 +706,43 @@ def _parse_gemini_response(task, response):
 
 
 def submit_gemini_tool_result(task, tool_call, result):
-    try:
-        result_text = json.dumps(result, default=str)
-    except TypeError:
-        result_text = str(result)
-    task.messages.append({"role": "user", "content": f"Tool '{tool_call.name}' returned: {result_text}"})
+    # Function responses must follow the signed FunctionCall directly. Do not
+    # add a normal text part here: Gemini treats that as a new user request
+    # and rejects the preceding signed call as an invalid tool turn. For
+    # parallel calls, Gemini requires all responses in ONE Content; submitting
+    # each response separately makes the unsigned second call look like a new
+    # (and invalid) tool turn.
+    response_record = {
+        "name": tool_call.name,
+        "response": _json_safe_gemini_value(result),
+    }
+    call_id = getattr(tool_call, "id", None)
+    if isinstance(call_id, str) and call_id:
+        response_record["id"] = call_id
+
+    expected = getattr(task, "gemini_expected_function_responses", 0)
+    batch = getattr(task, "gemini_function_response_batch", None)
+    if expected and isinstance(batch, list):
+        batch.append((_function_call_runtime_key(tool_call), response_record))
+        if len(batch) < expected:
+            return
+        by_call = {key: response for key, response in batch}
+        order = getattr(task, "gemini_function_response_order", [])
+        responses = [by_call[key] for key in order if key in by_call]
+        task.gemini_expected_function_responses = 0
+        task.gemini_function_response_order = []
+        task.gemini_function_response_batch = []
+    else:
+        # Compatibility for direct unit tests and any task created before the
+        # parser initialised a response batch.
+        responses = [response_record]
+
+    task.messages.append({
+        "role": "user",
+        "content": {
+            _GEMINI_FUNCTION_RESPONSES_KEY: responses,
+        },
+    })
 
 
 def gemini_tool_input(tool_call) -> dict:

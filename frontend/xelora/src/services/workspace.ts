@@ -29,6 +29,45 @@ export interface FileItem {
   tags: string[];
   uploadedAt: string | null;
   lastModifiedAt: string | null;
+  currentVersionNumber: number;
+  mimeType: string;
+  checksum: string | null;
+  processingError: string | null;
+  sheetSummary: FileSheetSummary;
+}
+
+export interface FileSheet {
+  name: string;
+  rowCount: number;
+  columnCount: number;
+  headers: string[];
+  sampleRows: string[][];
+  truncated: boolean;
+}
+
+export interface FileSheetSummary {
+  sheets: FileSheet[];
+  truncated?: boolean;
+  parser?: string | null;
+}
+
+export interface FileVersionItem {
+  id: string;
+  versionNumber: number;
+  name: string;
+  type: string;
+  sizeMB: number;
+  status: string;
+  rowCount: number | null;
+  columnCount: number | null;
+  processingError: string | null;
+  sheetSummary: FileSheetSummary;
+  createdAt: string | null;
+  createdByUserId: string;
+}
+
+export interface FileDetail extends FileItem {
+  versions: FileVersionItem[];
 }
 
 export async function getFiles(): Promise<FileItem[]> {
@@ -44,13 +83,39 @@ export async function uploadFile(file: File): Promise<FileItem> {
   return parseOrThrow<FileItem>(res);
 }
 
+export async function getFile(id: string): Promise<FileDetail> {
+  const res = await fetch(`/api/files/${id}`, { cache: 'no-store' });
+  return parseOrThrow<FileDetail>(res);
+}
+
+export async function uploadFileVersion(id: string, file: File): Promise<FileItem> {
+  const form = new FormData();
+  form.append('upload', file);
+  const res = await fetch(`/api/files/${id}/versions`, { method: 'POST', body: form });
+  return parseOrThrow<FileItem>(res);
+}
+
+export async function reprocessFile(id: string): Promise<FileItem> {
+  const res = await fetch(`/api/files/${id}/reprocess`, { method: 'POST' });
+  return parseOrThrow<FileItem>(res);
+}
+
 export async function deleteFile(id: string): Promise<void> {
   const res = await fetch(`/api/files/${id}`, { method: 'DELETE' });
   await parseOrThrow(res);
 }
 
+export async function deleteFileVersion(fileId: string, versionId: string): Promise<void> {
+  const res = await fetch(`/api/files/${fileId}/versions/${versionId}`, { method: 'DELETE' });
+  await parseOrThrow(res);
+}
+
 export function fileDownloadUrl(id: string): string {
   return `/api/files/${id}/download`;
+}
+
+export function fileVersionDownloadUrl(fileId: string, versionId: string): string {
+  return `/api/files/${fileId}/versions/${versionId}/download`;
 }
 
 

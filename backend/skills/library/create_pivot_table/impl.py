@@ -6,6 +6,14 @@ Auto-migrated from skills/excel_analysis.py.
 from skills.excel_shared import get_active_workbook, normalize, hex_to_rgb  # noqa: F401
 
 
+def _pivot_name(row_field: str, value_field: str) -> str:
+    """Return a stable, unique Excel-safe name for each generated pivot."""
+    def clean(value: str) -> str:
+        return "".join(ch if ch.isalnum() else "_" for ch in value).strip("_") or "Field"
+
+    return f"Pivot_{clean(row_field)}_{clean(value_field)}"
+
+
 def _resolve_source_range(wb, sheet, source_range: str):
     """The bug that broke the whole downstream Dashboard: passing an Excel
     Table's NAME (e.g. 'SalesTable') straight into sheet.range() is
@@ -62,7 +70,7 @@ def run(sheet_name: str, source_range: str, row_field: str, value_field: str,
         pivot_cache = wb.api.PivotCaches().Create(SourceType=1, SourceData=source_api_range)
         pivot_table = pivot_cache.CreatePivotTable(
             TableDestination=dest_sheet.range(dest_cell).api,
-            TableName="Pivot_" + value_field.replace(" ", "_"),
+            TableName=_pivot_name(row_field, value_field),
         )
 
         agg_map = {"sum": -4157, "average": -4106, "count": -4112, "max": -4136, "min": -4139}

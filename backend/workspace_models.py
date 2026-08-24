@@ -9,7 +9,7 @@ database.init_db() creates these tables too.
 All tables key off AuthUser.id (auth_billing_models.py), same 1:1
 extension pattern used there.
 """
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, ForeignKey, JSON, Text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, ForeignKey, JSON, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 
@@ -35,8 +35,56 @@ class FileAsset(Base):
     column_count = Column(Integer, nullable=True)
     tags = Column(JSON, default=list)
 
+    # These fields describe the current version.  They deliberately live on
+    # FileAsset as well so the existing list API remains fast and compatible.
+    original_filename = Column(String, nullable=True)
+    mime_type = Column(String, nullable=True)
+    checksum = Column(String, nullable=True)
+    processing_error = Column(Text, nullable=True)
+    sheet_summary = Column(JSON, default=dict)
+    current_version_number = Column(Integer, default=1, nullable=False)
+
     uploaded_at = Column(DateTime, default=_now)
     last_modified_at = Column(DateTime, default=_now, onupdate=_now)
+
+    versions = relationship(
+        "FileVersion",
+        back_populates="file",
+        cascade="all, delete-orphan",
+        order_by="FileVersion.version_number.desc()",
+    )
+
+
+class FileVersion(Base):
+    """An immutable stored revision of a logical FileAsset.
+
+    FileAsset is the stable id used by workflows and the files list.  A new
+    upload to that file creates one of these records and updates FileAsset's
+    denormalised current-version fields.
+    """
+    __tablename__ = "file_versions"
+    __table_args__ = (
+        UniqueConstraint("file_id", "version_number", name="uq_file_version_number"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    file_id = Column(Integer, ForeignKey("file_assets.id", ondelete="CASCADE"), nullable=False, index=True)
+    version_number = Column(Integer, nullable=False)
+    original_filename = Column(String, nullable=False)
+    file_type = Column(String, nullable=False)
+    size_mb = Column(Float, default=0.0)
+    storage_path = Column(String, nullable=False)
+    mime_type = Column(String, nullable=True)
+    checksum = Column(String, nullable=True)
+    status = Column(String, default="processing")
+    processing_error = Column(Text, nullable=True)
+    row_count = Column(Integer, nullable=True)
+    column_count = Column(Integer, nullable=True)
+    sheet_summary = Column(JSON, default=dict)
+    created_by_user_id = Column(Integer, ForeignKey("auth_users.id"), nullable=False)
+    created_at = Column(DateTime, default=_now)
+
+    file = relationship("FileAsset", back_populates="versions")
 
 
 class Workflow(Base):

@@ -13,8 +13,9 @@ the rule wins. Do not silently deviate from a rule because a situation seems lik
 if you genuinely believe a rule doesn't fit, say so plainly to the user rather than quietly ignoring it.
 
 You have THREE ways to take an action, and you must try them in this order:
-1. SKILL LIBRARY - Pre-built, verified tools. If a skill exists, ALWAYS prefer it.
-2. CODE GENERATION - Only if no skill covers the need, call run_excel_code with Python (xlwings).
+1. SKILL LIBRARY - Pre-built, verified tools. If a skill covers the goal, ALWAYS use it first.
+2. CODE GENERATION - Call run_excel_code when no available skill covers the goal, or when an
+   attempted skill returns verified: false and the tool result explicitly requires codegen fallback.
 3. VISUAL/UI FALLBACK - Only if neither of the above can do it.
 
 HYBRID VISIBLE WORKFLOW:
@@ -38,7 +39,30 @@ HYBRID VISIBLE WORKFLOW:
   same value again through the UI after a successful skill action.
 - For a simple one-cell value the visual tools may use Name Box navigation followed by typing.
   For a table or repeated data, use write_table or one atomic visual paste instead of typing
-  cell-by-cell. For formulas, use insert_formula rather than visible manual typing.
+  cell-by-cell. For formulas, use insert_formula rather than visible manual typing. For a
+  calculated column, call insert_formula once at its first data cell and pass fill_to for the
+  final row; do not generate Python that assigns .formula/.formula2 or put formulas into
+  write_table rows.
+- Generated code is for workbook work that no skill can perform. Its allowed imports are
+  xlwings, openpyxl, datetime, math, random, re, json, and statistics; it must set result to
+  a dictionary containing verified: true and a non-empty verification_note only after reading
+  the changed workbook state back. Do not try an unapproved import and then retry it unchanged.
+- When generating demo transactions, write OrderDate values as native Python datetime objects,
+  never formatted date strings. Use write_table with every data row or call it after data is
+  already present so it can include the existing rows in the Table.
+- For a generated dataset with more than 100 rows or 1,000 cells, do not try to
+  emit every record inside a giant write_table tool call. Use run_excel_code to
+  generate the requested number of deterministic, realistic values directly in
+  the target sheet (including native Python datetime values), verify the row
+  count by reading it back, then call write_table with rows=[] and table_name to
+  convert that existing range into a native Excel Table. Formula columns must
+  still use insert_formula after the Table exists.
+- Follow THIS USER'S EXCEL ENVIRONMENT exactly. When the capability decision says modern
+  functions are available, you may use XLOOKUP, UNIQUE, SORT, FILTER, SEQUENCE, and LET where
+  they materially improve the workbook. When it says legacy/conservative, do not use any of
+  those functions: use static lists, VLOOKUP or INDEX/MATCH, and SUMIFS/COUNTIFS instead. Even
+  in a modern environment, keep dynamic-array formulas self-contained and never pass a spilled
+  range (for example A2#) into an aggregation or lookup formula.
 
 When the user says "use your own data", "use the existing data", or gives
 an equivalent short confirmation, they mean the data in the active Excel
@@ -104,10 +128,50 @@ and do not replace the original workbook request with a short acknowledgement su
 6. STRUCTURED-REFERENCE BRACKET SYNTAX: For a table column whose name contains a space, wrap it in its OWN brackets: [@[Column Name]] - NOT quotes, NOT [@'Column Name'].
 7. MULTI-COLUMN CHART/RANGE SYNTAX: Join non-adjacent Table columns with a comma: TableName[[ColA]],TableName[[ColB]].
 8. QUOTED LITERAL TEXT IN NUMBER FORMATS: Wrap literal text in custom number formats in double quotes: "KES" #,##0.00.
-9. SKILL-FAILURE FALLBACK - MANDATORY, NOT OPTIONAL: If a skill's result comes back with status "failed" or "retried" (verified: false), you MUST attempt the exact same goal via run_excel_code before moving on to anything else or reporting that step as unresolved. Only report a step as genuinely failed if the run_excel_code attempt ALSO fails. This is not a suggestion - a reported skill failure without a corresponding run_excel_code attempt in your next 1-2 tool calls is a rule violation.
+9. SKILL-FAILURE FALLBACK: Core automatically schedules one code-generation attempt after an
+   eligible skill operational failure. When a tool result contains `codegen_fallback.required:
+   true`, your very next action must be run_excel_code for that same goal. Reuse the failed
+   tool call's arguments from history, use a smaller/targeted operation where appropriate, and
+   verify by reading the live workbook back. Do not send the identical failed skill again first.
+   Invalid inputs, unsupported Excel features, protected VBA actions, and formula writes are
+   deliberately not sent to codegen; correct the input or use the safe formula skill instead.
 10. TRANSIENT ERROR RETRY vs. HANG RETRY:
     - A transient 'OLE error 0x800ac472' or 'Excel is Busy' message: retry the exact same call immediately.
     - A TIMEOUT (Excel auto-restarted): do NOT retry the identical formula unchanged - simplify it first.
+
+==============================================================================
+3A. DASHBOARD LAYOUT & PRESENTATION QUALITY
+==============================================================================
+1. When building a dashboard, report, or any sheet with two or more floating
+   objects (charts, pictures, shapes, slicers, or form controls), deliberately
+   reserve a layout area. Do not leave charts at Excel's default insertion
+   position or guess that independently positioned objects do not collide.
+2. After the LAST floating object is created or changed on EACH affected sheet,
+   call arrange_dashboard_layout with mode='reflow'. It inspects every visible
+   item in Excel's Shapes collection, spaces them into a grid, saves the
+   workbook, and reads their bounds back. Use mode='audit' only when the user
+   explicitly requires that existing positions must not change.
+3. Treat arrange_dashboard_layout verified: false, move_errors, or a non-empty
+   overlaps_after result as an unresolved deliverable. Fix the layout and rerun
+   it. Never say a dashboard is complete while any floating objects overlap.
+4. If any chart, picture, shape, slicer, or control is added after the layout
+   check, the earlier check is stale: run arrange_dashboard_layout again before
+   final inspection. This is required in addition to inspect_workbook.
+
+==============================================================================
+3B. VBA TRUST DETECTION
+==============================================================================
+1. When a user asks for a VBA macro, VBA module, macro button, or .xlsm
+   workbook, call check_vba_access BEFORE create_vba_macro or add_macro_button.
+   Never assume that VBA project access is enabled.
+2. If check_vba_access returns trusted: false, do not attempt to bypass or
+   change Excel security settings. Complete any safe non-VBA work, then tell
+   the user exactly: File > Options > Trust Center > Trust Center Settings >
+   Macro Settings > enable 'Trust access to the VBA project object model'.
+   State that they must enable it themselves and retry the VBA portion.
+3. Only after trusted: true may you create, list, delete, or wire VBA modules.
+   Save a workbook that contains macros as .xlsm, and verify that the .xlsm
+   file exists before reporting the VBA portion as complete.
 
 ==============================================================================
 4. AUTOMATED REVIEW & VERIFICATION LOOP
@@ -130,18 +194,48 @@ Your final text response must cleanly separate what succeeded completely, any fa
 
 
 def _format_excel_version_block(excel_version_info: dict | None) -> str:
+    legacy_allowed = "VLOOKUP, INDEX/MATCH, SUMIFS, COUNTIFS, IFERROR, TEXT, and conventional date formulas"
+    modern_features = "XLOOKUP, UNIQUE, SORT, FILTER, SEQUENCE, and LET"
+    blocked_in_legacy = "XLOOKUP, LET, UNIQUE, SORT, FILTER, SEQUENCE, RANDARRAY, HSTACK, and VSTACK"
+
+    def format_features(value) -> str:
+        if isinstance(value, (list, tuple)):
+            return ", ".join(str(feature) for feature in value)
+        return str(value)
+
     if not excel_version_info or not excel_version_info.get("verified"):
         return (
-            "Version could not be detected. Treat this environment as LEGACY/CONSERVATIVE: "
-            "assume dynamic-array functions (UNIQUE, SORT, FILTER, XLOOKUP, LET) are NOT "
-            "available, and use traditional formulas (VLOOKUP, INDEX/MATCH, SUMIFS) by default."
+            "CAPABILITY DECISION: LEGACY/CONSERVATIVE because Excel features could not be "
+            f"verified. Approved: {legacy_allowed}. Do not use: {blocked_in_legacy}."
         )
+
     label = excel_version_info.get("label", "unknown")
+    raw_version = excel_version_info.get("raw_version")
+    build = excel_version_info.get("build")
+    identity_parts = [label]
+    if raw_version:
+        identity_parts.append(f"version {raw_version}")
+    if build:
+        identity_parts.append(f"build {build}")
+    identity = " (" + ", ".join(identity_parts[1:]) + ")" if len(identity_parts) > 1 else ""
+
     supports = excel_version_info.get("supports_dynamic_arrays", False)
+    if supports:
+        approved = format_features(excel_version_info.get("approved_functions") or (
+            f"{legacy_allowed}, plus {modern_features}"
+        ))
+        return (
+            f"Detected: {label}{identity}. CAPABILITY DECISION: MODERN dynamic-array support "
+            "was confirmed by a live formula probe. "
+            f"Approved: {approved}. Dynamic formulas are allowed when useful, but do not use "
+            "a spilled-range reference inside an aggregation or lookup."
+        )
+
+    blocked = format_features(excel_version_info.get("blocked_functions") or blocked_in_legacy)
+    approved = format_features(excel_version_info.get("approved_functions") or legacy_allowed)
     return (
-        f"Detected: {label}. "
-        f"Dynamic-array functions (UNIQUE, SORT, FILTER, XLOOKUP, LET): "
-        f"{'AVAILABLE - safe to use' if supports else 'NOT AVAILABLE - do not use these, use legacy formulas instead'}."
+        f"Detected: {label}{identity}. CAPABILITY DECISION: LEGACY. Dynamic-array support was "
+        f"not confirmed. Approved: {approved}. Do not use: {blocked}."
     )
 
 
@@ -205,6 +299,13 @@ Keep responses concise and describe only actions actually completed by tools."""
         if user_preferences:
             prefs_text = "\n".join(f"- {k}: {v}" for k, v in user_preferences.items())
             prompt += f"\n\nUSER PREFERENCES:\n{prefs_text}\n"
+        if not config.OMNIPARSER_URL:
+            prompt += (
+                "\n\nVISUAL RECOGNITION IS DISABLED: OmniParser is unavailable, so "
+                "parse_screen is not a tool in this session. Use only reliable keyboard shortcuts, "
+                "Go To navigation, and direct text entry. If an action needs locating an on-screen "
+                "element, report that limitation rather than guessing coordinates.\n"
+            )
         return prompt
 
     excel_version_block = _format_excel_version_block(excel_version_info)

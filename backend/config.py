@@ -30,17 +30,12 @@ def _local_agent_setting(name: str, default: str) -> str:
 AI_PROVIDER = _local_agent_setting("AI_PROVIDER", "gemini").strip().lower()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemma-4-26b-a4b-it:free")
-OPENROUTER_TIMEOUT_SECONDS = int(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "120"))
-# Some OpenRouter providers reject requests containing more than 64 tools.
-# Keep a small safety margin while still selecting all tools relevant to a task.
-OPENROUTER_MAX_TOOLS = min(max(int(os.getenv("OPENROUTER_MAX_TOOLS", "60")), 1), 64)
 LOCAL_API_KEY = os.getenv("LOCAL_API_KEY", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
-MAX_STEPS_PER_TASK = int(os.getenv("MAX_STEPS_PER_TASK", 60))
-MAX_RETRIES_PER_ACTION = int(os.getenv("MAX_RETRIES_PER_ACTION", 2))
+MAX_STEPS_PER_TASK = int(_local_agent_setting("MAX_STEPS_PER_TASK", "60"))
+MAX_RETRIES_PER_ACTION = int(_local_agent_setting("MAX_RETRIES_PER_ACTION", "2"))
+SKILL_TIMEOUT_SECONDS = int(_local_agent_setting("SKILL_TIMEOUT_SECONDS", "60"))
 MAX_VISUAL_ACTIONS_PER_TASK = int(os.getenv("MAX_VISUAL_ACTIONS_PER_TASK", 40))
 
 ENABLE_CODEGEN_LAYER = _local_agent_setting("ENABLE_CODEGEN_LAYER", "true").lower() == "true"
@@ -58,15 +53,34 @@ ENABLE_VISIBLE_RANGE_NAVIGATION = _local_agent_setting("ENABLE_VISIBLE_RANGE_NAV
 # FastAPI backend on that port and accidentally send parser requests back to
 # Xelora itself.
 OMNIPARSER_URL = _local_agent_setting("OMNIPARSER_URL", "").strip()
-OMNIPARSER_TIMEOUT_SECONDS = int(os.getenv("OMNIPARSER_TIMEOUT_SECONDS", "120"))
+OMNIPARSER_TIMEOUT_SECONDS = int(_local_agent_setting("OMNIPARSER_TIMEOUT_SECONDS", "120"))
+
+# A deliberate visual execution profile for installations that want to avoid
+# the Excel object model, the skill library, and generated Python entirely.
+# OmniParser identifies UI targets; the selected AI provider still plans the
+# requested natural-language task and chooses safe keyboard/mouse actions.
+OMNIPARSER_ONLY_MODE = _local_agent_setting("OMNIPARSER_ONLY_MODE", "false").lower() == "true"
+ALLOW_VISUAL_STRUCTURED_EDITS = _local_agent_setting("ALLOW_VISUAL_STRUCTURED_EDITS", "false").lower() == "true"
+if OMNIPARSER_ONLY_MODE:
+    VISUAL_ONLY_MODE = True
+    ENABLE_CODEGEN_LAYER = False
+    ENABLE_VISUAL_FALLBACK = True
+    HYBRID_VISIBLE_MODE = False
+    ENABLE_VISUAL_CHECKPOINTS = False
+    ENABLE_VISIBLE_RANGE_NAVIGATION = False
+    # This profile is an explicit opt-in to the less reliable visual path.
+    # It permits bounded visual table/formula/chart helpers rather than
+    # rejecting every structured workbook request before OmniParser can help.
+    ALLOW_VISUAL_STRUCTURED_EDITS = True
 
 GEMINI_MODEL_CHAIN = [
     m.strip() for m in os.getenv(
         "GEMINI_MODEL_CHAIN",
-        "gemini-2.5-flash-lite,gemini-3.5-flash,gemini-3.5-flash,gemini-3.1-flash-lite"
+        "gemini-2.5-flash-lite,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite"
     ).split(",") if m.strip()
 ]
 GEMINI_RATE_LIMIT_WAIT_SECONDS = int(os.getenv("GEMINI_RATE_LIMIT_WAIT_SECONDS", "0"))
+GEMINI_TIMEOUT_SECONDS = int(os.getenv("GEMINI_TIMEOUT_SECONDS", "60"))
 ALLOW_NO_AUTH = os.getenv("ALLOW_NO_AUTH", "false").lower() == "true"
 
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]

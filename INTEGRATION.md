@@ -162,8 +162,11 @@ backed by real endpoints, all additive to the backend exactly like the
 auth/billing layer:
 
 - **Files** (`files.py`) - real upload to local disk (`STORAGE_DIR`),
-  list, download, delete. Swap for S3/GCS later without touching the
-  frontend - it only ever talks to `/files`, never a disk path.
+  bounded CSV/TSV/XLSX metadata extraction, safe sample previews, and
+  immutable version history. Files can be reprocessed, a specific version
+  can be downloaded, and the final remaining version cannot be removed.
+  Swap for S3/GCS later without touching the frontend - it only ever talks
+  to `/files`, never a disk path.
 - **Team** (`team.py`) - single-owner-team model. Invite by email,
   role, remove. Seat count is enforced against the plan's
   `team_members` limit from `plan_catalog.py`. If an invitee later
@@ -220,15 +223,6 @@ Being direct about what's still intentionally out of scope:
 
 - **`admin/system`, `admin/releases`, `admin/usage`** - see above;
   still mock, deliberately (infra/marketing content, not user data).
-- **File processing** - uploads are stored as-is; there's no
-  background job that reads row/column counts, validates structure,
-  or flips status from `ready` to `completed`/`needs_review`. The
-  `FileAsset` model has the columns for it (`row_count`,
-  `column_count`, `status`), a processing step just isn't wired up.
-- **`/dashboard/files/[id]`** (the per-file detail/version-history
-  page) still reads `mock-files.ts`/`mock-history.ts` - the list page
-  is fully real, but per-file version history isn't modeled on the
-  backend yet.
 - **Onboarding answers** (primary use, experience level, objectives)
   are kept in local UI state only; `AuthUser` doesn't have columns for
   them yet. Easy follow-up: add the columns to
@@ -246,12 +240,14 @@ Being direct about what's still intentionally out of scope:
 - [ ] `/dashboard/agent` starts a task and shows live progress
 - [ ] Running tasks past your plan's limit returns the 402 upgrade prompt
 - [ ] `/dashboard/files` uploads and lists a real file
+- [ ] Open a file from `/dashboard/files`, wait for its metadata/preview,
+  upload a second version, and download either version
 - [ ] `/dashboard/team` sends a real invite
 - [ ] `/dashboard/workflows/new` saves, and running it starts a real task
 - [ ] `/dashboard/templates` "use template" creates a workflow
 - [ ] After promoting yourself to admin, `/admin/users` loads and a plan override sticks
 
-## File uploads - hardened this round
+## File uploads and versioning
 
 If you hit an upload error before this update, two real issues were
 fixed:
@@ -266,6 +262,24 @@ fixed:
 2. Disk-write and database-save failures during upload now return a
    clear error message instead of crashing with a raw Python
    traceback.
+
+Files are streamed to a private per-user folder, checked against their
+declared spreadsheet structure, and recorded with a SHA-256 checksum. The
+response initially reports `processing`; a FastAPI background task then
+extracts metadata for CSV, TSV, and XLSX files and changes it to
+`completed`, `needs_review`, or `failed`. XLS and ODS are safely stored and
+versioned but intentionally report `needs_review` because this package does
+not bundle a parser for them.
+
+Set these optional limits in `backend/.env` to tune local deployments:
+
+| Variable | Default | Purpose |
+| --- | ---: | --- |
+| `MAX_UPLOAD_MB` | 100 | Maximum compressed upload size. |
+| `MAX_ARCHIVE_UNCOMPRESSED_MB` | 300 | Rejects highly-compressed XLSX/ODS archives that expand beyond this size. |
+| `MAX_FILE_PARSE_ROWS` | 100000 | Maximum rows inspected per sheet/file. |
+| `MAX_FILE_PARSE_COLUMNS` | 500 | Maximum columns retained for metadata and preview. |
+| `MAX_FILE_PREVIEW_ROWS` | 20 | Number of non-header rows included in the authenticated preview. |
 
 If uploads still fail for you, the exact error message (from the
 browser toast, or the backend terminal) is needed to diagnose further

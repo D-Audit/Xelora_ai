@@ -39,6 +39,11 @@
     "sha256_impl": "470646f680911dfa60a56a114bcb6f7680eda37b1a85b797983f0d78f0646998",
     "sha256_skill_md": "eb155b5a99681ff06231110be948bd5b657883d334e1d81894883046007e1eee"
   },
+  "arrange_dashboard_layout": {
+    "category": "dashboard",
+    "sha256_impl": "29d7b7eeaebda5bb8675f1affe8c7c78a1e3a7f8a62e5141e59f1b4a9a7bc6fe",
+    "sha256_skill_md": "2595bba81c4397a7f00f444ff256439de96886dd2c24f11172a3b3b4996636b8"
+  },
   "auto_fit_columns": {
     "category": "format",
     "sha256_impl": "e34a815de3922ced2f658648cc9417d4373ad373d65903514c2d1e996ef76417",
@@ -86,12 +91,12 @@
   },
   "create_new_workbook": {
     "category": "structure",
-    "sha256_impl": "273f7d0b8230a02514d90da9403df25790889d14b392ad7f92c0a8de9b3623c4",
+    "sha256_impl": "b8bc33e4215a9b2527a7938b1a17cdff1fff9759b64c3de2e512403fc266c748",
     "sha256_skill_md": "6e24dd171367f8de475881e9073944f81f36d28a5d0462176f592b2b0596176b"
   },
   "create_pivot_table": {
     "category": "analysis",
-    "sha256_impl": "0a50e9ff1117127f4654a872bd16634c4188186cd75f74dfed7d627c2d29aa08",
+    "sha256_impl": "dc48a6787ef616aac82c2667656b689d4d0165c679977a6cb4a9bdf10a32925c",
     "sha256_skill_md": "8efdb0883528966e5212037544deb2000bfc347a828e37b84fa2b930645c681d"
   },
   "create_power_query_connection": {
@@ -101,7 +106,7 @@
   },
   "create_sheet": {
     "category": "structure",
-    "sha256_impl": "0fe90d76be44ed9958fe418680132dfe7efb285eadc81e4bba10a86f20e6079a",
+    "sha256_impl": "d1dd97ac6d5990e2a7e25855226a67e15506cd724c809c635d610bb911311eca",
     "sha256_skill_md": "8b135de50207f464dedc0b0fc92a5d73ed43dad4c5f83181a67b7f5593856a5a"
   },
   "create_vba_macro": {
@@ -176,7 +181,7 @@
   },
   "get_excel_version": {
     "category": "read",
-    "sha256_impl": "7cd001ee2cb9ae4ea4f3eab5d20de080bff864fdf8bc7612195a892f23218c84",
+    "sha256_impl": "c10a7846bdf8013f74b680ffabeab76466dc74f068c7f6eff0254fa614c18afb",
     "sha256_skill_md": "dd4b43ac58b30dd624f041cb7ac1020da8a4cce4f524e0398f99902c73becb8a"
   },
   "group_rows_columns": {
@@ -206,8 +211,8 @@
   },
   "insert_formula": {
     "category": "write",
-    "sha256_impl": "75e0d9de8d5f3fcb38256b92e548d3e139e5e4d1e12a37501f40a74b31b65b63",
-    "sha256_skill_md": "b96ae8ac04423b1fb3acc68c2a9c22d6ad80271bf0ae1c6c8575127a6370edcf"
+    "sha256_impl": "cc38ca37fd909c7902b576a30a7688d885e81722ea15e506632b3b6f3d1f1137",
+    "sha256_skill_md": "7180f5599ff2fdab979bc8b4d207bb0bf2ae5871af6779e8a2a0d7c2d3644420"
   },
   "insert_picture": {
     "category": "dashboard",
@@ -246,7 +251,7 @@
   },
   "open_workbook": {
     "category": "structure",
-    "sha256_impl": "7f1e5a82b1d1935e40e83d5e06ded3e2760a08c0c664ba162e3c30b6d901888d",
+    "sha256_impl": "68fd5afd4ce40b87c2f2ff3b9c34e10f5cb01e986716ec4934d9dab65a5e0961",
     "sha256_skill_md": "6774cb6bd90f1029a6f067c70d9bce4dbaab3baf2edea7cbb6ecf365d3bad8f8"
   },
   "position_chart": {
@@ -291,7 +296,7 @@
   },
   "save_as_macro_enabled": {
     "category": "vba",
-    "sha256_impl": "16d18dc791063a96ee2ae8728bf1145df36dda07e3047fde1d6eb3e56ac62114",
+    "sha256_impl": "579bfa200161840baf4c1c3c92201e7a8068eaf3501363280eda6db7fab9481b",
     "sha256_skill_md": "1ace20636fd22cd506955da7b74146a060a261ba26c9ed0bff26b7e0aec11b43"
   },
   "search_knowledge_base": {
@@ -341,7 +346,7 @@
   },
   "write_table": {
     "category": "write",
-    "sha256_impl": "9c241bb12c90fbeb8467c83031009f5d36eb37e67e708f8575ba2036ded6398b",
+    "sha256_impl": "5d54af4b2fe1c230d7a475301c350c4094e972f1ce4126944ccefcd9a89131f9",
     "sha256_skill_md": "0347c415be40b065371b158c5eff77030abc9ef67ae11fe4da654730d714d963"
   }
 }
