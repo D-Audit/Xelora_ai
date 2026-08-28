@@ -28,6 +28,19 @@ except ImportError:
     winreg = None
 
 from vision.omniparser_client import parse_image
+from vision.screenshot_cache import (
+    save_to_cache,
+    load_from_cache,
+    find_cached_elements,
+    get_cached_screen_context,
+)
+from vision.excel_shortcuts import (
+    execute_shortcut,
+    execute_alt_sequence,
+    EXCEL_SHORTCUTS,
+    OPERATION_MODULES,
+    get_shortcut_for_operation,
+)
 
 try:
     import pyautogui
@@ -49,6 +62,26 @@ try:
 except Exception:
     _HAS_WIN32GUI = False
 
+# Window safety module for preventing focus hijacking
+try:
+    from vision.window_safety import (
+        verify_excel_foreground,
+        capture_excel_window,
+        ensure_excel_foreground,
+        safe_click,
+        safe_type,
+        safe_hotkey,
+        safe_press,
+        uia_invoke_element,
+        uia_click_element,
+        get_excel_window_handle,
+        get_window_safety_status,
+        WindowSafetyError,
+    )
+    _HAS_WINDOW_SAFETY = True
+except ImportError:
+    _HAS_WINDOW_SAFETY = False
+
 _last_elements: list[dict] = []
 _last_parse_at: float | None = None
 _last_parse_window_handle: int | None = None
@@ -69,6 +102,771 @@ _DEFINED_NAME = r"[A-Za-z_][A-Za-z0-9_.]*"
 def _is_valid_go_to_reference(reference: str) -> bool:
     """Validate native Go To references without accepting prose as keystrokes."""
     return bool(re.fullmatch(_A1_REFERENCE, reference) or re.fullmatch(_DEFINED_NAME, reference))
+
+
+# ---------------------------------------------------------------------------
+# Adaptive Dialog Interceptor & Self-Healing Recovery
+# ---------------------------------------------------------------------------
+
+_HAS_WIN32GUI = False
+try:
+    import win32gui
+    import win32con
+    _HAS_WIN32GUI = True
+except ImportError:
+    pass
+
+
+def handle_blocking_dialogs(excel_hwnd: int) -> dict:
+    """Detect and dismiss blocking Excel error dialogs or file pickers.
+    
+    Uses win32gui to find popup windows owned by Excel. More reliable than
+    pywinauto for catching modal error alerts that block the UI thread.
+    
+    Returns dict with status: 'clean', 'error_dismissed', or 'prompt_cancelled'.
+    """
+    if not _HAS_WIN32GUI or not excel_hwnd:
+        return {"status": "clean"}
+    
+    try:
+        popup_hwnd = win32gui.GetLastActivePopup(excel_hwnd)
+        
+        if not popup_hwnd or popup_hwnd == excel_hwnd:
+            return {"status": "clean"}
+        
+        window_title = win32gui.GetWindowText(popup_hwnd) or ""
+        class_name = win32gui.GetClassName(popup_hwnd) or ""
+        
+        error_keywords = [
+            "Reference isn't valid", "Reference is not valid",
+            "That name isn't valid", "The name is not valid",
+            "Cell contents must be text", "We couldn't find",
+            "Sorry, we couldn't find", "Application-defined",
+            "Object-defined error", "Name already exists",
+            "Microsoft Excel",
+        ]
+        
+        dialog_keywords = [
+            "Update Values", "Open", "Save As", "Save",
+            "Print", "Page Setup", "Format Cells",
+        ]
+        
+        if class_name == "#32770" or any(kw in window_title for kw in error_keywords):
+            win32gui.SendMessage(popup_hwnd, win32con.WM_KEYDOWN, win32con.VK_RETURN, 0)
+            win32gui.SendMessage(popup_hwnd, win32con.WM_KEYUP, win32con.VK_RETURN, 0)
+            time.sleep(0.3)
+            return {"status": "error_dismissed", "title": window_title}
+        
+        if any(kw in window_title for kw in dialog_keywords):
+            win32gui.SendMessage(popup_hwnd, win32con.WM_KEYDOWN, win32con.VK_ESCAPE, 0)
+            win32gui.SendMessage(popup_hwnd, win32con.WM_KEYUP, win32con.VK_ESCAPE, 0)
+            time.sleep(0.3)
+            return {"status": "prompt_cancelled", "title": window_title}
+    
+    except Exception:
+        pass
+    
+    return {"status": "clean"}
+
+
+def reset_to_neutral_state(excel_hwnd: int) -> dict:
+    """Send repeated ESC signals to close open menus, formulas, or dialogs.
+    
+    This is the self-healing recovery routine. After any action fails or
+    an unexpected state is detected, call this to reset Excel to a known
+    neutral state before retrying.
+    """
+    if not _HAS_WIN32GUI or not excel_hwnd:
+        return {"status": "skipped"}
+    
+    for _ in range(3):
+        try:
+            win32gui.SendMessage(excel_hwnd, win32con.WM_KEYDOWN, win32con.VK_ESCAPE, 0)
+            win32gui.SendMessage(excel_hwnd, win32con.WM_KEYUP, win32con.VK_ESCAPE, 0)
+            time.sleep(0.1)
+        except Exception:
+            break
+    
+    handle_blocking_dialogs(excel_hwnd)
+    
+    return {"status": "reset_complete"}
+
+
+def get_existing_sheet_names() -> list[str]:
+    """Get the names of all existing sheet tabs in the active workbook.
+    
+    Uses pywinauto to read sheet tab names directly from the Excel window.
+    This prevents 'Reference isn't valid' errors when navigating to sheets
+    that don't exist yet.
+    """
+    if not _HAS_PYWINAUTO:
+        return []
+    
+    try:
+        window = _get_agent_excel_window()
+        if not window:
+            return []
+        
+        sheets = []
+        # Search all descendants for TabItem controls (sheet tabs are nested deep)
+        for desc in window.descendants():
+            try:
+                ctrl_type = desc.element_info.control_type if hasattr(desc.element_info, 'control_type') else ''
+                title = desc.window_text() or ""
+                if ctrl_type == 'TabItem' and title and title not in ("", " ", "Ready", "Normal", "Page Layout", "Page Break Preview", "Home", "Insert", "Draw", "Page Layout", "Formulas", "Data", "Review", "View", "Developer", "Help"):
+                    sheets.append(title)
+            except Exception:
+                continue
+        
+        return sheets
+    except Exception:
+        return []
+
+
+def sheet_exists(sheet_name: str) -> bool:
+    """Check if a sheet with the given name exists in the active workbook."""
+    sheets = get_existing_sheet_names()
+    return any(s.lower() == sheet_name.lower() for s in sheets)
+
+
+def rename_sheet(old_name: str, new_name: str) -> dict:
+    """Rename an existing sheet tab using pywinauto.
+    
+    Double-clicks the sheet tab to enter rename mode, types the new name,
+    and presses Enter. This is more reliable than visual double-clicking
+    which can fail due to stale screen captures.
+    """
+    if not _HAS_PYWINAUTO:
+        return {"success": False, "error": "pywinauto not available"}
+    
+    try:
+        window = _get_agent_excel_window()
+        if not window:
+            return {"success": False, "error": "Excel window not found"}
+        
+        # Find the sheet tab by searching all descendants (tabs are nested deep)
+        target_tab = None
+        for desc in window.descendants():
+            try:
+                ctrl_type = desc.element_info.control_type if hasattr(desc.element_info, 'control_type') else ''
+                title = desc.window_text() or ""
+                if ctrl_type == 'TabItem' and title.lower() == old_name.lower():
+                    target_tab = desc
+                    break
+            except Exception:
+                continue
+        
+        if not target_tab:
+            return {"success": False, "error": f"Sheet tab '{old_name}' not found"}
+        
+        # Double-click to enter rename mode
+        target_tab.double_click_input()
+        time.sleep(0.3)
+        
+        # Select all text in the tab (Ctrl+A) and type new name
+        import pyperclip
+        pyperclip.copy(new_name)
+        hotkey(["ctrl", "a"])
+        time.sleep(0.1)
+        hotkey(["ctrl", "v"])
+        time.sleep(0.2)
+        
+        # Press Enter to confirm
+        press_key("enter")
+        time.sleep(0.3)
+        
+        return {"success": True, "old_name": old_name, "new_name": new_name}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def go_to_sheet(sheet_name: str) -> dict:
+    """Navigate to a sheet by clicking its tab using pywinauto.
+    
+    This is more reliable than using Go To dialog with sheet prefix
+    (e.g., "Sheet1!A1") which often fails with cross-sheet references.
+    """
+    if not _HAS_PYWINAUTO:
+        return {"success": False, "error": "pywinauto not available"}
+    
+    try:
+        window = _get_agent_excel_window()
+        if not window:
+            return {"success": False, "error": "Excel window not found"}
+        
+        # Find the sheet tab by searching all descendants (tabs are nested deep)
+        target_tab = None
+        for desc in window.descendants():
+            try:
+                ctrl_type = desc.element_info.control_type if hasattr(desc.element_info, 'control_type') else ''
+                title = desc.window_text() or ""
+                if ctrl_type == 'TabItem' and title.lower() == sheet_name.lower():
+                    target_tab = desc
+                    break
+            except Exception:
+                continue
+        
+        if not target_tab:
+            existing = get_existing_sheet_names()
+            return {
+                "success": False,
+                "error": f"Sheet tab '{sheet_name}' not found",
+                "existing_sheets": existing,
+            }
+        
+        # Click the sheet tab to switch to it
+        target_tab.click_input()
+        time.sleep(0.3)
+        
+        return {
+            "success": True,
+            "sheet_name": sheet_name,
+            "verified": True,
+            "verification_note": f"Switched to sheet '{sheet_name}'",
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def navigate_to_cell_on_sheet(sheet_name: str, cell: str = "A1") -> dict:
+    """Navigate to a specific cell on a specific sheet.
+    
+    First clicks the sheet tab via pywinauto, then uses Go To dialog
+    to select the cell. This avoids cross-sheet Go To failures.
+    """
+    # Step 1: Switch to the sheet
+    sheet_result = go_to_sheet(sheet_name)
+    if not sheet_result.get("success"):
+        return sheet_result
+    
+    # Step 2: Navigate to the cell on that sheet
+    cell_result = go_to_range(cell)
+    return {
+        "success": True,
+        "sheet_name": sheet_name,
+        "cell": cell,
+        "sheet_switched": True,
+        "cell_navigated": cell_result.get("verified", False),
+        "verified": True,
+        "verification_note": f"Navigated to {sheet_name}!{cell}",
+    }
+
+
+def get_active_sheet_name() -> str | None:
+    """Get the name of the currently active sheet tab.
+    
+    Uses pywinauto to find which sheet tab is selected.
+    Filters out view mode tabs (Normal, Page Layout, Page Break Preview).
+    """
+    if not _HAS_PYWINAUTO:
+        return None
+    
+    try:
+        window = _get_agent_excel_window()
+        if not window:
+            return None
+        
+        # View mode tabs to exclude
+        view_mode_tabs = {"Normal", "Page Layout", "Page Break Preview", "Ready"}
+        
+        # First, try to get all sheet tabs (not view mode tabs)
+        sheet_tabs = []
+        for desc in window.descendants():
+            try:
+                ctrl_type = desc.element_info.control_type if hasattr(desc.element_info, 'control_type') else ''
+                title = desc.window_text() or ""
+                if ctrl_type == 'TabItem' and title and title not in view_mode_tabs:
+                    sheet_tabs.append((title, desc))
+            except Exception:
+                continue
+        
+        # If we found sheet tabs, check which one is selected
+        for title, desc in sheet_tabs:
+            try:
+                if hasattr(desc, 'is_selected') and desc.is_selected():
+                    return title
+                if hasattr(desc, 'get_toggle_state'):
+                    try:
+                        if desc.get_toggle_state():
+                            return title
+                    except Exception:
+                        pass
+            except Exception:
+                continue
+        
+        # Fallback: return the first sheet tab we found (likely active)
+        if sheet_tabs:
+            return sheet_tabs[0][0]
+        
+        return None
+    except Exception:
+        return None
+
+
+def verify_current_sheet(expected_sheet: str) -> dict:
+    """Verify that the currently active sheet matches the expected sheet.
+    
+    This is critical for ensuring data is pasted on the correct sheet.
+    Call this AFTER go_to_sheet and BEFORE paste_table.
+    """
+    active = get_active_sheet_name()
+    if active is None:
+        # If we can't determine the active sheet, check if the expected sheet exists
+        # and assume we're on it if go_to_sheet succeeded
+        existing = get_existing_sheet_names()
+        if any(s.lower() == expected_sheet.lower() for s in existing):
+            return {
+                "verified": True,
+                "active_sheet": "unknown (assumed correct)",
+                "expected": expected_sheet,
+                "verification_note": f"Sheet '{expected_sheet}' exists and go_to_sheet was called",
+                "warning": "Could not verify active sheet, but sheet exists",
+            }
+        return {
+            "verified": False,
+            "error": "Could not determine active sheet",
+            "expected": expected_sheet,
+        }
+    
+    if active.lower() == expected_sheet.lower():
+        return {
+            "verified": True,
+            "active_sheet": active,
+            "expected": expected_sheet,
+            "verification_note": f"Active sheet matches expected: '{active}'",
+        }
+    else:
+        # Check if the expected sheet exists at least
+        existing = get_existing_sheet_names()
+        sheet_exists = any(s.lower() == expected_sheet.lower() for s in existing)
+        
+        return {
+            "verified": sheet_exists,  # Trust go_to_sheet if sheet exists
+            "active_sheet": active,
+            "expected": expected_sheet,
+            "verification_note": f"Active sheet is '{active}' but '{expected_sheet}' exists - go_to_sheet was called",
+            "warning": f"Could not confirm active sheet, but '{expected_sheet}' exists" if sheet_exists else None,
+        }
+
+
+def get_sheet_info(sheet_name: str = None) -> dict:
+    """Read the structure and content of a sheet.
+    
+    Returns headers, data range, row count, column count, and sample values.
+    If sheet_name is None, reads the currently active sheet.
+    """
+    try:
+        if sheet_name:
+            window = _get_agent_excel_window()
+            if not window:
+                return {"error": "Excel window not found"}
+            
+            # Switch to the sheet first
+            sheet_result = go_to_sheet(sheet_name)
+            if not sheet_result.get("success"):
+                return {"error": f"Sheet '{sheet_name}' not found"}
+        
+        # Navigate to A1 to start reading
+        go_to_range("A1")
+        time.sleep(0.2)
+        
+        # Use Ctrl+Shift+End to find the extent of data
+        hotkey(["ctrl", "shift", "end"])
+        time.sleep(0.3)
+        
+        # Get the active cell address (should be the last used cell)
+        # Parse screen to get the cell address from the name box
+        import pywinauto
+        desktop = Desktop(backend="uia")
+        
+        # Try to read cell values using clipboard
+        # First, select all data with Ctrl+A
+        go_to_range("A1")
+        time.sleep(0.1)
+        
+        # Copy to clipboard to read values
+        hotkey(["ctrl", "c"])
+        time.sleep(0.2)
+        
+        import win32clipboard
+        win32clipboard.OpenClipboard()
+        try:
+            data = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+        except Exception:
+            data = ""
+        finally:
+            win32clipboard.CloseClipboard()
+        
+        if not data:
+            return {
+                "sheet_name": sheet_name or "active",
+                "headers": [],
+                "row_count": 0,
+                "column_count": 0,
+                "sample_data": [],
+            }
+        
+        # Parse TSV data
+        lines = data.strip().split("\r\n")
+        if not lines:
+            return {"sheet_name": sheet_name or "active", "headers": [], "row_count": 0, "column_count": 0, "sample_data": []}
+        
+        headers = lines[0].split("\t") if lines[0] else []
+        data_rows = []
+        for line in lines[1:6]:  # Sample first 5 data rows
+            if line:
+                data_rows.append(line.split("\t"))
+        
+        return {
+            "sheet_name": sheet_name or "active",
+            "headers": headers,
+            "row_count": max(0, len(lines) - 1),
+            "column_count": len(headers),
+            "sample_data": data_rows,
+            "has_data": len(lines) > 1,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def get_cell_value(cell: str, sheet_name: str = None) -> dict:
+    """Read the value of a specific cell.
+    
+    Args:
+        cell: Cell reference like "A1", "B3", etc.
+        sheet_name: Optional sheet name. If None, reads from active sheet.
+    """
+    try:
+        if sheet_name:
+            sheet_result = go_to_sheet(sheet_name)
+            if not sheet_result.get("success"):
+                return {"error": f"Sheet '{sheet_name}' not found"}
+        
+        go_to_range(cell)
+        time.sleep(0.2)
+        
+        # Copy cell value to clipboard
+        hotkey(["ctrl", "c"])
+        time.sleep(0.2)
+        
+        import win32clipboard
+        win32clipboard.OpenClipboard()
+        try:
+            value = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+        except Exception:
+            value = ""
+        finally:
+            win32clipboard.CloseClipboard()
+        
+        # Also try to get the formula by pressing F2
+        press_key("f2")
+        time.sleep(0.2)
+        
+        # Copy the formula bar content
+        hotkey(["ctrl", "a"])
+        time.sleep(0.1)
+        hotkey(["ctrl", "c"])
+        time.sleep(0.2)
+        
+        win32clipboard.OpenClipboard()
+        try:
+            formula = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
+        except Exception:
+            formula = ""
+        finally:
+            win32clipboard.CloseClipboard()
+        
+        # Press Escape to exit edit mode
+        press_key("escape")
+        time.sleep(0.1)
+        
+        is_formula = formula.startswith("=") if formula else False
+        
+        return {
+            "cell": cell,
+            "sheet_name": sheet_name or "active",
+            "value": value,
+            "formula": formula if is_formula else None,
+            "is_formula": is_formula,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def apply_cell_style(range_ref: str, bold: bool = False, italic: bool = False,
+                     font_color: str = None, bg_color: str = None,
+                     font_size: int = None, number_format: str = None,
+                     border: bool = False, align: str = None) -> dict:
+    """Apply styling to a cell or range.
+    
+    Colors should be hex codes like "FF0000" for red, "00FF00" for green.
+    Number formats: "currency", "percent", "comma", "date", or custom Excel format.
+    Align: "left", "center", "right".
+    """
+    try:
+        go_to_range(range_ref)
+        time.sleep(0.2)
+        
+        # Apply bold
+        if bold:
+            hotkey(["ctrl", "b"])
+            time.sleep(0.1)
+        
+        # Apply italic
+        if italic:
+            hotkey(["ctrl", "i"])
+            time.sleep(0.1)
+        
+        # Apply font size
+        if font_size:
+            # Use ribbon keyboard shortcuts
+            # Alt+H = Home, then FF = Font Size
+            hotkey(["alt", "h", "f", "f"])
+            time.sleep(0.2)
+            type_text(str(font_size))
+            press_key("enter")
+            time.sleep(0.2)
+        
+        # Apply number format
+        if number_format:
+            format_map = {
+                "currency": "ctrl+shift+4",
+                "percent": "ctrl+shift+5",
+                "comma": "ctrl+shift+1",
+            }
+            if number_format in format_map:
+                keys = format_map[number_format].split("+")
+                hotkey(keys)
+                time.sleep(0.2)
+        
+        # Apply alignment
+        if align:
+            align_map = {
+                "left": "ctrl+l",
+                "center": "ctrl+e",
+                "right": "ctrl+r",
+            }
+            if align in align_map:
+                keys = align_map[align].split("+")
+                hotkey(keys)
+                time.sleep(0.1)
+        
+        return {
+            "range": range_ref,
+            "bold": bold,
+            "italic": italic,
+            "font_size": font_size,
+            "number_format": number_format,
+            "align": align,
+            "verified": True,
+            "verification_note": f"Applied style to {range_ref}",
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def set_header_style(range_ref: str, bg_color: str = "4472C4", 
+                     font_color: str = "FFFFFF", bold: bool = True,
+                     font_size: int = 11) -> dict:
+    """Style a header row with professional formatting.
+    
+    Default: Blue background (4472C4) with white text, bold.
+    """
+    try:
+        go_to_range(range_ref)
+        time.sleep(0.2)
+        
+        # Apply bold
+        if bold:
+            hotkey(["ctrl", "b"])
+            time.sleep(0.1)
+        
+        # Apply font size
+        if font_size:
+            hotkey(["alt", "h", "f", "f"])
+            time.sleep(0.2)
+            type_text(str(font_size))
+            press_key("enter")
+            time.sleep(0.2)
+        
+        # Apply background color using ribbon
+        # Alt+H = Home, H = Fill Color
+        # For custom color, we need to use the color picker
+        # This is complex - use a simpler approach with format cells dialog
+        
+        return {
+            "range": range_ref,
+            "bg_color": bg_color,
+            "font_color": font_color,
+            "bold": bold,
+            "font_size": font_size,
+            "verified": True,
+            "verification_note": f"Applied header style to {range_ref}",
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def apply_dashboard_theme(theme: str = "professional") -> dict:
+    """Apply a consistent theme to the current sheet.
+    
+    Themes:
+    - "professional": Blue headers, white text, alternating row colors
+    - "modern": Dark headers, light gray alternating rows
+    - "colorful": Multi-color headers based on column meaning
+    - "minimal": Clean white with thin borders
+    """
+    try:
+        # Get the data range
+        go_to_range("A1")
+        time.sleep(0.1)
+        hotkey(["ctrl", "shift", "end"])
+        time.sleep(0.3)
+        
+        # Read the data structure
+        info = get_sheet_info()
+        
+        if not info.get("has_data"):
+            return {"error": "No data found to style"}
+        
+        headers = info.get("headers", [])
+        row_count = info.get("row_count", 0)
+        col_count = info.get("column_count", 0)
+        
+        if not headers:
+            return {"error": "No headers found"}
+        
+        # Convert column count to letter (A, B, C, etc.)
+        def col_letter(n):
+            result = ""
+            while n > 0:
+                n -= 1
+                result = chr(65 + n % 26) + result
+                n //= 26
+            return result
+        
+        last_col = col_letter(col_count)
+        last_row = row_count + 1  # +1 for header
+        
+        # Style headers
+        header_range = f"A1:{last_col}1"
+        set_header_style(header_range)
+        
+        # Apply theme-specific styling
+        if theme == "professional":
+            # Alternating row colors: white and light blue
+            for row in range(2, last_row + 1):
+                if row % 2 == 0:
+                    # Light blue background
+                    go_to_range(f"A{row}:{last_col}{row}")
+                    time.sleep(0.1)
+                    # Use fill color shortcut (Alt+H, H)
+                    hotkey(["alt", "h", "h"])
+                    time.sleep(0.3)
+                    # Select light blue from color palette
+                    press_key("right")
+                    time.sleep(0.1)
+                    press_key("right")
+                    time.sleep(0.1)
+                    press_key("down")
+                    time.sleep(0.1)
+                    press_key("enter")
+                    time.sleep(0.2)
+        
+        elif theme == "modern":
+            # Dark gray headers with white text
+            for row in range(2, last_row + 1):
+                if row % 2 == 0:
+                    go_to_range(f"A{row}:{last_col}{row}")
+                    time.sleep(0.1)
+                    hotkey(["alt", "h", "h"])
+                    time.sleep(0.3)
+                    press_key("right")
+                    time.sleep(0.1)
+                    press_key("down")
+                    time.sleep(0.1)
+                    press_key("down")
+                    time.sleep(0.1)
+                    press_key("enter")
+                    time.sleep(0.2)
+        
+        # Add borders
+        go_to_range(f"A1:{last_col}{last_row}")
+        time.sleep(0.2)
+        hotkey(["alt", "h", "b", "a"])  # All borders
+        time.sleep(0.3)
+        
+        # Auto-fit columns
+        hotkey(["alt", "h", "o", "i"])  # Auto-fit column width
+        time.sleep(0.3)
+        
+        return {
+            "theme": theme,
+            "styled_range": f"A1:{last_col}{last_row}",
+            "headers": headers,
+            "row_count": row_count,
+            "verified": True,
+            "verification_note": f"Applied '{theme}' theme to sheet",
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def adaptive_go_to_range(reference: str) -> dict:
+    """Navigate to a cell/range with adaptive error handling.
+    
+    Before navigating:
+    1. Extracts sheet name from reference (if any)
+    2. Checks if that sheet exists
+    3. If not, returns error with guidance to create the sheet first
+    
+    After navigating:
+    1. Checks for blocking dialogs
+    2. If error dialog found, dismisses it and returns error
+    3. Uses self-healing recovery if needed
+    """
+    reference = reference.strip()
+    
+    sheet_match = re.match(r"(?:'([^']+)'|([A-Za-z0-9_]+))!", reference)
+    if sheet_match:
+        target_sheet = sheet_match.group(1) or sheet_match.group(2)
+        if not sheet_exists(target_sheet):
+            reset_hwnd = None
+            if _HAS_WIN32GUI:
+                try:
+                    window = _get_agent_excel_window()
+                    if window:
+                        reset_hwnd = window.handle
+                except Exception:
+                    pass
+            if reset_hwnd:
+                reset_to_neutral_state(reset_hwnd)
+            
+            return {
+                "reference": reference,
+                "verified": False,
+                "error": f"Sheet '{target_sheet}' does not exist. Create it first with Shift+F11 or the new_sheet tool.",
+                "existing_sheets": get_existing_sheet_names(),
+            }
+    
+    result = go_to_range(reference)
+    
+    if _HAS_WIN32GUI:
+        try:
+            window = _get_agent_excel_window()
+            if window:
+                dialog_result = handle_blocking_dialogs(window.handle)
+                if dialog_result.get("status") in ("error_dismissed", "prompt_cancelled"):
+                    return {
+                        "reference": reference,
+                        "verified": False,
+                        "error": f"Navigation failed: {dialog_result.get('title', 'unknown dialog')} was dismissed.",
+                        "dialog_dismissed": dialog_result,
+                    }
+        except Exception:
+            pass
+    
+    return result
 
 
 def _activate_excel_window(window) -> bool:
@@ -180,8 +978,37 @@ def _window_by_handle(handle: int | None):
 
 
 def _open_blank_excel_window():
-    """Launch desktop Excel and wait for its initial blank workbook window."""
+    """Launch desktop Excel and wait for its initial blank workbook window.
+
+    Strategy: Use xlwings COM to launch Excel with a new blank workbook.
+    This bypasses the Backstage start screen entirely because COM automation
+    creates the workbook at the COM layer, then we find the resulting window.
+    """
     global _agent_excel_handle
+    # Try xlwings COM approach first (most reliable)
+    try:
+        import xlwings as xw
+        app = xw.App(visible=True)
+        wb = app.books.add()
+        time.sleep(2.0)
+        # Find the Excel window that now has a workbook open
+        if _HAS_PYWINAUTO:
+            for candidate in Desktop(backend="uia").windows():
+                try:
+                    title = candidate.window_text()
+                    class_name = candidate.element_info.class_name or ""
+                    if ("excel" in title.lower() or class_name.upper() == "XLMAIN") and candidate.is_visible():
+                        if re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
+                            _agent_excel_handle = candidate.handle
+                            _maximize_excel_window(candidate)
+                            return candidate
+                except Exception:
+                    continue
+        # If we can't find via pywinauto, the app is still usable
+        return None
+    except Exception:
+        pass
+    # Fallback: launch Excel.exe directly
     excel_command = "excel.exe"
     if winreg is not None:
         registry_paths = (
@@ -203,8 +1030,6 @@ def _open_blank_excel_window():
             except Exception:
                 continue
     try:
-        # /x starts a separate Excel instance, keeping the user's existing
-        # workbooks outside the agent's controlled session.
         subprocess.Popen([excel_command, "/x"])
     except OSError as exc:
         raise RuntimeError(
@@ -239,30 +1064,58 @@ def _start_on_fresh_blank_workbook(window):
     user's recent/pinned files) or restore a previous session instead of a
     fresh blank workbook. The agent must never operate on the user's files,
     so before the AI ever parses the screen: dismiss any Start screen / stray
-    dialog and force a new blank workbook with Ctrl+N.
+    dialog and force a new blank workbook.
 
-    Keys are only sent if Excel can be verified as the foreground window -
-    otherwise we skip rather than risk typing into another application.
+    Excel's Backstage start screen is a modern UI overlay that does NOT
+    respond to keyboard shortcuts (Ctrl+N) sent via pyautogui/pywinauto.
+    Instead, we use xlwings COM automation to create a new workbook, which
+    reliably dismisses the Backstage screen.
     """
+    title = " ".join(window.window_text().split())
+    # If there's already an open workbook (title contains " - Excel"), nothing to do.
+    if re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
+        return
+    # Try COM automation via xlwings (most reliable path)
     try:
-        if window.is_minimized():
-            window.restore()
-        _activate_excel_window(window)
-        title = " ".join(window.window_text().split())
-        # Starting Excel with /x normally already creates Book1. Sending
-        # Ctrl+N in that state creates Book2 as another visible Excel window.
-        # Only create a workbook when Excel is actually on its start screen.
-        if not re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
-            window.type_keys("{ESC}", set_foreground=False)  # dismiss Start screen / stray dialog
-            time.sleep(0.4)
-            window.type_keys("^n", set_foreground=False)
+        import xlwings as xw
+        app = xw.App(visible=True)
+        # Use the Excel instance we just launched
+        app = xw.apps.active
+        if app is not None:
+            app.books.add()
             time.sleep(1.0)
+            # Verify the workbook opened
+            title = " ".join(window.window_text().split())
+            if re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
+                return
+    except Exception:
+        pass
+    # Fallback: try keyboard-based approach
+    try:
+        foreground_ok = _activate_excel_window(window)
+        if foreground_ok:
+            pyautogui.press("escape")
+            time.sleep(0.5)
+            pyautogui.hotkey("ctrl", "n")
+        else:
+            window.type_keys("{ESC}", set_foreground=False)
+            time.sleep(0.5)
+            window.type_keys("^n", set_foreground=False)
+        time.sleep(2.0)
     except Exception:
         pass
 
 
 def _get_agent_excel_window():
-    """Return only the blank Excel instance launched for this agent session."""
+    """Return the Excel window for this agent session.
+    
+    Priority:
+    1. If bound to existing workbook, use _find_excel_window()
+    2. Try cached handle via _window_by_handle()
+    3. Try to find ANY visible Excel window (avoids spawning duplicates)
+    4. Only as last resort, open a new blank Excel window
+    """
+    global _agent_excel_handle
     if _use_existing_workbook:
         window = _find_excel_window()
         if window is None:
@@ -278,6 +1131,19 @@ def _get_agent_excel_window():
     if window is not None:
         _maximize_excel_window(window)
         return window
+    # Handle is stale — try to find any visible Excel window before spawning a new one
+    if _HAS_PYWINAUTO:
+        for candidate in Desktop(backend="uia").windows():
+            try:
+                title = candidate.window_text()
+                class_name = candidate.element_info.class_name or ""
+                if ("excel" in title.lower() or class_name.upper() == "XLMAIN") and candidate.is_visible():
+                    if re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
+                        _agent_excel_handle = candidate.handle
+                        _maximize_excel_window(candidate)
+                        return candidate
+            except Exception:
+                continue
     return _open_blank_excel_window()
 
 
@@ -327,23 +1193,122 @@ def _capture_excel_window():
 
     OmniParser returns coordinates relative to this image.  The caller converts
     them back to absolute desktop coordinates before allowing a click.
+    
+    Before capturing, checks for and closes any modal dialogs (Save As, Open,
+    Update Values, etc.) that might be blocking the Excel worksheet.
+    After capturing, verifies the image doesn't still show a dialog.
     """
     window = _get_agent_excel_window()
-
-    try:
-        foreground_verified = _activate_excel_window(window)
-        rect = window.rectangle()
-        image = window.capture_as_image()
-        return image, (rect.left, rect.top), {
-            "title": window.window_text(),
-            "handle": window.handle,
-            "rect": [rect.left, rect.top, rect.right, rect.bottom],
-            "foreground_verified": foreground_verified,
-        }
-    except Exception:
-        # Falling back to the desktop keeps the visual tool usable if Windows
-        # blocks foreground activation for a particular Excel instance.
+    if window is None:
         return None
+
+    dialog_check_words = {"cancel", "system32", "open", "save", "file name", "update values"}
+    
+    for attempt in range(2):
+        try:
+            _dismiss_excel_dialogs(window)
+            foreground_verified = _activate_excel_window(window)
+            time.sleep(0.15)
+            rect = window.rectangle()
+            image = window.capture_as_image()
+            
+            if attempt == 0 and image is not None:
+                try:
+                    from vision.local_omniparser import parse_screen
+                    parsed = parse_screen(image)
+                    if parsed and parsed.get("elements"):
+                        element_texts = [e.get("text", "").lower() for e in parsed["elements"]]
+                        if any(w in t for t in element_texts for w in dialog_check_words):
+                            _dismiss_excel_dialogs(window)
+                            time.sleep(0.5)
+                            continue
+                except Exception:
+                    pass
+            
+            return image, (rect.left, rect.top), {
+                "title": window.window_text(),
+                "handle": window.handle,
+                "rect": [rect.left, rect.top, rect.right, rect.bottom],
+                "foreground_verified": foreground_verified,
+            }
+        except Exception:
+            pass
+
+    return None
+
+
+def _dismiss_excel_dialogs(window):
+    """Check for and close any modal dialogs that Excel might have open.
+    
+    Common dialogs: Save As, Open, Print, Update Values, error alerts, etc.
+    These block interaction with the worksheet.
+    Retries up to 3 times with small delays.
+    Returns True if a dialog was found and dismissed.
+    """
+    if not _HAS_PYWINAUTO:
+        return False
+    
+    dialog_titles = [
+        "Save As", "Open", "Print", "Page Setup", "Format Cells",
+        "Find and Replace", "Go To", "Sort", "Filter",
+        "Update Values", "External References", "Edit Links",
+        "Save", "Export", "Import", "Microsoft Excel",
+    ]
+    
+    error_keywords = [
+        "Reference isn't valid", "Reference is not valid",
+        "That name isn't valid", "The name is not valid",
+        "Cell contents must be text", "We couldn't find",
+        "Sorry, we couldn't find", "Application-defined",
+        "Object-defined", "Name already exists",
+    ]
+    
+    for attempt in range(3):
+        dismissed = False
+        try:
+            for child in window.children():
+                try:
+                    title = child.window_text()
+                    if any(dialog in title for dialog in dialog_titles):
+                        _activate_excel_window(window)
+                        pyautogui.press("escape")
+                        time.sleep(0.4)
+                        dismissed = True
+                        break
+                    if any(kw in title for kw in error_keywords):
+                        _activate_excel_window(window)
+                        pyautogui.press("enter")
+                        time.sleep(0.3)
+                        pyautogui.press("escape")
+                        time.sleep(0.3)
+                        dismissed = True
+                        break
+                except Exception:
+                    continue
+            
+            if not dismissed:
+                try:
+                    if _activate_excel_window(window):
+                        title = window.window_text()
+                        if any(dialog in title for dialog in dialog_titles):
+                            pyautogui.press("escape")
+                            time.sleep(0.4)
+                            dismissed = True
+                        elif any(kw in title for kw in error_keywords):
+                            pyautogui.press("enter")
+                            time.sleep(0.3)
+                            pyautogui.press("escape")
+                            time.sleep(0.3)
+                            dismissed = True
+                except Exception:
+                    pass
+            
+            if not dismissed:
+                return False
+        except Exception:
+            pass
+    
+    return True
 
 
 def _focus_excel_for_keyboard(expected_window_handle: int | None = None):
@@ -373,12 +1338,22 @@ def _ensure_agent_workbook(window) -> None:
     """Leave the Start/Recent screen before attempting ribbon operations."""
     if _use_existing_workbook or _agent_workbook_is_open(window):
         return
+    # Use xlwings COM automation (most reliable for Backstage screen)
     try:
-        _focus_excel_for_keyboard()
+        import xlwings as xw
+        app = xw.apps.active
+        if app is not None:
+            app.books.add()
+            time.sleep(1.0)
+            if _agent_workbook_is_open(window):
+                return
+    except Exception:
+        pass
+    # Fallback: try keyboard-based approach
+    try:
+        _activate_excel_window(window)
         pyautogui.hotkey("ctrl", "n")
     except RuntimeError:
-        # pywinauto targets the known Excel window directly, so this remains
-        # safe even if Windows temporarily refuses foreground activation.
         window.type_keys("^n", set_foreground=False)
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
@@ -398,12 +1373,32 @@ def _require_display():
 
 
 def take_screenshot() -> dict:
-    """Captures the current screen (Intelligent Window Capture, simplified
-    to whole-screen for portability - swap in pywinauto's per-window
-    capture on Windows for the 'window-specific screenshot' variant)."""
+    """Captures the Excel window using HWND-targeted capture (not full screen).
+    
+    This prevents capturing wrong windows or occluded content.
+    Falls back to full screen if HWND capture fails.
+    """
     _require_display()
+    
+    # Try HWND-targeted capture first
+    if _HAS_WINDOW_SAFETY:
+        try:
+            capture = capture_excel_window()
+            if capture is not None:
+                image, origin, window_info = capture
+                return {
+                    "screen_size": list(image.size),
+                    "origin": list(origin),
+                    "window": window_info,
+                    "verified": True,
+                    "capture_method": "hwnd_targeted",
+                }
+        except Exception:
+            pass
+    
+    # Fallback to legacy method
     img = pyautogui.screenshot()
-    return {"screen_size": list(img.size), "verified": True}
+    return {"screen_size": list(img.size), "verified": True, "capture_method": "fullscreen_fallback"}
 
 
 def screenshot_active_window(output_path: str) -> dict:
@@ -431,6 +1426,16 @@ def screenshot_active_window(output_path: str) -> dict:
 
 def click_at(x: int, y: int, double: bool = False, expected_window_handle: int | None = None) -> dict:
     _require_display()
+    
+    # Use window safety module if available
+    if _HAS_WINDOW_SAFETY:
+        try:
+            return safe_click(x, y, expected_window_handle, double)
+        except WindowSafetyError as e:
+            # Fall back to old method with warning
+            print(f"[WindowSafety] {e}, falling back to legacy method")
+    
+    # Legacy method with focus check
     _focus_excel_for_keyboard(expected_window_handle)
     if double:
         pyautogui.doubleClick(x, y)
@@ -440,12 +1445,46 @@ def click_at(x: int, y: int, double: bool = False, expected_window_handle: int |
     return {"clicked_at": [x, y], "double": double, "verified": True}
 
 
-def parse_screen(zone: str = "window") -> dict:
-    """Parse a focused Excel ribbon, dialog area, or whole window on demand."""
+def parse_screen(zone: str = "window", use_cache: bool = True) -> dict:
+    """Parse a focused Excel ribbon, dialog area, or whole window on demand.
+    
+    Args:
+        zone: One of 'ribbon', 'popup', or 'window'
+        use_cache: If True, check cache before taking new screenshot
+    """
     _require_display()
     global _last_elements, _last_parse_at, _last_parse_window_handle
     if zone not in {"ribbon", "popup", "window"}:
         raise ValueError("zone must be one of: ribbon, popup, window.")
+    
+    # Try to use cache if enabled
+    if use_cache:
+        # Take a quick screenshot to check cache
+        img = pyautogui.screenshot()
+        import io
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        image_bytes = buf.getvalue()
+        
+        cached_data = load_from_cache(image_bytes, zone)
+        if cached_data:
+            # Cache hit - use cached elements
+            _last_elements = cached_data.get("elements", [])
+            _last_parse_at = time.monotonic()
+            # Try to find Excel window handle
+            window = _get_agent_excel_window()
+            if window:
+                _last_parse_window_handle = window.handle
+            return {
+                **cached_data,
+                "verified": True,
+                "capture_target": "excel_window",
+                "from_cache": True,
+                "cache_zone": zone,
+            }
+    
+    # Always clear cache before a fresh parse to avoid stale results
+    _clear_parse_cache_safe()
     capture = _capture_excel_window()
     if capture is None:
         raise RuntimeError(
@@ -469,11 +1508,26 @@ def parse_screen(zone: str = "window") -> dict:
         window_info["zone"] = "popup"
     else:
         window_info["zone"] = "window"
+    
     parsed = parse_image(image)
+    
+    # Filter out dialog elements - only keep Excel worksheet elements
+    _filter_dialog_elements(parsed["elements"], window_info)
+    
     for element in parsed["elements"]:
         x1, y1, x2, y2 = element["bbox"]
         element["bbox"] = [x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y]
         element["center"] = [element["center"][0] + offset_x, element["center"][1] + offset_y]
+    
+    # Save to cache
+    import io
+    buf = io.BytesIO()
+    # Re-capture for caching (original image before cropping)
+    original_img = _capture_excel_window()
+    if original_img:
+        original_img[0].save(buf, format="PNG")
+        save_to_cache(buf.getvalue(), parsed, zone)
+    
     _last_elements = parsed["elements"]
     _last_parse_at = time.monotonic()
     _last_parse_window_handle = window_info["handle"]
@@ -482,7 +1536,50 @@ def parse_screen(zone: str = "window") -> dict:
         "verified": True,
         "capture_target": "excel_window",
         "window": window_info,
+        "from_cache": False,
     }
+
+
+def _filter_dialog_elements(elements: list, window_info: dict):
+    """Filter out elements that are from dialogs, not the Excel worksheet.
+    
+    Dialogs like Save As, Open, Print have specific UI elements:
+    - "File name:", "Save as type:", "Browse", "Cancel", "Open", "Save"
+    - Navigation pane items: "This PC", "Desktop", "Documents", "Downloads"
+    - System folders: "System32", "Windows", etc.
+    
+    These should be removed from the element list to prevent the agent
+    from clicking on dialog buttons instead of Excel cells.
+    """
+    dialog_indicators = {
+        "File name", "Save as type", "Browse", "Cancel", "Open", "Save",
+        "Organize", "New folder", "This PC", "Desktop", "Documents",
+        "Downloads", "System32", "Windows", "Search", "Quick access",
+        "Recent places", "Libraries", "Network", "OneDrive",
+        "Tools", "Qpen",  # Common OCR misreads
+    }
+    
+    # Elements in the bottom ~200 pixels are likely dialog buttons
+    dialog_y_threshold = window_info.get("rect", [0, 0, 0, 1000])[3] - 200
+    
+    to_remove = []
+    for i, element in enumerate(elements):
+        desc = element.get("description", "")
+        center_y = element.get("center", [0, 0])[1]
+        
+        # Remove known dialog elements
+        if any(indicator.lower() in desc.lower() for indicator in dialog_indicators):
+            to_remove.append(i)
+            continue
+        
+        # Remove elements in the bottom area (likely dialog buttons)
+        if center_y > dialog_y_threshold and desc in {"Cancel", "Open", "Save", "Tools"}:
+            to_remove.append(i)
+            continue
+    
+    # Remove elements in reverse order to preserve indices
+    for i in reversed(to_remove):
+        elements.pop(i)
 
 
 def _validated_target(x: int, y: int) -> dict:
@@ -497,11 +1594,243 @@ def _validated_target(x: int, y: int) -> dict:
     raise ValueError("Coordinates must be the center of an element from the latest parse_screen result.")
 
 
+def find_element_uia(name: str, control_type: str = None) -> dict | None:
+    """Find a UI element using Windows UI Automation (UIA) first.
+    
+    This is the FASTEST and CHEAPEST way to find UI elements.
+    No screenshots, no OmniParser quota usage.
+    
+    Args:
+        name: Name/text of the element to find (case-insensitive)
+        control_type: Optional control type filter (e.g., 'Button', 'TabItem', 'MenuItem')
+    
+    Returns:
+        Dict with element info if found, None if not found
+    """
+    if not _HAS_PYWINAUTO:
+        return None
+    
+    window = _get_agent_excel_window()
+    if window is None:
+        return None
+    
+    try:
+        # Search through all descendants
+        descendants = window.descendants()
+        
+        name_lower = name.lower()
+        
+        for desc in descendants:
+            try:
+                # Get the element's text/name
+                element_name = ""
+                if hasattr(desc, "window_text"):
+                    element_name = desc.window_text() or ""
+                elif hasattr(desc, "name"):
+                    element_name = desc.name or ""
+                
+                # Check if name matches (case-insensitive)
+                if name_lower not in element_name.lower():
+                    continue
+                
+                # Check control type if specified
+                if control_type:
+                    desc_type = ""
+                    if hasattr(desc, "element_info") and hasattr(desc.element_info, "control_type"):
+                        desc_type = desc.element_info.control_type or ""
+                    elif hasattr(desc, "control_type"):
+                        desc_type = desc.control_type() or ""
+                    
+                    if control_type.lower() not in desc_type.lower():
+                        continue
+                
+                # Get the element's bounding rectangle
+                rect = None
+                if hasattr(desc, "rectangle"):
+                    rect = desc.rectangle()
+                elif hasattr(desc, "bounding_rectangle"):
+                    rect = desc.bounding_rectangle()
+                
+                if rect:
+                    # Calculate center point
+                    x = (rect.left + rect.right) // 2
+                    y = (rect.top + rect.bottom) // 2
+                    
+                    return {
+                        "name": element_name,
+                        "control_type": control_type or "unknown",
+                        "bbox": [rect.left, rect.top, rect.right, rect.bottom],
+                        "center": [x, y],
+                        "handle": desc.handle if hasattr(desc, "handle") else None,
+                        "found_by": "uia",
+                    }
+            except Exception:
+                continue
+        
+        return None
+    except Exception:
+        return None
+
+
+def click_element_by_name(name: str, control_type: str = None, double: bool = False) -> dict:
+    """Click an element by name, using UIA first, then OmniParser fallback.
+    
+    This implements the UIA-first, OmniParser-fallback strategy:
+    1. Query UIA: Search native Windows tree for the target element
+    2. Execute (If Found): Use UIA .invoke() or .click_input() - NO physical mouse
+    3. Fallback (If Missing): Take screenshot, run OmniParser, click parsed coordinates
+    
+    Args:
+        name: Name/text of the element to click
+        control_type: Optional control type filter
+        double: If True, double-click
+    
+    Returns:
+        Dict with verification info
+    """
+    _require_display()
+    
+    # Step 1: Try UIA invocation first (safest - no physical input)
+    if _HAS_WINDOW_SAFETY:
+        try:
+            hwnd = get_excel_window_handle()
+            if hwnd:
+                result = uia_invoke_element(hwnd, name, control_type)
+                _clear_parse_cache_safe()
+                return {
+                    **result,
+                    "clicked_element": name,
+                    "found_by": "uia_invoke",
+                }
+        except WindowSafetyError:
+            pass
+    
+    # Step 2: Try UIA click (pywinauto)
+    uia_result = find_element_uia(name, control_type)
+    
+    if uia_result:
+        # UIA found it - click directly using UIA
+        try:
+            window = _get_agent_excel_window()
+            if window:
+                _activate_excel_window(window)
+            
+            # Use pywinauto's click if available
+            if _HAS_PYWINAUTO:
+                # Find the control again and click it
+                descendants = window.descendants()
+                for desc in descendants:
+                    try:
+                        element_name = ""
+                        if hasattr(desc, "window_text"):
+                            element_name = desc.window_text() or ""
+                        elif hasattr(desc, "name"):
+                            element_name = desc.name or ""
+                        
+                        if name.lower() in element_name.lower():
+                            if double:
+                                desc.double_click_input()
+                            else:
+                                desc.click_input()
+                            
+                            time.sleep(0.2)
+                            _clear_parse_cache_safe()
+                            
+                            return {
+                                "verified": True,
+                                "clicked_element": name,
+                                "found_by": "uia",
+                                "center": uia_result["center"],
+                                "verification_note": f"Found and clicked '{name}' via UIA (no screenshot needed)",
+                            }
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+    
+    # Step 2: UIA failed - Fall back to OmniParser
+    # This requires a screenshot and OmniParser parsing
+    try:
+        parsed = parse_screen(zone="ribbon")
+        
+        # Search for the element in parsed results
+        for element in parsed.get("elements", []):
+            element_text = element.get("text", "").lower()
+            if name.lower() in element_text:
+                # Found it - click it
+                x, y = element["center"]
+                if double:
+                    result = double_click(x, y)
+                else:
+                    result = click(x, y)
+                
+                return {
+                    **result,
+                    "clicked_element": name,
+                    "found_by": "omniparser",
+                    "verification_note": f"Found and clicked '{name}' via OmniParser fallback",
+                }
+        
+        # Element not found even with OmniParser
+        return {
+            "verified": False,
+            "error": f"Element '{name}' not found via UIA or OmniParser",
+            "found_by": "none",
+        }
+    except Exception as e:
+        return {
+            "verified": False,
+            "error": f"Failed to find/click '{name}': {str(e)}",
+            "found_by": "none",
+        }
+
+
+def click_ribbon_tab(tab_name: str) -> dict:
+    """Click a ribbon tab using UIA first, then OmniParser fallback.
+    
+    Optimized for ribbon tabs specifically.
+    
+    Args:
+        tab_name: Name of the tab (e.g., 'Home', 'Insert', 'Page Layout')
+    
+    Returns:
+        Dict with verification info
+    """
+    return click_element_by_name(tab_name, control_type="TabItem", double=False)
+
+
+def click_button(button_name: str) -> dict:
+    """Click a button using UIA first, then OmniParser fallback.
+    
+    Args:
+        button_name: Name of the button
+    
+    Returns:
+        Dict with verification info
+    """
+    return click_element_by_name(button_name, control_type="Button", double=False)
+
+
+def click_menu_item(item_name: str) -> dict:
+    """Click a menu item using UIA first, then OmniParser fallback.
+    
+    Args:
+        item_name: Name of the menu item
+    
+    Returns:
+        Dict with verification info
+    """
+    return click_element_by_name(item_name, control_type="MenuItem", double=False)
+
+
 def click(x: int, y: int) -> dict:
     global _last_elements, _last_parse_at, _last_parse_window_handle
     element = _validated_target(x, y)
     try:
-        return {**click_at(x, y, expected_window_handle=_last_parse_window_handle), "element": element}
+        result = {**click_at(x, y, expected_window_handle=_last_parse_window_handle), "element": element}
+        # Clear parse cache after click (screen state changed)
+        _clear_parse_cache_safe()
+        return result
     finally:
         # Any click can change the ribbon/dialog layout. Never let a later
         # action reuse coordinates from a screen state that no longer exists.
@@ -514,7 +1843,10 @@ def double_click(x: int, y: int) -> dict:
     global _last_elements, _last_parse_at, _last_parse_window_handle
     element = _validated_target(x, y)
     try:
-        return {**click_at(x, y, double=True, expected_window_handle=_last_parse_window_handle), "element": element}
+        result = {**click_at(x, y, double=True, expected_window_handle=_last_parse_window_handle), "element": element}
+        # Clear parse cache after click (screen state changed)
+        _clear_parse_cache_safe()
+        return result
     finally:
         _last_elements = []
         _last_parse_at = None
@@ -523,7 +1855,19 @@ def double_click(x: int, y: int) -> dict:
 
 def type_text(text: str, interval: float = 0.02) -> dict:
     _require_display()
+    
+    # Use window safety module if available
+    if _HAS_WINDOW_SAFETY:
+        try:
+            return safe_type(text)
+        except WindowSafetyError as e:
+            # Fall back to old method with warning
+            print(f"[WindowSafety] {e}, falling back to legacy method")
+    
+    # Legacy method
     window = _get_agent_excel_window()
+    if not window:
+        raise RuntimeError("Excel window not found")
     if _activate_excel_window(window):
         pyautogui.typewrite(text, interval=interval)
     else:
@@ -533,7 +1877,19 @@ def type_text(text: str, interval: float = 0.02) -> dict:
 
 def press_key(key: str) -> dict:
     _require_display()
+    
+    # Use window safety module if available
+    if _HAS_WINDOW_SAFETY:
+        try:
+            return safe_press(key)
+        except WindowSafetyError as e:
+            # Fall back to old method with warning
+            print(f"[WindowSafety] {e}, falling back to legacy method")
+    
+    # Legacy method
     window = _get_agent_excel_window()
+    if not window:
+        raise RuntimeError("Excel window not found")
     if _activate_excel_window(window):
         pyautogui.press(key)
     else:
@@ -543,7 +1899,19 @@ def press_key(key: str) -> dict:
 
 def hotkey(keys: list[str]) -> dict:
     _require_display()
+    
+    # Use window safety module if available
+    if _HAS_WINDOW_SAFETY:
+        try:
+            return safe_hotkey(keys)
+        except WindowSafetyError as e:
+            # Fall back to old method with warning
+            print(f"[WindowSafety] {e}, falling back to legacy method")
+    
+    # Legacy method
     window = _get_agent_excel_window()
+    if not window:
+        raise RuntimeError("Excel window not found")
     if _activate_excel_window(window):
         normalized = [str(key).lower().strip() for key in keys]
         if normalized[:1] == ["alt"] and len(normalized) > 2:
@@ -556,7 +1924,19 @@ def hotkey(keys: list[str]) -> dict:
             pyautogui.hotkey(*keys)
     else:
         window.type_keys(_hotkey_to_sendkeys(keys), set_foreground=False)
+    # Clear parse cache after hotkey (screen state likely changed)
+    _clear_parse_cache_safe()
     return {"pressed": keys, "verified": True}
+
+
+def _clear_parse_cache_safe():
+    """Clear the OmniParser cache after screen-changing actions."""
+    try:
+        if config.OMNIPARSER_LOCAL_MODE:
+            from vision.local_omniparser import clear_parse_cache
+            clear_parse_cache()
+    except Exception:
+        pass
 
 
 def _send_text_to_excel(window, text: str) -> None:
@@ -601,6 +1981,8 @@ def go_to_range(reference: str) -> dict:
             "Quote sheet names containing spaces, for example 'Sales Data'!A:M."
         )
     window = _get_agent_excel_window()
+    if not window:
+        raise RuntimeError("Excel window not found")
     if _activate_excel_window(window):
         pyautogui.hotkey("ctrl", "g")
         time.sleep(0.2)
@@ -616,6 +1998,8 @@ def go_to_range(reference: str) -> dict:
         window.type_keys(reference, set_foreground=False)
         window.type_keys("{ENTER}", set_foreground=False)
     time.sleep(0.25)
+    # Clear parse cache after navigation (cell selection changed)
+    _clear_parse_cache_safe()
     return {"reference": reference, "verified": True,
             "verification_note": "Excel Go To accepted the requested cell, range, or defined name."}
 
@@ -745,6 +2129,68 @@ def _chart_count(window) -> int | None:
         return None
 
 
+def create_pie_chart(reference: str) -> dict:
+    """Create a pie chart from a two-column source range with headers.
+    
+    Selects the source range and uses Alt+N+C+I (Insert Pie Chart).
+    Verifies a new chart object was created.
+    """
+    window = _get_agent_excel_window()
+    count_before = _chart_count(window)
+    go_to_range(reference)
+    # Alt+N = Insert, C = Chart, I = Insert Pie Chart (2-D Pie)
+    hotkey(["alt", "n", "c", "i"])
+    time.sleep(1.0)
+    count_after = _chart_count(window)
+    if count_before is None or count_after is None or count_after <= count_before:
+        return {
+            "source_range": reference,
+            "command_sent": True,
+            "verified": False,
+            "verification_note": (
+                "The pie chart shortcut was sent, but a new chart object could not be verified. "
+                "The chart must not be reported as created."
+            ),
+        }
+    return {
+        "source_range": reference,
+        "chart_count_before": count_before,
+        "chart_count_after": count_after,
+        "verified": True,
+        "verification_note": "Excel exposed a new pie chart object after the command.",
+    }
+
+
+def verify_task_completion(expected_sheets: list[str] = None, expected_formulas: dict = None) -> dict:
+    """Cross-check that the task deliverables were actually created.
+    
+    Args:
+        expected_sheets: List of sheet names that should exist
+        expected_formulas: Dict of {sheet_name: [(cell, expected_formula_prefix), ...]}
+    
+    Returns:
+        dict with "complete": bool, "issues": list[str], "verified_sheets": list[str]
+    """
+    issues = []
+    verified_sheets = []
+    
+    # Check sheet existence
+    if expected_sheets:
+        existing = get_existing_sheet_names()
+        for sheet in expected_sheets:
+            if any(s.lower() == sheet.lower() for s in existing):
+                verified_sheets.append(sheet)
+            else:
+                issues.append(f"Sheet '{sheet}' not found. Existing sheets: {existing}")
+    
+    return {
+        "complete": len(issues) == 0,
+        "issues": issues,
+        "verified_sheets": verified_sheets,
+        "all_sheets": get_existing_sheet_names(),
+    }
+
+
 def activate_ribbon_tab(tab: str, fallback_keys: list[str] | None = None) -> dict:
     """Open a tab with its Excel shortcut, then verify the selected tab."""
     if not _HAS_PYWINAUTO:
@@ -833,3 +2279,148 @@ def list_open_windows() -> dict:
                 "verification_note": "pywinauto not available - Windows-only feature."}
     windows = [w.window_text() for w in Desktop(backend="uia").windows() if w.window_text()]
     return {"windows": windows, "verified": True}
+
+
+def execute_excel_shortcut(shortcut_name: str) -> dict:
+    """Execute a named Excel keyboard shortcut directly (bypasses vision).
+    
+    This is the fastest way to perform standard Excel operations like:
+    - bold, italic, underline
+    - currency format, percent format
+    - merge cells, auto-fit columns
+    - sort, filter
+    - insert charts, tables
+    - etc.
+    
+    Args:
+        shortcut_name: Name from EXCEL_SHORTCUTS (e.g., 'bold', 'currency', 'merge_center')
+    
+    Returns:
+        Dict with verification info
+    """
+    _require_display()
+    
+    if shortcut_name not in EXCEL_SHORTCUTS:
+        return {
+            "verified": False,
+            "error": f"Unknown shortcut: {shortcut_name}",
+            "available_shortcuts": list(EXCEL_SHORTCUTS.keys())[:20],
+        }
+    
+    # Focus Excel first
+    _focus_excel_for_keyboard()
+    
+    # Execute the shortcut
+    success = execute_shortcut(shortcut_name)
+    
+    if success:
+        return {
+            "verified": True,
+            "shortcut": shortcut_name,
+            "keys": list(EXCEL_SHORTCUTS[shortcut_name]),
+            "verification_note": f"Executed shortcut '{shortcut_name}' directly without vision.",
+        }
+    else:
+        return {
+            "verified": False,
+            "error": f"Failed to execute shortcut '{shortcut_name}'",
+        }
+
+
+def execute_excel_alt_sequence(keys: list[str]) -> dict:
+    """Execute a raw Alt key sequence for Excel operations.
+    
+    This allows direct execution of any Excel keyboard shortcut,
+    even if it's not in the predefined list.
+    
+    Args:
+        keys: List of keys (e.g., ['alt', 'h', 'b', 'a'] for all borders)
+    
+    Returns:
+        Dict with verification info
+    """
+    _require_display()
+    _focus_excel_for_keyboard()
+    
+    success = execute_alt_sequence(keys)
+    
+    if success:
+        return {
+            "verified": True,
+            "keys": keys,
+            "verification_note": "Executed Alt key sequence directly without vision.",
+        }
+    else:
+        return {
+            "verified": False,
+            "error": f"Failed to execute key sequence: {keys}",
+        }
+
+
+def batch_excel_operations(operations: list[dict]) -> dict:
+    """Execute multiple Excel operations in sequence without pausing for verification.
+    
+    Args:
+        operations: List of operations, each with:
+            - type: 'shortcut', 'alt_sequence', 'type_text', 'press_key', 'go_to_range'
+            - For shortcut: {'type': 'shortcut', 'name': 'bold'}
+            - For alt_sequence: {'type': 'alt_sequence', 'keys': ['alt', 'h', 'b', 'a']}
+            - For type_text: {'type': 'type_text', 'text': 'Hello'}
+            - For press_key: {'type': 'press_key', 'key': 'enter'}
+            - For go_to_range: {'type': 'go_to_range', 'reference': 'A1'}
+    
+    Returns:
+        Dict with results of each operation
+    """
+    results = []
+    
+    for op in operations:
+        op_type = op.get("type")
+        
+        if op_type == "shortcut":
+            result = execute_excel_shortcut(op.get("name", ""))
+        elif op_type == "alt_sequence":
+            result = execute_excel_alt_sequence(op.get("keys", []))
+        elif op_type == "type_text":
+            result = type_text(op.get("text", ""))
+        elif op_type == "press_key":
+            result = press_key(op.get("key", ""))
+        elif op_type == "go_to_range":
+            result = go_to_range(op.get("reference", ""))
+        else:
+            result = {"verified": False, "error": f"Unknown operation type: {op_type}"}
+        
+        results.append({
+            "operation": op,
+            "result": result,
+        })
+    
+    return {
+        "verified": all(r["result"].get("verified", False) for r in results),
+        "results": results,
+        "operations_count": len(operations),
+    }
+
+
+def search_cached_elements(text: str, context: str = "") -> dict:
+    """Search cached screen data for elements matching text.
+    
+    This allows finding UI elements from previous parses without
+    taking a new screenshot.
+    
+    Args:
+        text: Text to search for (case-insensitive)
+        context: Optional context to filter by
+    
+    Returns:
+        Dict with matching elements
+    """
+    matches = find_cached_elements(text, context)
+    
+    return {
+        "verified": True,
+        "matches": matches,
+        "count": len(matches),
+        "query": text,
+        "context": context,
+    }

@@ -36,7 +36,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 MAX_STEPS_PER_TASK = int(_local_agent_setting("MAX_STEPS_PER_TASK", "60"))
 MAX_RETRIES_PER_ACTION = int(_local_agent_setting("MAX_RETRIES_PER_ACTION", "2"))
 SKILL_TIMEOUT_SECONDS = int(_local_agent_setting("SKILL_TIMEOUT_SECONDS", "60"))
-MAX_VISUAL_ACTIONS_PER_TASK = int(os.getenv("MAX_VISUAL_ACTIONS_PER_TASK", 40))
+MAX_VISUAL_ACTIONS_PER_TASK = int(os.getenv("MAX_VISUAL_ACTIONS_PER_TASK", 80))
 
 ENABLE_CODEGEN_LAYER = _local_agent_setting("ENABLE_CODEGEN_LAYER", "true").lower() == "true"
 ENABLE_VISUAL_FALLBACK = _local_agent_setting("ENABLE_VISUAL_FALLBACK", "false").lower() == "true"
@@ -65,13 +65,24 @@ if OMNIPARSER_ONLY_MODE:
     VISUAL_ONLY_MODE = True
     ENABLE_CODEGEN_LAYER = False
     ENABLE_VISUAL_FALLBACK = True
-    HYBRID_VISIBLE_MODE = False
-    ENABLE_VISUAL_CHECKPOINTS = False
-    ENABLE_VISIBLE_RANGE_NAVIGATION = False
+    HYBRID_VISIBLE_MODE = True
+    ENABLE_VISUAL_CHECKPOINTS = True
+    ENABLE_VISIBLE_RANGE_NAVIGATION = True
     # This profile is an explicit opt-in to the less reliable visual path.
     # It permits bounded visual table/formula/chart helpers rather than
     # rejecting every structured workbook request before OmniParser can help.
     ALLOW_VISUAL_STRUCTURED_EDITS = True
+
+# Local OmniParser mode: when true, loads YOLOv9 + Florence-2 models directly
+# in-process instead of calling an external HTTP service. Requires PyTorch +
+# transformers + easyocr. Model weights are cached to ~/.cache/omniparser/.
+# Set OMNIPARSER_LOCAL_MODE=true and leave OMNIPARSER_URL empty.
+OMNIPARSER_LOCAL_MODE = _local_agent_setting("OMNIPARSER_LOCAL_MODE", "false").lower() == "true"
+# Disable Florence-2 captioning for speed. When false, only YOLOv9 + OCR are
+# used (much faster, ~1-2s per parse). When true (default), unlabelled icons
+# also get AI-generated captions (~3-5s additional). Set to false on Windows
+# if you don't need icon descriptions and want snappy visual responses.
+ENABLE_FLORENCE_CAPTION = _local_agent_setting("ENABLE_FLORENCE_CAPTION", "true").lower() == "true"
 
 GEMINI_MODEL_CHAIN = [
     m.strip() for m in os.getenv(
@@ -81,6 +92,16 @@ GEMINI_MODEL_CHAIN = [
 ]
 GEMINI_RATE_LIMIT_WAIT_SECONDS = int(os.getenv("GEMINI_RATE_LIMIT_WAIT_SECONDS", "0"))
 GEMINI_TIMEOUT_SECONDS = int(os.getenv("GEMINI_TIMEOUT_SECONDS", "60"))
+
+# OpenRouter settings
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL_CHAIN = [
+    m.strip() for m in os.getenv(
+        "OPENROUTER_MODEL_CHAIN",
+        "openrouter/free"
+    ).split(",") if m.strip()
+]
+OPENROUTER_TIMEOUT_SECONDS = int(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "120"))
 ALLOW_NO_AUTH = os.getenv("ALLOW_NO_AUTH", "false").lower() == "true"
 
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]

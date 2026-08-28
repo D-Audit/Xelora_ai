@@ -10,10 +10,30 @@ import config
 
 
 def parse_image(image) -> dict:
+    """Parse a PIL Image into structured UI elements.
+
+    Routing:
+    - OMNIPARSER_LOCAL_MODE=true  →  run YOLOv9 + Florence-2 in-process
+    - OMNIPARSER_URL set          →  call external HTTP service
+    - neither configured          →  raise RuntimeError
+    """
+    if config.OMNIPARSER_LOCAL_MODE:
+        return _parse_local(image)
+    return _parse_http(image)
+
+
+def _parse_local(image) -> dict:
+    """Run OmniParser locally — no external service needed."""
+    from vision.local_omniparser import parse_image_local
+    return parse_image_local(image)
+
+
+def _parse_http(image) -> dict:
+    """Call the external OmniParser HTTP service."""
     if not config.OMNIPARSER_URL:
         raise RuntimeError(
             "OmniParser is not configured. Set OMNIPARSER_URL to a separately running "
-            "parser service only when visual recognition is needed."
+            "parser service, or set OMNIPARSER_LOCAL_MODE=true to run locally."
         )
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
@@ -29,7 +49,8 @@ def parse_image(image) -> dict:
         raise RuntimeError(
             "The optional OmniParser service is not running at "
             f"{config.OMNIPARSER_URL}. Excel is still available, but visual element "
-            "recognition cannot be used. Start the parser service or use a supported Excel shortcut."
+            "recognition cannot be used. Start the parser service or set "
+            "OMNIPARSER_LOCAL_MODE=true for local inference."
         ) from exc
     except requests.Timeout as exc:
         raise RuntimeError(
@@ -70,6 +91,7 @@ def parse_image(image) -> dict:
             continue
         if not all(math.isfinite(value) for value in (x1, y1, x2, y2)):
             continue
+        # Detect normalized vs pixel coordinates
         if max(abs(x1), abs(y1), abs(x2), abs(y2)) <= 1.0:
             x1, x2, y1, y2 = x1 * width, x2 * width, y1 * height, y2 * height
         x1, x2 = sorted((max(0.0, min(x1, width)), max(0.0, min(x2, width))))

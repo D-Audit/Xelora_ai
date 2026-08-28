@@ -11,6 +11,14 @@ psycopg2-binary
 alembic
 requests
 
+# OmniParser local mode (OMNIPARSER_LOCAL_MODE=true)
+torch
+torchvision
+transformers
+huggingface_hub
+easyocr
+pillow
+
 # Visual/UI fallback layer (Windows required for real desktop control)
 pyautogui
 pywinauto
@@ -50,3 +58,5 @@ email-validator
 python-multipart
 passlib[bcrypt]
 python-jose[cryptography]
+einops
+timm

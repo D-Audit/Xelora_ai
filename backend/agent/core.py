@@ -18,12 +18,18 @@ from codegen.executor import run_generated_code
 from agent import providers
 from agent.prompts import build_system_prompt
 
-VISUAL_TOOL_NAMES = {"take_screenshot", "parse_screen", "click", "double_click", "type_text", "press_key", "hotkey", "scroll", "activate_ribbon_tab", "go_to_range", "paste_table", "fill_formula_down", "format_currency", "format_bold", "autofit_columns", "create_clustered_column_chart"}
+VISUAL_TOOL_NAMES = {"take_screenshot", "parse_screen", "click", "double_click", "type_text", "press_key", "hotkey", "scroll", "activate_ribbon_tab", "go_to_range", "paste_table", "fill_formula_down", "format_currency", "format_bold", "autofit_columns", "create_clustered_column_chart", "create_pie_chart", "execute_excel_shortcut", "batch_excel_operations", "search_cached_elements", "find_and_click", "click_ribbon_tab", "click_button", "rename_sheet", "go_to_sheet", "navigate_to_cell_on_sheet", "verify_task_completion", "get_active_sheet_name", "verify_current_sheet", "get_sheet_info", "get_cell_value", "apply_cell_style", "set_header_style", "apply_dashboard_theme"}
 READ_ONLY_TOOL_NAMES = {"take_screenshot", "parse_screen"}
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 SKILL_TIMEOUT_SECONDS = config.SKILL_TIMEOUT_SECONDS
+
+try:
+    from vision.ui_control import _get_agent_excel_window
+    _HAS_WINDOW_SAFETY = True
+except ImportError:
+    _HAS_WINDOW_SAFETY = False
 
 
 def _run_skill_with_timeout(tool_name: str, tool_input: dict, timeout: int = SKILL_TIMEOUT_SECONDS):
@@ -134,6 +140,7 @@ class AgentTask:
                 is_plan_confirmation or _is_direct_action_instruction(correction)
             ):
                 self.awaiting_approval = False
+                self.defer_excel_until_approval = False
             if is_plan_acknowledgement:
                 # "Continue" is a common conversational acknowledgement of a
                 # proposed plan, not a new Excel request.  Treating it as a
@@ -200,6 +207,10 @@ class AgentTask:
             safe_message = message.encode(encoding, errors="backslashreplace").decode(encoding)
             print(safe_message)
 
+    def log_rate_limit(self, model: str):
+        """Log a rate limit hit for a model."""
+        self.log_step(f"OpenRouter rate limited: {model}")
+
 
 def _is_explicit_approval(message: str) -> bool:
     normalized = " ".join(message.lower().strip().split())
@@ -253,7 +264,7 @@ def _is_direct_action_instruction(message: str) -> bool:
         "click ", "double click ", "open ", "close ", "insert ", "add ",
         "delete ", "remove ", "update ", "change ", "edit ", "write ",
         "create ", "format ", "sort ", "filter ", "run ", "apply ",
-        "select ", "type ", "press ", "go to ", "make ",
+        "select ", "type ", "press ", "go to ", "make ", "build ",
     ))
 
 
@@ -290,7 +301,8 @@ def _order_tool_calls_by_sheet_dependency(tool_calls):
     targeted_sheets = set()
     for index, tool_call in enumerate(tool_calls):
         try:
-            tool_name = tool_call.name
+            # Handle both object (Gemini/Claude) and dict (OpenRouter) formats
+            tool_name = tool_call.name if hasattr(tool_call, 'name') else tool_call.get('name', '')
             tool_input = providers.tool_input(tool_call)
         except Exception:
             tool_name, tool_input = "", {}
@@ -385,13 +397,22 @@ def _visual_only_requires_structured_workbook_automation(instruction: str) -> bo
 def _finish_visual_only_routing_block(task: AgentTask) -> AgentTask:
     """Finish without sending any input when visual-only mode is insufficient."""
     task.is_done = True
-    task.final_response = (
-        "INCOMPLETE: This request needs structured Excel automation (such as worksheets, "
-        "formulas, charts, or a dashboard), but VISUAL_ONLY_MODE is enabled. "
-        "No workbook changes were sent because keyboard-only automation cannot safely "
-        "create and verify this work. Set VISUAL_ONLY_MODE=false and keep "
-        "ENABLE_CODEGEN_LAYER=true, restart the backend, then retry the same task."
-    )
+    if config.OMNIPARSER_ONLY_MODE:
+        task.final_response = (
+            "INCOMPLETE: This request needs structured Excel automation (such as worksheets, "
+            "formulas, charts, or a dashboard) that cannot be reliably performed through "
+            "keyboard/mouse automation alone. OmniParser-only mode uses visual UI tools and "
+            "cannot create complex workbook structures. Try a simpler request, or switch to "
+            "hybrid mode (OMNIPARSER_ONLY_MODE=false) for API-backed automation."
+        )
+    else:
+        task.final_response = (
+            "INCOMPLETE: This request needs structured Excel automation (such as worksheets, "
+            "formulas, charts, or a dashboard), but VISUAL_ONLY_MODE is enabled. "
+            "No workbook changes were sent because keyboard-only automation cannot safely "
+            "create and verify this work. Set VISUAL_ONLY_MODE=false and keep "
+            "ENABLE_CODEGEN_LAYER=true, restart the backend, then retry the same task."
+        )
     task.structured_steps.append({
         "type": "routing",
         "mode": "visual_only_blocked",
@@ -406,6 +427,17 @@ def _finish_visual_only_routing_block(task: AgentTask) -> AgentTask:
 def dispatch_action(tool_name: str, tool_input: dict, workbook_name: str | None = None):
     if config.VISUAL_ONLY_MODE:
         if tool_name not in VISUAL_TOOL_NAMES:
+            # In OmniParser-only mode, suggest a visual equivalent when possible
+            if config.OMNIPARSER_ONLY_MODE:
+                visual_hint = _suggest_visual_alternative(tool_name, tool_input)
+                return {
+                    "error": (
+                        f"Tool '{tool_name}' is not available in OmniParser-only mode. "
+                        f"{visual_hint}"
+                    ),
+                    "verified": False,
+                    "status": "function_not_available_in_visual_mode",
+                }, "blocked", None
             return {"error": "VISUAL_ONLY_MODE blocks Excel API and code-generation tools.", "verified": False}, "blocked", None
         if tool_name == "hotkey":
             keys = [str(key).lower() for key in tool_input.get("keys", [])]
@@ -433,6 +465,16 @@ def dispatch_action(tool_name: str, tool_input: dict, workbook_name: str | None 
 
     if tool_name == "run_excel_code":
         if not config.ENABLE_CODEGEN_LAYER:
+            if config.OMNIPARSER_ONLY_MODE:
+                return {
+                    "error": (
+                        "Code generation is disabled in OmniParser-only mode. "
+                        "Use visual UI tools (go_to_range, type_text, paste_table, hotkey) "
+                        "to perform this operation through Excel's interface."
+                    ),
+                    "verified": False,
+                    "status": "codegen_disabled_visual_mode",
+                }, "blocked", None
             return {"error": "The code-generation layer is disabled by configuration.", "verified": False}, "blocked", None
         code = tool_input.get("code", "")
         result = run_generated_code(
@@ -462,6 +504,30 @@ def dispatch_action(tool_name: str, tool_input: dict, workbook_name: str | None 
         return func(**tool_input), "visual", None
 
     return {"error": f"Unknown tool '{tool_name}'", "verified": False}, "unknown", None
+
+
+def _suggest_visual_alternative(tool_name: str, tool_input: dict) -> str:
+    """Suggest a visual UI alternative when a skill/API tool is unavailable."""
+    alternatives = {
+        "create_sheet": "Use hotkey to open Insert menu, or use go_to_range to navigate and type a sheet name.",
+        "write_cell": "Use go_to_range to navigate to the cell, then type_text to enter the value.",
+        "write_table": "Use go_to_range to navigate to the start cell, then paste_table with headers and rows.",
+        "insert_formula": "Use go_to_range to navigate to the cell, type_text with the formula, then press_key('enter'). Use fill_formula_down for columns.",
+        "apply_formatting": "Use go_to_range to select the range, then hotkey for formatting (Ctrl+B for bold, Ctrl+Shift+4 for currency).",
+        "read_range": "Use parse_screen('window') to see the current content, or use take_screenshot.",
+        "inspect_workbook": "Use parse_screen('window') to observe the current workbook state.",
+        "get_excel_version": "Use parse_screen('ribbon') to see Excel version info in the title bar.",
+        "sort_range": "Use hotkey with Excel sort shortcuts (Alt+A for Data tab).",
+        "create_pivot_table": "Use hotkey Alt+N for Insert tab, then navigate pivot table creation via keyboard.",
+        "create_chart": "Use create_clustered_column_chart visual tool for basic charts.",
+        "freeze_panes": "Use hotkey Alt+W+R+F for View > Freeze Panes.",
+        "auto_fit_columns": "Use autofit_columns visual tool.",
+        "conditional_formatting": "Use hotkey Alt+H+L for Home > Conditional Formatting.",
+        "save_workbook": "Use hotkey Ctrl+S.",
+        "export_to_pdf": "Use hotkey Ctrl+P for Print, then navigate to PDF export.",
+        "open_workbook": "Use hotkey Ctrl+O to open a file.",
+    }
+    return alternatives.get(tool_name, "Try using go_to_range, type_text, hotkey, or parse_screen to achieve this through Excel's UI.")
 
 
 def _log_action_to_db(db, task_id, tool_name, tool_input, execution_layer, generated_code, result, status):
@@ -1094,8 +1160,62 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             )
             break
 
+        # Progress tracking: detect if agent is stuck
+        import time
+        current_time = time.time()
+        if not hasattr(task, '_last_progress_time'):
+            task._last_progress_time = current_time
+            task._last_step_count = len(task.structured_steps)
+            task._stall_count = 0
+        
+        # Check if progress has been made since last check
+        steps_since_last = len(task.structured_steps) - task._last_step_count
+        time_since_last = current_time - task._last_progress_time
+        
+        if steps_since_last == 0 and time_since_last > 30:
+            # No progress in 30 seconds
+            task._stall_count += 1
+            task.log_step(f"⚠️ No progress for {int(time_since_last)}s (stall #{task._stall_count})")
+            
+            if task._stall_count >= 3:
+                # Stalled 3 times - terminate
+                task.log_step("🛑 Agent terminated: stuck in a loop with no progress.")
+                task.is_done = True
+                task.final_response = "INCOMPLETE: Agent terminated due to lack of progress. The task may require manual intervention."
+                task.chat_transcript.append({"role": "assistant", "text": task.final_response})
+                break
+            
+            # Force the model to continue with a reminder
+            task.messages.append({
+                "role": "user",
+                "content": (
+                    f"You have not made progress for {int(time_since_last)} seconds. "
+                    "You MUST call an actual Excel tool to make changes. "
+                    "Do not just describe actions - call the tools to perform them. "
+                    "If you are stuck, try: execute_excel_shortcut, go_to_range, or type_text."
+                ),
+            })
+            task._last_progress_time = current_time
+            continue
+        
+        if steps_since_last > 0:
+            # Progress was made - reset stall counter
+            task._stall_count = 0
+            task._last_progress_time = current_time
+            task._last_step_count = len(task.structured_steps)
+
         if config.AI_PROVIDER == "claude":
             tool_calls, text_blocks, stop_reason = providers.call_claude(task, system_prompt)
+        elif config.AI_PROVIDER == "openrouter":
+            tool_calls, text_blocks, stop_reason = providers.call_openrouter(task, system_prompt)
+            # Store assistant message with tool_calls for OpenRouter format
+            assistant_content = {"tool_calls": tool_calls} if tool_calls else {}
+            if text_blocks:
+                assistant_content["text"] = " ".join(text_blocks)
+            task.messages.append({
+                "role": "assistant",
+                "content": assistant_content
+            })
         else:
             tool_calls, text_blocks, stop_reason = providers.call_gemini(task, system_prompt)
 
@@ -1114,9 +1234,32 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 task.chat_transcript.append({"role": "assistant", "text": task.final_response})
                 break
             has_attempted_action = any(step.get("type") == "action" for step in task.structured_steps)
+            
+            # Check if the model claims to have done more actions than it actually did
+            text_response = " ".join(text_blocks).lower() if text_blocks else ""
+            claims_actions = any(phrase in text_response for phrase in [
+                "i have entered", "i have typed", "i have filled", "i have created",
+                "i have added", "i have formatted", "the formula", "the table"
+            ])
+            
+            if claims_actions and has_attempted_action:
+                # Model claims actions but didn't call tools - force it to continue
+                task.log_step("Model claimed actions without tool calls. Forcing continuation.")
+                task.messages.append({
+                    "role": "user",
+                    "content": (
+                        "You described actions but did not call the required Excel tools. "
+                        "You MUST call the actual tools to make changes. "
+                        "Use execute_excel_shortcut for formatting, fill_formula_down for formulas, "
+                        "go_to_range for navigation. Do not just describe what you would do - "
+                        "actually call the tools to do it."
+                    ),
+                })
+                continue
+            
             if not has_attempted_action and not task.text_only_action_retry_used:
                 task.text_only_action_retry_used = True
-                task.log_step("â†©ï¸ The model replied without using Excel. Requesting an inspection before completion.")
+                task.log_step("The model replied without using Excel. Requesting an inspection before completion.")
                 task.messages.append({
                     "role": "user",
                     "content": (
@@ -1202,7 +1345,8 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             if task.is_paused:
                 task.log_step("Task paused before the next workbook action.")
                 break
-            tool_name = tool_call.name
+            # Handle both object (Gemini/Claude) and dict (OpenRouter) formats
+            tool_name = tool_call.name if hasattr(tool_call, 'name') else tool_call.get('name', '')
             tool_input = providers.tool_input(tool_call)
             action_signature = json.dumps([tool_name, tool_input], sort_keys=True, default=str)
 
@@ -1269,11 +1413,35 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             task.log_step(f"⏳ Running: {tool_name} {tool_input}")
 
             try:
+                from vision.ui_control import handle_blocking_dialogs, reset_to_neutral_state, _get_agent_excel_window
+                try:
+                    win = _get_agent_excel_window()
+                    if win and win.handle:
+                        pre_check = handle_blocking_dialogs(win.handle)
+                        if pre_check.get("status") != "clean":
+                            task.log_step(f"🛡️ Pre-action interceptor: {pre_check.get('status')} — {pre_check.get('title', '')}")
+                            reset_to_neutral_state(win.handle)
+                except Exception:
+                    pass
+
                 result, execution_layer, generated_code = dispatch_action(
                     tool_name, tool_input, workbook_name=task.workbook_name
                 )
                 status = "success"
                 is_failure = isinstance(result, dict) and result.get("verified") is False
+
+                if is_failure and _HAS_WINDOW_SAFETY:
+                    try:
+                        win = _get_agent_excel_window()
+                        if win and win.handle:
+                            post_check = handle_blocking_dialogs(win.handle)
+                            if post_check.get("status") in ("error_dismissed", "prompt_cancelled"):
+                                task.log_step(f"🛡️ Post-action interceptor dismissed: {post_check.get('title', '')}")
+                                reset_to_neutral_state(win.handle)
+                                result["interceptor_note"] = f"Dialog was blocking: {post_check.get('title', '')}"
+                    except Exception:
+                        pass
+
             except Exception as e:
                 result = {"error": str(e), "verified": False}
                 execution_layer, generated_code = "error", None
@@ -1367,5 +1535,21 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 break
 
         steps_taken += 1
+
+    # Post-task verification using vision
+    if task.is_done and config.VISUAL_ONLY_MODE:
+        try:
+            from vision.task_verifier import verify_excel_task
+            task.log_step("🔍 Running post-task verification...")
+            verification = verify_excel_task(task.instruction)
+            
+            if verification.get("overall_status") == "completed":
+                task.log_step("✅ Verification passed - task completed successfully.")
+            else:
+                retry_suggestion = verification.get("retry_suggestion", "Unknown issue")
+                task.log_step(f"⚠️ Verification found issues: {retry_suggestion}")
+                # Don't mark as failed - just log the issues
+        except Exception as e:
+            task.log_step(f"⚠️ Verification skipped: {e}")
 
     return task

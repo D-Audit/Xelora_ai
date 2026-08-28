@@ -37,9 +37,39 @@ CODEGEN_TOOL_CLAUDE = {
 
 VISION_TOOLS_CLAUDE = [
     {
+        "name": "find_and_click",
+        "description": "Find and click a UI element by name. Uses UIA first (fast, no screenshot), then falls back to OmniParser. Use for ribbon tabs, buttons, menu items.",
+        "input_schema": {"type": "object", "properties": {"name": {"type": "string", "description": "Name of the element to click (e.g., 'Home', 'Insert', 'Bold')"}, "control_type": {"type": "string", "description": "Optional: TabItem, Button, MenuItem, etc."}, "double": {"type": "boolean", "description": "If true, double-click"}}, "required": ["name"]},
+    },
+    {
+        "name": "click_ribbon_tab",
+        "description": "Click a ribbon tab by name. Uses UIA first (fast, no screenshot), then falls back to OmniParser.",
+        "input_schema": {"type": "object", "properties": {"tab_name": {"type": "string", "description": "Name of the tab (e.g., 'Home', 'Insert', 'Page Layout', 'Data')"}}, "required": ["tab_name"]},
+    },
+    {
+        "name": "click_button",
+        "description": "Click a button by name. Uses UIA first (fast, no screenshot), then falls back to OmniParser.",
+        "input_schema": {"type": "object", "properties": {"button_name": {"type": "string", "description": "Name of the button"}}, "required": ["button_name"]},
+    },
+    {
+        "name": "execute_excel_shortcut",
+        "description": "Execute a named Excel keyboard shortcut DIRECTLY (bypasses vision). Use for standard operations: bold, italic, currency, merge, auto-fit, sort, filter, insert chart/table, etc. THIS IS THE FASTEST WAY to perform standard Excel operations.",
+        "input_schema": {"type": "object", "properties": {"shortcut_name": {"type": "string", "description": "Shortcut name: bold, italic, underline, currency, percent, comma, center_align, left_align, right_align, all_borders, no_borders, merge_center, unmerge, auto_fit_column, auto_fit_row, sort_ascending, sort_descending, filter, insert_table, insert_column_chart, insert_pie_chart, freeze_panes, copy, cut, paste, paste_values, format_painter, etc."}}, "required": ["shortcut_name"]},
+    },
+    {
+        "name": "batch_excel_operations",
+        "description": "Execute multiple Excel operations in sequence without pausing for verification. Use for applying multiple formatting operations, entering data with formulas, etc.",
+        "input_schema": {"type": "object", "properties": {"operations": {"type": "array", "items": {"type": "object", "properties": {"type": {"type": "string", "enum": ["shortcut", "alt_sequence", "type_text", "press_key", "go_to_range", "find_and_click"]}, "name": {"type": "string"}, "keys": {"type": "array", "items": {"type": "string"}}, "text": {"type": "string"}, "key": {"type": "string"}, "reference": {"type": "string"}}, "required": ["type"]}}}, "required": ["operations"]},
+    },
+    {
+        "name": "search_cached_elements",
+        "description": "Search previously cached screen data for UI elements matching text (no new screenshot needed). Use this before parse_screen to check if the element was already found.",
+        "input_schema": {"type": "object", "properties": {"text": {"type": "string", "description": "Text to search for (case-insensitive)"}, "context": {"type": "string", "description": "Optional context filter: ribbon, popup, window"}}, "required": ["text"]},
+    },
+    {
         "name": "parse_screen",
-        "description": "Focuses Excel and asks OmniParser to identify UI elements. Use zone='ribbon' for Excel tabs/commands, zone='popup' for a dialog, and zone='window' only when neither narrow zone applies. Observe before acting; use returned element centers for clicks.",
-        "input_schema": {"type": "object", "properties": {"zone": {"type": "string", "description": "One of: ribbon, popup, window."}}},
+        "description": "Focuses Excel and asks OmniParser to identify UI elements. USE SPARINGLY - only for new unknown UI elements not found by UIA. Most elements can be found faster via UIA.",
+        "input_schema": {"type": "object", "properties": {"zone": {"type": "string", "description": "One of: ribbon, popup, window."}, "use_cache": {"type": "boolean", "description": "If True (default), check cache before taking new screenshot"}}},
     },
     {
         "name": "click", "description": "Clicks the center of an element returned by the most recent parse_screen call. Never invent coordinates.",
@@ -75,6 +105,54 @@ VISION_TOOLS_CLAUDE = [
     {"name": "autofit_columns", "description": "AutoFits the columns containing a valid Excel range.", "input_schema": {"type": "object", "properties": {"reference": {"type": "string"}}, "required": ["reference"]}},
     {"name": "create_clustered_column_chart", "description": "Creates a clustered column chart from a prepared two-column source range with headers.", "input_schema": {"type": "object", "properties": {"reference": {"type": "string"}}, "required": ["reference"]}},
     {
+        "name": "rename_sheet", "description": "Rename an existing worksheet tab. Double-clicks the tab, selects all, types new name, and presses Enter. Use this instead of visual double-clicking which can fail due to stale screens.",
+        "input_schema": {"type": "object", "properties": {"old_name": {"type": "string", "description": "Current name of the sheet tab"}, "new_name": {"type": "string", "description": "New name for the sheet"}}, "required": ["old_name", "new_name"]},
+    },
+    {
+        "name": "go_to_sheet", "description": "Switch to a worksheet by clicking its tab via pywinauto. More reliable than using Go To dialog with sheet prefix. Use this before navigating to cells on a different sheet.",
+        "input_schema": {"type": "object", "properties": {"sheet_name": {"type": "string", "description": "Name of the sheet to switch to"}}, "required": ["sheet_name"]},
+    },
+    {
+        "name": "navigate_to_cell_on_sheet", "description": "Navigate to a specific cell on a specific sheet. First switches to the sheet via pywinauto, then uses Go To to select the cell. Avoids cross-sheet Go To failures.",
+        "input_schema": {"type": "object", "properties": {"sheet_name": {"type": "string", "description": "Name of the sheet"}, "cell": {"type": "string", "description": "Cell reference (default: A1)"}}, "required": ["sheet_name"]},
+    },
+    {
+        "name": "create_pie_chart", "description": "Create a pie chart from a two-column source range with headers. Use for revenue share, distribution, etc.",
+        "input_schema": {"type": "object", "properties": {"reference": {"type": "string", "description": "Two-column range with headers (e.g., 'A10:B12')"}}, "required": ["reference"]},
+    },
+    {
+        "name": "verify_task_completion", "description": "Cross-check that all expected deliverables (sheets, data) were created. Call this at the end of a task to verify completeness.",
+        "input_schema": {"type": "object", "properties": {"expected_sheets": {"type": "array", "items": {"type": "string"}, "description": "List of sheet names that should exist"}}, "required": []},
+    },
+    {
+        "name": "get_active_sheet_name", "description": "Get the name of the currently active/selected sheet tab. Use to verify you're on the right sheet before pasting data.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "verify_current_sheet", "description": "Verify that the active sheet matches the expected sheet. Call AFTER go_to_sheet and BEFORE paste_table to ensure data goes to the right sheet.",
+        "input_schema": {"type": "object", "properties": {"expected_sheet": {"type": "string", "description": "Name of the sheet that should be active"}}, "required": ["expected_sheet"]},
+    },
+    {
+        "name": "get_sheet_info", "description": "Read the structure and content of a sheet. Returns headers, data range, row count, column count, and sample values. Use this to understand what data exists before making changes.",
+        "input_schema": {"type": "object", "properties": {"sheet_name": {"type": "string", "description": "Name of the sheet to read. If omitted, reads the active sheet."}}, "required": []},
+    },
+    {
+        "name": "get_cell_value", "description": "Read the value or formula of a specific cell. Use this to verify data before referencing it in formulas.",
+        "input_schema": {"type": "object", "properties": {"cell": {"type": "string", "description": "Cell reference like 'A1', 'B3'"}, "sheet_name": {"type": "string", "description": "Optional sheet name. If omitted, reads from active sheet."}}, "required": ["cell"]},
+    },
+    {
+        "name": "apply_cell_style", "description": "Apply styling to a cell or range: bold, italic, font size, colors, number format, alignment.",
+        "input_schema": {"type": "object", "properties": {"range_ref": {"type": "string", "description": "Cell or range reference like 'A1:B5'"}, "bold": {"type": "boolean"}, "italic": {"type": "boolean"}, "font_size": {"type": "integer"}, "number_format": {"type": "string", "description": "currency, percent, comma, or custom Excel format"}, "align": {"type": "string", "description": "left, center, or right"}}, "required": ["range_ref"]},
+    },
+    {
+        "name": "set_header_style", "description": "Style a header row with professional formatting: bold, background color, white text, font size.",
+        "input_schema": {"type": "object", "properties": {"range_ref": {"type": "string", "description": "Header range like 'A1:E1'"}, "font_size": {"type": "integer", "description": "Font size (default: 11)"}}, "required": ["range_ref"]},
+    },
+    {
+        "name": "apply_dashboard_theme", "description": "Apply a consistent professional theme to the current sheet: headers, alternating row colors, borders, auto-fit columns.",
+        "input_schema": {"type": "object", "properties": {"theme": {"type": "string", "description": "Theme name: professional, modern, colorful, minimal"}}, "required": []},
+    },
+    {
         "name": "scroll", "description": "Scrolls the current screen. Positive clicks scroll up and negative clicks scroll down.",
         "input_schema": {"type": "object", "properties": {"clicks": {"type": "integer"}}, "required": ["clicks"]},
     },
@@ -82,8 +160,12 @@ VISION_TOOLS_CLAUDE = [
 
 
 def _available_vision_tools():
-    """Omit screen recognition when the local OmniParser service is disabled."""
-    if config.OMNIPARSER_URL:
+    """Include parse_screen only when an OmniParser backend is reachable.
+
+    Either an external HTTP service (OMNIPARSER_URL) or local in-process
+    inference (OMNIPARSER_LOCAL_MODE) satisfies this requirement.
+    """
+    if config.OMNIPARSER_URL or config.OMNIPARSER_LOCAL_MODE:
         return VISION_TOOLS_CLAUDE
     return [tool for tool in VISION_TOOLS_CLAUDE if tool["name"] != "parse_screen"]
 
@@ -238,6 +320,14 @@ def _gemini_tool_config(task):
     # corresponding codegen call instead of allowing another generic skill
     # retry or a fictional text completion.
     if getattr(task, "pending_codegen_fallback", None):
+        if config.OMNIPARSER_ONLY_MODE:
+            # In visual-only mode, force a visual action instead of codegen
+            return {
+                "function_calling_config": {
+                    "mode": "ANY",
+                    "allowed_function_names": ["go_to_range", "type_text", "press_key", "hotkey", "paste_table"],
+                }
+            }
         return {
             "function_calling_config": {
                 "mode": "ANY",
@@ -248,6 +338,40 @@ def _gemini_tool_config(task):
     action_steps = [
         step for step in task.structured_steps if step.get("type") == "action"
     ]
+
+    if config.VISUAL_ONLY_MODE:
+        # Visual-only mode: force visual actions, not API skills
+        available_names = [t["name"] for t in _available_vision_tools()]
+        
+        # Count successful actions
+        successful_actions = [
+            step for step in task.structured_steps
+            if step.get("type") == "action"
+            and step.get("status") == "success"
+            and step.get("result", {}).get("verified") is True
+        ]
+        
+        # Force tool calls until we have enough actions
+        # For a typical task, we need at least 3-5 actions
+        if len(successful_actions) < 3:
+            # Still need more actions - force tool calls
+            allowed_names = [
+                "go_to_range", "type_text", "press_key", "hotkey",
+                "execute_excel_shortcut", "paste_table", "fill_formula_down",
+                "find_and_click", "click_ribbon_tab", "parse_screen",
+                "batch_excel_operations", "format_bold", "format_currency",
+                "autofit_columns"
+            ]
+            return {
+                "function_calling_config": {
+                    "mode": "ANY",
+                    "allowed_function_names": [n for n in allowed_names if n in available_names],
+                }
+            }
+        
+        # Enough actions - let model finish
+        return None
+
     if _is_new_dashboard_build(task) and not task.final_verification_requested:
         created_sheets = _successful_actions(action_steps, "create_sheet")
         written_tables = _successful_actions(action_steps, "write_table")
@@ -377,6 +501,8 @@ def tool_input(tool_call) -> dict:
     """Return a provider-neutral mapping of the tool arguments."""
     if config.AI_PROVIDER == "claude":
         return dict(tool_call.input)
+    elif config.AI_PROVIDER == "openrouter":
+        return openrouter_tool_input(tool_call)
     return gemini_tool_input(tool_call)
 
 
@@ -384,6 +510,9 @@ def submit_tool_result(task, tool_call, result):
     """Append a tool result in the conversation format expected by the active provider."""
     if config.AI_PROVIDER == "claude":
         submit_claude_tool_result(task, tool_call, result)
+    elif config.AI_PROVIDER == "openrouter":
+        tool_call_id = tool_call.get("id", "") if isinstance(tool_call, dict) else getattr(tool_call, "id", "")
+        submit_openrouter_tool_result(task, tool_call_id, result)
     else:
         submit_gemini_tool_result(task, tool_call, result)
 
@@ -712,11 +841,13 @@ def submit_gemini_tool_result(task, tool_call, result):
     # parallel calls, Gemini requires all responses in ONE Content; submitting
     # each response separately makes the unsigned second call look like a new
     # (and invalid) tool turn.
+    # Handle both object (Gemini) and dict (OpenRouter) formats
+    tool_name = tool_call.name if hasattr(tool_call, 'name') else tool_call.get('name', '') if isinstance(tool_call, dict) else ''
     response_record = {
-        "name": tool_call.name,
+        "name": tool_name,
         "response": _json_safe_gemini_value(result),
     }
-    call_id = getattr(tool_call, "id", None)
+    call_id = getattr(tool_call, "id", None) if not isinstance(tool_call, dict) else tool_call.get("id", "")
     if isinstance(call_id, str) and call_id:
         response_record["id"] = call_id
 
@@ -747,3 +878,197 @@ def submit_gemini_tool_result(task, tool_call, result):
 
 def gemini_tool_input(tool_call) -> dict:
     return {k: _clean_gemini_value(v) for k, v in tool_call.args.items()}
+
+
+# =============================================================================
+# OpenRouter Support
+# =============================================================================
+
+def call_openrouter(task, system_prompt: str):
+    """Call OpenRouter API with free models.
+    
+    Supports OpenAI-compatible API format.
+    Free models: openrouter/free, gpt-oss-120b:free, google/gemma-3-27b-it:free
+    """
+    import time
+    import requests
+    
+    api_key = config.OPENROUTER_API_KEY
+    if not api_key:
+        raise ValueError("OPENROUTER_API_KEY is not configured")
+    
+    model_chain = config.OPENROUTER_MODEL_CHAIN  # Already a list from config.py
+    timeout = config.OPENROUTER_TIMEOUT_SECONDS
+    
+    # Debug output
+    import sys
+    print(f"[OpenRouter] API Key: {api_key[:10]}...", file=sys.stderr)
+    print(f"[OpenRouter] Model chain: {model_chain}", file=sys.stderr)
+    print(f"[OpenRouter] Timeout: {timeout}", file=sys.stderr)
+    
+    # Build messages in OpenAI format
+    messages = [{"role": "system", "content": system_prompt}]
+    
+    i = 0
+    while i < len(task.messages):
+        msg = task.messages[i]
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        
+        if role == "assistant" and isinstance(content, dict) and "tool_calls" in content:
+            # Assistant message with tool calls - format for OpenAI
+            tool_calls_list = []
+            for tc in content.get("tool_calls", []):
+                tool_calls_list.append({
+                    "id": tc.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": tc.get("name", ""),
+                        "arguments": json.dumps(tc.get("arguments", {})) if not isinstance(tc.get("arguments", ""), str) else tc.get("arguments", "")
+                    }
+                })
+            messages.append({
+                "role": "assistant",
+                "tool_calls": tool_calls_list,
+                "content": None
+            })
+        elif role == "tool":
+            # Tool result - skip if no preceding assistant tool_calls
+            messages.append({
+                "role": "tool",
+                "tool_call_id": msg.get("tool_call_id", ""),
+                "content": json.dumps(content) if not isinstance(content, str) else content
+            })
+        elif isinstance(content, str):
+            messages.append({"role": role, "content": content})
+        elif isinstance(content, dict):
+            text_parts = []
+            if "text" in content:
+                text_parts.append(content["text"])
+            if text_parts:
+                messages.append({"role": role, "content": " ".join(text_parts)})
+        i += 1
+    
+    # Build tools list for OpenAI-compatible format
+    tools = []
+    vision_tools = _available_vision_tools()
+    for tool in vision_tools:
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["input_schema"]
+            }
+        })
+    
+    # Try each model in the chain
+    models_to_try = model_chain  # Already a list from config.py
+    
+    last_error = None
+    for model in models_to_try:
+        try:
+            # Rate limiting delay for free models (3 seconds between calls)
+            time.sleep(3)
+            
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://xelora.ai",
+                "X-Title": "Xelora Excel Agent"
+            }
+            
+            payload = {
+                "model": model,
+                "messages": messages,
+                "tools": tools if tools else None,
+                "tool_choice": "auto",
+                "max_tokens": 4096,
+                "temperature": 0.7
+            }
+            
+            try:
+                response = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=timeout
+                )
+            except requests.exceptions.Timeout:
+                print(f"[OpenRouter] Timeout with {model} after {timeout}s", file=sys.stderr)
+                task.log_step(f"OpenRouter timeout with {model}")
+                continue
+            except requests.exceptions.ConnectionError as e:
+                print(f"[OpenRouter] Connection error with {model}: {e}", file=sys.stderr)
+                task.log_step(f"OpenRouter connection error with {model}")
+                continue
+            
+            if response.status_code == 429:
+                # Rate limited, try next model
+                task.log_rate_limit(model)
+                continue
+            
+            response.raise_for_status()
+            result = response.json()
+            
+            # Debug output
+            print(f"[OpenRouter] Response status: {response.status_code}", file=sys.stderr)
+            print(f"[OpenRouter] Result keys: {list(result.keys())}", file=sys.stderr)
+            
+            # Parse OpenAI-compatible response
+            choice = result.get("choices", [{}])[0]
+            message = choice.get("message", {})
+            
+            # Debug output
+            print(f"[OpenRouter] Message keys: {list(message.keys())}", file=sys.stderr)
+            print(f"[OpenRouter] Has tool_calls: {'tool_calls' in message}", file=sys.stderr)
+            
+            # Extract tool calls
+            tool_calls = []
+            if "tool_calls" in message:
+                for tc in message["tool_calls"]:
+                    func = tc.get("function", {})
+                    tool_calls.append({
+                        "name": func.get("name", ""),
+                        "arguments": json.loads(func.get("arguments", "{}")),
+                        "id": tc.get("id", "")
+                    })
+            
+            # Extract text
+            text = message.get("content", "")
+            
+            # Debug output
+            print(f"[OpenRouter] Tool calls: {len(tool_calls)}", file=sys.stderr)
+            print(f"[OpenRouter] Text: {text[:100] if text else '(empty)'}", file=sys.stderr)
+            
+            return tool_calls, [text] if text else [], "end_turn" if not tool_calls else "tool_use"
+            
+        except requests.exceptions.RequestException as e:
+            print(f"[OpenRouter] Request error with {model}: {e}", file=sys.stderr)
+            task.log_step(f"OpenRouter error with {model}: {str(e)[:100]}")
+            last_error = e
+            continue
+        except Exception as e:
+            print(f"[OpenRouter] Unexpected error with {model}: {e}", file=sys.stderr)
+            task.log_step(f"OpenRouter unexpected error: {str(e)[:100]}")
+            last_error = e
+            continue
+    
+    if last_error:
+        print(f"[OpenRouter] All models failed. Last error: {last_error}", file=sys.stderr)
+    raise Exception("All OpenRouter models failed")
+
+
+def submit_openrouter_tool_result(task, tool_call_id: str, result: dict):
+    """Submit tool result back to OpenRouter (stored in message history)."""
+    # OpenRouter uses OpenAI format - results are stored as messages
+    task.messages.append({
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "content": json.dumps(result)
+    })
+
+
+def openrouter_tool_input(tool_call: dict) -> dict:
+    """Extract tool input from OpenRouter tool call."""
+    return tool_call.get("arguments", {})
