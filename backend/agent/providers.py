@@ -53,8 +53,13 @@ VISION_TOOLS_CLAUDE = [
     },
     {
         "name": "press_alt",
-        "description": "Send an Alt-key ribbon sequence to reach commands without a direct Ctrl shortcut. Example: press_alt(['h','o','i']) opens Format Cells; press_alt(['n','c']) inserts a chart. Use when execute_excel_shortcut lacks the command. This is more reliable than parse_screen for ribbon commands.",
+        "description": "Send an Alt-key ribbon sequence to reach commands without a direct Ctrl shortcut. Example: press_alt(['h','o','i']) opens Format Cells; press_alt(['n','c']) inserts a chart. Use when execute_excel_shortcut lacks the command. This is more reliable than parse_screen.",
         "input_schema": {"type": "object", "properties": {"keys": {"type": "array", "items": {"type": "string"}, "description": "Keys to send after Alt, e.g. ['h','o','i']"}}, "required": ["keys"]},
+    },
+    {
+        "name": "press_shortcut",
+        "description": "Perform a common Excel operation ENTIRELY via Alt-key ribbon sequences (no mouse, no vision). Use this to complete tasks like format_cells, insert_chart, insert_table, borders_all, fill_color, font_color, bold, merge_center, autofit_columns, wrap_text, number_format, sum_below. More reliable than clicking for these operations.",
+        "input_schema": {"type": "object", "properties": {"shortcut_name": {"type": "string", "description": "One of: format_cells, insert_chart, insert_pivot, insert_table, borders_all, borders_thick, fill_color, font_color, bold, merge_center, autofit_columns, wrap_text, number_format, sum_below"}}, "required": ["shortcut_name"]},
     },
     {
         "name": "click_button",

@@ -480,22 +480,23 @@ def get_sheet_info(sheet_name: str = None) -> dict:
         desktop = Desktop(backend="uia")
         
         # Try to read cell values using clipboard
-        # First, select all data with Ctrl+A
+        # Select the entire used range explicitly: A1 -> Ctrl+Shift+End extends
+        # to the last used cell. This is far more reliable than Ctrl+A (which
+        # toggles between current region and whole sheet and often lands wrong).
         go_to_range("A1")
-        time.sleep(0.1)
+        time.sleep(0.2)
+        hotkey(["ctrl", "shift", "end"])
+        time.sleep(0.3)
         
         # Copy to clipboard to read values
         hotkey(["ctrl", "c"])
-        time.sleep(0.2)
+        time.sleep(0.25)
         
-        import win32clipboard
-        win32clipboard.OpenClipboard()
-        try:
-            data = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
-        except Exception:
-            data = ""
-        finally:
-            win32clipboard.CloseClipboard()
+        data = _get_clipboard_text()
+        
+        # Reset selection so later steps don't inherit a giant range
+        go_to_range("A1")
+        time.sleep(0.1)
         
         if not data:
             return {
@@ -545,18 +546,17 @@ def get_cell_value(cell: str, sheet_name: str = None) -> dict:
         go_to_range(cell)
         time.sleep(0.2)
         
-        # Copy cell value to clipboard
-        hotkey(["ctrl", "c"])
+        # Collapse any inherited multi-cell selection to a single active cell.
+        # Go To a single cell keeps the old multi-range selected with that cell
+        # active; Escape collapses it so Ctrl+C copies only this cell.
+        press_key("escape")
+        time.sleep(0.1)
+        go_to_range(cell)
         time.sleep(0.2)
+        hotkey(["ctrl", "c"])
+        time.sleep(0.25)
         
-        import win32clipboard
-        win32clipboard.OpenClipboard()
-        try:
-            value = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
-        except Exception:
-            value = ""
-        finally:
-            win32clipboard.CloseClipboard()
+        value = _get_clipboard_text()
         
         # Also try to get the formula by pressing F2
         press_key("f2")
@@ -566,18 +566,14 @@ def get_cell_value(cell: str, sheet_name: str = None) -> dict:
         hotkey(["ctrl", "a"])
         time.sleep(0.1)
         hotkey(["ctrl", "c"])
-        time.sleep(0.2)
+        time.sleep(0.25)
         
-        win32clipboard.OpenClipboard()
-        try:
-            formula = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
-        except Exception:
-            formula = ""
-        finally:
-            win32clipboard.CloseClipboard()
+        formula = _get_clipboard_text()
         
-        # Press Escape to exit edit mode
+        # Press Escape to exit edit mode and collapse selection back to this cell
         press_key("escape")
+        time.sleep(0.1)
+        go_to_range(cell)
         time.sleep(0.1)
         
         is_formula = formula.startswith("=") if formula else False
@@ -2060,6 +2056,29 @@ def _set_clipboard_text(text: str) -> None:
     raise RuntimeError("Windows clipboard was busy, so the table could not be pasted safely.")
 
 
+def _get_clipboard_text() -> str:
+    """Read Unicode text from the clipboard, retrying past transient lock errors.
+
+    Excel (and other apps) briefly hold the clipboard, so a single read often
+    raises 'Access is denied'. Retry with backoff like _set_clipboard_text does.
+    """
+    import win32clipboard as _cb
+    last_err: Exception | None = None
+    for _ in range(10):
+        try:
+            _cb.OpenClipboard()
+            try:
+                if _cb.IsClipboardFormatAvailable(_cb.CF_UNICODETEXT):
+                    return _cb.GetClipboardData(_cb.CF_UNICODETEXT) or ""
+                return ""
+            finally:
+                _cb.CloseClipboard()
+        except Exception as exc:  # noqa: BLE001 - transient lock; retry
+            last_err = exc
+            time.sleep(0.05)
+    return ""
+
+
 def fill_formula_down(start_cell: str, end_cell: str, formula: str) -> dict:
     """Enter one formula then use Excel's Fill Down shortcut for one column."""
     if not formula.startswith("="):
@@ -2301,6 +2320,112 @@ def press_alt(keys: list[str]) -> dict:
         "sent": ["alt", *keys],
         "verified": True,
         "verification_note": "Alt sequence sent. If a dialog opened, capture it with parse_screen(zone='popup').",
+    }
+
+
+def press_shortcut(shortcut_name: str) -> dict:
+    """Perform a common Excel operation entirely via Alt-key ribbon sequences.
+
+    This is the Alt-plus-keys task runner: no mouse, no vision, no OmniParser.
+    It maps a friendly name to the exact Alt sequence Excel uses, sends it, and
+    returns what dialog/state it should have opened so the agent can continue.
+
+    Supported names (Alt sequences are Excel-stable across versions):
+    - format_cells        -> Alt, H, O, I   (Format Cells dialog)
+    - insert_chart        -> Alt, N, C      (Insert Chart)
+    - insert_pivot        -> Alt, N, V      (Insert PivotTable)
+    - insert_table        -> Alt, N, T      (Insert Table)
+    - borders_all         -> Alt, H, B, A   (All borders)
+    - borders_thick       -> Alt, H, B, T
+    - fill_color          -> Alt, H, H      (open fill-color menu)
+    - font_color          -> Alt, H, F, C   (open font-color menu)
+    - bold                -> Alt, H, 1      (bold)
+    - merge_center        -> Alt, H, M, C   (Merge & Center)
+    - autofit_columns     -> Alt, H, O, I   (AutoFit Column Width)
+    - wrap_text           -> Alt, H, W      (Wrap Text)
+    - number_format       -> Alt, H, N      (open Number Format menu)
+    - sum_below           -> Alt, =         (AutoSum)
+    """
+    _ALT_TASK_SHORTCUTS = {
+        "format_cells": ["h", "o", "i"],
+        "insert_chart": ["n", "c"],
+        "insert_pivot": ["n", "v"],
+        "insert_table": ["n", "t"],
+        "borders_all": ["h", "b", "a"],
+        "borders_thick": ["h", "b", "t"],
+        "fill_color": ["h", "h"],
+        "font_color": ["h", "f", "c"],
+        "bold": ["h", "1"],
+        "merge_center": ["h", "m", "c"],
+        "autofit_columns": ["h", "o", "i"],
+        "wrap_text": ["h", "w"],
+        "number_format": ["h", "n"],
+        "sum_below": ["=", "alt"],
+    }
+    name = shortcut_name.strip().lower()
+    if name not in _ALT_TASK_SHORTCUTS:
+        raise RuntimeError(
+            f"Unknown Alt shortcut '{shortcut_name}'. Supported: "
+            f"{', '.join(sorted(_ALT_TASK_SHORTCUTS))}"
+        )
+    keys = _ALT_TASK_SHORTCUTS[name]
+    # For sum_below the natural key is Alt+=, but represented generally:
+    if name == "sum_below":
+        _focus_excel_for_keyboard()
+        pyautogui.hotkey("alt", "=")
+        return {
+            "sent": ["alt", "="],
+            "shortcut": name,
+            "verified": True,
+            "verification_note": "AutoSum (Alt+=) sent. A formula was inserted; press Enter to confirm.",
+        }
+    result = press_alt(keys)
+    result["shortcut"] = name
+    return result
+
+
+def find_and_click(name: str, control_type: str = None, double: bool = False) -> dict:
+    """Find a UI element by name via Windows UI Automation and click it.
+
+    UIA-first (fast, no screenshot). This is the reliable path for ribbon tabs,
+    buttons, and menu items; falls back to OmniParser only via the agent loop.
+    """
+    _require_display()
+    if not _HAS_PYWINAUTO:
+        raise RuntimeError("Windows UI Automation is unavailable, so find_and_click cannot verify the target.")
+    window = _get_agent_excel_window()
+    _ensure_agent_workbook(window)
+    _focus_excel_for_keyboard()
+    target = None
+    name_l = " ".join(name.strip().split()).lower()
+    for control in window.descendants():
+        try:
+            txt = " ".join(control.window_text().split()).lower()
+            if not txt or name_l not in txt:
+                continue
+            if control_type:
+                ct = str(getattr(control.element_info, "control_type", "")).lower()
+                if control_type.lower() not in ct:
+                    continue
+            target = control
+            break
+        except Exception:
+            continue
+    if target is None:
+        raise RuntimeError(f"Could not find a UI element named '{name}' in Excel via UI Automation.")
+    try:
+        if double:
+            target.click_input(double=True)
+        else:
+            target.click_input()
+    except Exception as exc:
+        raise RuntimeError(f"Found '{name}' but could not click it: {exc}") from exc
+    time.sleep(0.3)
+    return {
+        "clicked_element": name,
+        "found_by": "uia",
+        "verified": True,
+        "verification_note": f"Found and clicked '{name}' via UIA (no screenshot needed).",
     }
 
 

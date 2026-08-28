@@ -402,6 +402,12 @@ NAVIGATION RULES:
 - For ribbon commands WITHOUT a direct Ctrl shortcut (e.g. Format Cells, Insert Chart),
   use press_alt with the key sequence: press_alt(['h','o','i']) for Format Cells,
   press_alt(['n','c']) for Insert Chart. press_alt is more reliable than parse_screen.
+- Prefer press_shortcut for whole-task Alt-key operations (no vision needed):
+  press_shortcut('format_cells'), press_shortcut('insert_chart'),
+  press_shortcut('borders_all'), press_shortcut('fill_color'),
+  press_shortcut('merge_center'), press_shortcut('autofit_columns'),
+  press_shortcut('wrap_text'), press_shortcut('sum_below'). These run the exact
+  Excel Alt sequence and are the most reliable way to perform these tasks.
 - Only call parse_screen when you need to interact with a ribbon button, dialog, or
   UI element that has no keyboard shortcut. Use the narrowest zone possible.
 - If parse_screen returns an error (OmniParser unavailable), DO NOT retry blindly.
