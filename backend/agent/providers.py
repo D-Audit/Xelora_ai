@@ -164,6 +164,14 @@ VISION_TOOLS_CLAUDE = [
         "input_schema": {"type": "object", "properties": {"range_ref": {"type": "string", "description": "Header range like 'A1:E1'"}, "font_size": {"type": "integer", "description": "Font size (default: 11)"}}, "required": ["range_ref"]},
     },
     {
+        "name": "set_fill_color", "description": "Apply a CELL/ROW FILL (background) color using keyboard + vision + autoGUI. color is a hex like '4472C4' or a name (blue, green, red, yellow, orange, purple, lightblue, darkblue, lightgreen, darkred, white, black, gray, lightgray, darkgray). Self-contained: never mutates data.",
+        "input_schema": {"type": "object", "properties": {"range_ref": {"type": "string", "description": "Cell or range like 'A1:F1'"}, "color": {"type": "string", "description": "Hex or named color"}}, "required": ["range_ref", "color"]},
+    },
+    {
+        "name": "set_font_color", "description": "Apply a FONT color using keyboard + vision + autoGUI. color is a hex like 'FFFFFF' or a name (see set_fill_color). Self-contained: never mutates data.",
+        "input_schema": {"type": "object", "properties": {"range_ref": {"type": "string", "description": "Cell or range like 'A1:F1'"}, "color": {"type": "string", "description": "Hex or named color"}}, "required": ["range_ref", "color"]},
+    },
+    {
         "name": "apply_dashboard_theme", "description": "Apply a consistent professional theme to the current sheet: headers, alternating row colors, borders, auto-fit columns.",
         "input_schema": {"type": "object", "properties": {"theme": {"type": "string", "description": "Theme name: professional, modern, colorful, minimal"}}, "required": []},
     },

@@ -413,6 +413,28 @@ NAVIGATION RULES:
 - If parse_screen returns an error (OmniParser unavailable), DO NOT retry blindly.
   Fall back to UIA tools: find_and_click, click_ribbon_tab, go_to_range, hotkey, press_alt.
 
+MULTI-MODAL TOOLING (choose the right tool per step):
+You have FOUR execution modalities. Pick whichever is most reliable for the current step:
+  1. SHORTCUT KEYS  - hotkey, press_key, press_alt, press_shortcut, execute_excel_shortcut
+                       (fastest, no screen needed; use for standard operations)
+  2. OMNIPARSER/VISION - parse_screen, take_screenshot (locate unknown UI elements)
+  3. AUTO_GUI        - click/double_click on a parsed element, or set_fill_color/set_font_color
+                       which internally screenshot + pixel-match + click the exact swatch
+  4. UIA (pywinauto) - find_and_click, click_ribbon_tab, click_button, go_to_sheet, rename_sheet
+                       (fast, no screenshot, programmatic certainty)
+A robust agent MIXES these. Example: navigate with go_to_sheet (UIA), enter data with
+paste_table (keyboard), color with set_fill_color (keyboard+vision+autoGUI), verify with
+get_cell_value (keyboard). Do NOT force one modality for everything.
+
+COLOR RULES (CRITICAL - prevents data loss):
+- ALWAYS color via set_fill_color(range_ref, color) / set_font_color(range_ref, color).
+  These are SELF-CONTAINED: they select the range, open the gallery, pixel-match the swatch,
+  and click it. They NEVER type into a cell, so they cannot delete or overwrite data.
+- NEVER manually parse_screen + click a swatch during styling - a mis-click can hit a data
+  cell. Use the dedicated color tools instead.
+- color accepts hex ('4472C4') or a name (blue, green, red, yellow, orange, purple, lightblue,
+  darkblue, lightgreen, darkred, white, black, gray, lightgray, darkgray).
+
 CROSS-SHEET NAVIGATION (CRITICAL):
 - NEVER use go_to_range with a sheet prefix like "Sheet1!A1" — it often fails.
 - INSTEAD, use go_to_sheet first to switch to the target sheet, then go_to_range for the cell.

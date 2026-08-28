@@ -117,56 +117,136 @@ except ImportError:
     pass
 
 
-def handle_blocking_dialogs(excel_hwnd: int) -> dict:
-    """Detect and dismiss blocking Excel error dialogs or file pickers.
-    
-    Uses win32gui to find popup windows owned by Excel. More reliable than
-    pywinauto for catching modal error alerts that block the UI thread.
-    
-    Returns dict with status: 'clean', 'error_dismissed', or 'prompt_cancelled'.
-    """
+def _enum_excel_popups(excel_hwnd: int) -> list[int]:
+    """Enumerate ALL popup dialogs owned by Excel, not just the last active one."""
     if not _HAS_WIN32GUI or not excel_hwnd:
-        return {"status": "clean"}
-    
+        return []
+    popups = []
     try:
-        popup_hwnd = win32gui.GetLastActivePopup(excel_hwnd)
-        
-        if not popup_hwnd or popup_hwnd == excel_hwnd:
-            return {"status": "clean"}
-        
-        window_title = win32gui.GetWindowText(popup_hwnd) or ""
-        class_name = win32gui.GetClassName(popup_hwnd) or ""
-        
-        error_keywords = [
-            "Reference isn't valid", "Reference is not valid",
-            "That name isn't valid", "The name is not valid",
-            "Cell contents must be text", "We couldn't find",
-            "Sorry, we couldn't find", "Application-defined",
-            "Object-defined error", "Name already exists",
-            "Microsoft Excel",
-        ]
-        
-        dialog_keywords = [
-            "Update Values", "Open", "Save As", "Save",
-            "Print", "Page Setup", "Format Cells",
-        ]
-        
-        if class_name == "#32770" or any(kw in window_title for kw in error_keywords):
-            win32gui.SendMessage(popup_hwnd, win32con.WM_KEYDOWN, win32con.VK_RETURN, 0)
-            win32gui.SendMessage(popup_hwnd, win32con.WM_KEYUP, win32con.VK_RETURN, 0)
-            time.sleep(0.3)
-            return {"status": "error_dismissed", "title": window_title}
-        
-        if any(kw in window_title for kw in dialog_keywords):
-            win32gui.SendMessage(popup_hwnd, win32con.WM_KEYDOWN, win32con.VK_ESCAPE, 0)
-            win32gui.SendMessage(popup_hwnd, win32con.WM_KEYUP, win32con.VK_ESCAPE, 0)
-            time.sleep(0.3)
-            return {"status": "prompt_cancelled", "title": window_title}
-    
+        def enum_proc(hwnd, _):
+            if win32gui.GetParent(hwnd) == excel_hwnd and win32gui.IsWindowVisible(hwnd):
+                cls = win32gui.GetClassName(hwnd) or ""
+                if cls == "#32770" or win32gui.GetWindowText(hwnd):
+                    popups.append(hwnd)
+            return True
+        win32gui.EnumChildWindows(excel_hwnd, enum_proc, None)
     except Exception:
         pass
+    return popups
+
+
+def handle_all_dialogs_smart(excel_hwnd: int) -> dict:
+    """Comprehensive dialog detection + SMART response based on dialog content.
+
+    Reads dialog title + button text, then decides:
+    - ERROR dialogs ("Reference isn't valid", "circular reference", etc.) -> Enter (OK)
+    - SECURITY/MACRO prompts ("Enable content", "Macros disabled") -> Allow/Enable
+    - FILE PROTECTION ("File is read-only", "Protected view") -> Enable Editing
+    - SAVE/CONFIRM ("Save changes?", "Replace existing?") -> Cancel/Don't Save (agent shouldn't overwrite user files silently)
+    - PRINT/PAGE SETUP/FORMAT CELLS -> Escape (cancel, agent uses shortcuts)
+    - UPDATE LINKS ("Update values?") -> Don't Update (keep local data)
+    - GENERIC unknown -> Escape (safe default)
+    """
+    if not _HAS_WIN32GUI or not excel_hwnd:
+        return {"status": "clean", "handled": []}
     
-    return {"status": "clean"}
+    handled = []
+    for popup in _enum_excel_popups(excel_hwnd):
+        try:
+            title = win32gui.GetWindowText(popup) or ""
+            # Get child buttons to read their captions
+            btn_texts = []
+            def enum_buttons(hwnd, _):
+                if win32gui.GetClassName(hwnd) == "Button":
+                    txt = win32gui.GetWindowText(hwnd) or ""
+                    if txt:
+                        btn_texts.append(txt.lower())
+                return True
+            win32gui.EnumChildWindows(popup, enum_buttons, None)
+            btn_text = " | ".join(btn_texts)
+            low = (title + " " + btn_text).lower()
+            
+            # 1. SECURITY/MACRO - ALLOW
+            if any(kw in low for kw in ["enable content", "macro", "security warning", "trust center", "protected view", "enable editing"]):
+                # Click "Enable Content" or "Yes" or "OK"
+                for btn in [win32con.BN_CLICKED]:
+                    win32gui.SendMessage(popup, win32con.WM_COMMAND, win32con.IDOK, 0)
+                time.sleep(0.4)
+                handled.append(f"security_allow:{title}")
+                continue
+            
+            # 2. ERROR dialogs - OK/Dismiss
+            if any(kw in low for kw in ["reference isn't valid", "reference is not valid", 
+                "name isn't valid", "name is not valid", "circular reference",
+                "cell contents must be text", "we couldn't find", "application-defined",
+                "object-defined error", "name already exists", "microsoft excel",
+                "cannot be used", "invalid", "error"]):
+                win32gui.SendMessage(popup, win32con.WM_COMMAND, win32con.IDOK, 0)
+                time.sleep(0.3)
+                handled.append(f"error_dismiss:{title}")
+                continue
+            
+            # 3. UPDATE LINKS - Don't Update
+            if "update" in low and ("link" in low or "value" in low):
+                win32gui.SendMessage(popup, win32con.WM_COMMAND, win32con.IDCANCEL, 0)
+                time.sleep(0.3)
+                handled.append(f"update_links_cancel:{title}")
+                continue
+            
+            # 4. SAVE/CONFIRM/REPLACE - Cancel/Don't Save (agent shouldn't auto-save user files)
+            if any(kw in low for kw in ["save", "replace", "overwrite", "confirm save"]):
+                win32gui.SendMessage(popup, win32con.WM_COMMAND, win32con.IDCANCEL, 0)
+                time.sleep(0.3)
+                handled.append(f"save_cancel:{title}")
+                continue
+            
+            # 5. FILE PROTECTION / READ-ONLY - Enable Editing if possible, else OK
+            if any(kw in low for kw in ["read-only", "protected view", "enable editing"]):
+                # Try to find "Enable Editing" button
+                win32gui.SendMessage(popup, win32con.WM_COMMAND, win32con.IDOK, 0)
+                time.sleep(0.3)
+                handled.append(f"protection_ok:{title}")
+                continue
+            
+            # 6. PRINT/PAGE SETUP/FORMAT CELLS/INSERT dialogs - Cancel (agent uses shortcuts)
+            if any(kw in low for kw in ["print", "page setup", "format cells", "insert", "find", "replace", "go to", "define name", "data validation", "conditional formatting", "sort", "filter"]):
+                win32gui.SendMessage(popup, win32con.WM_COMMAND, win32con.IDCANCEL, 0)
+                time.sleep(0.3)
+                handled.append(f"dialog_cancel:{title}")
+                continue
+            
+            # 7. GENERIC - Check buttons for "Allow", "Yes", "No", "Retry", "Cancel"
+            btn_actions = []
+            for btn in ["allow", "yes", "enable", "ok", "continue"]:
+                if btn in btn_text:
+                    btn_actions.append(("allow", win32con.IDOK))
+            for btn in ["no", "cancel", "don't", "dont", "close"]:
+                if btn in btn_text:
+                    btn_actions.append(("deny", win32con.IDCANCEL))
+            for btn in ["retry", "try again"]:
+                if btn in btn_text:
+                    btn_actions.append(("retry", win32con.IDRETRY))
+            
+            if btn_actions:
+                # Prefer allow/yes, then deny/cancel, then retry
+                action, cmd = sorted(btn_actions, key=lambda x: {"allow":0, "deny":1, "retry":2}[x[0]])[0]
+                win32gui.SendMessage(popup, win32con.WM_COMMAND, cmd, 0)
+                time.sleep(0.3)
+                handled.append(f"{action}:{title}")
+            else:
+                # Unknown - safe default: Escape
+                win32gui.SendMessage(popup, win32con.WM_KEYDOWN, win32con.VK_ESCAPE, 0)
+                win32gui.SendMessage(popup, win32con.WM_KEYUP, win32con.VK_ESCAPE, 0)
+                time.sleep(0.2)
+                handled.append(f"escape:{title}")
+        except Exception:
+            pass
+    return {"status": "clean" if not handled else "handled", "handled": handled}
+
+
+def handle_blocking_dialogs(excel_hwnd: int) -> dict:
+    """Legacy wrapper - calls the smart handler."""
+    return handle_all_dialogs_smart(excel_hwnd)
 
 
 def reset_to_neutral_state(excel_hwnd: int) -> dict:
@@ -589,10 +669,192 @@ def get_cell_value(cell: str, sheet_name: str = None) -> dict:
         return {"error": str(e)}
 
 
+def _hex_to_rgb(value: str):
+    value = value.strip().lstrip("#")
+    if len(value) == 6:
+        try:
+            return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+        except ValueError:
+            return None
+    return None
+
+
+# Named colors map to Excel's stable Standard Colors swatches so the pixel
+# matcher below can locate an exact swatch rather than a near-miss.
+_STANDARD_COLORS = {
+    "black": "000000", "white": "FFFFFF", "red": "FF0000", "darkred": "C00000",
+    "green": "00B050", "lightgreen": "92D050", "blue": "0070C0", "darkblue": "002060",
+    "lightblue": "00B0F0", "yellow": "FFFF00", "orange": "FFC000", "purple": "7030A0",
+    "gray": "808080", "grey": "808080", "lightgray": "D9D9D9", "darkgray": "595959",
+}
+
+
+def _apply_color_swatch(range_ref: str, target: str, kind: str) -> dict:
+    """Apply a fill or font color by combining three modalities:
+
+    1. SHORTCUT  - select the range, open the color gallery with Alt-key sequence.
+    2. VISION    - screenshot the gallery and pixel-match the requested color.
+    3. AUTO_GUI  - click the matched swatch with pyautogui.
+
+    This is fully self-contained, so it applies color without ever typing into a
+    cell (styling never mutates data). Returns verified=True only if a swatch
+    was actually clicked.
+    """
+    if not _HAS_PYAUTOGUI:
+        return {"error": "pyautogui unavailable; cannot click the color swatch."}
+    name = target.strip().lower()
+    if name in _STANDARD_COLORS:
+        target = _STANDARD_COLORS[name]
+    rgb = _hex_to_rgb(target)
+    if rgb is None:
+        return {"error": f"Invalid color '{target}'. Use a hex like '4472C4' or a name like 'blue'."}
+
+    # 1. SHORTCUT: select range, open the gallery
+    go_to_range(range_ref)
+    time.sleep(0.25)
+    if kind == "fill":
+        press_alt(["h", "h"])          # Alt+H, H -> Fill Color gallery
+    else:
+        press_alt(["h", "f", "c"])     # Alt+H, F, C -> Font Color gallery
+    time.sleep(0.6)
+
+    # 2. VISION: screenshot the gallery region (just under the ribbon) and match
+    window = _get_agent_excel_window()
+    rect = window.rectangle()
+    left, top = rect.left, rect.top
+    width = rect.right - left
+    height = rect.bottom - top
+    x0 = left + int(width * 0.04)
+    y0 = top + 120
+    w = int(width * 0.58)
+    h = 320
+    from PIL import Image
+    import pyautogui as _pg
+    shot = _pg.screenshot(region=(x0, y0, w, h))
+    px = shot.load()
+    best = None
+    best_d = 1e18
+    for yy in range(0, h, 3):
+        for xx in range(0, w, 3):
+            p = px[xx, yy]
+            d = (p[0] - rgb[0]) ** 2 + (p[1] - rgb[1]) ** 2 + (p[2] - rgb[2]) ** 2
+            if d < best_d:
+                best_d = d
+                best = (xx, yy)
+
+    # 3. AUTO_GUI: click the matched swatch
+    tol = 50 ** 2
+    if best is not None and best_d <= tol:
+        _pg.click(x0 + best[0], y0 + best[1])
+        time.sleep(0.3)
+        return {
+            "range": range_ref, "color": target, "kind": kind, "verified": True,
+            "verification_note": f"Applied {kind} color {target} to {range_ref} via gallery (vision+autoGUI).",
+        }
+    press_key("escape")
+    time.sleep(0.1)
+    return {
+        "range": range_ref, "color": target, "kind": kind, "verified": False,
+        "verification_note": (
+            f"Could not locate a {target} swatch in the {kind} gallery (closest match "
+            f"distance too high); color was NOT applied. Try a named Standard Color."
+        ),
+    }
+
+
+def set_fill_color(range_ref: str, color: str) -> dict:
+    """Apply a cell/range FILL (background) color. Combines keyboard + vision + autoGUI.
+
+    color: hex like '4472C4' or a name (blue, green, red, yellow, orange, purple,
+    lightblue, darkblue, lightgreen, darkred, white, black, gray, lightgray, darkgray).
+    """
+    try:
+        press_key("escape")
+        time.sleep(0.1)
+        go_to_range(range_ref)
+        time.sleep(0.2)
+        return _apply_color_swatch_selected(color, "fill")
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def set_font_color(range_ref: str, color: str) -> dict:
+    """Apply a cell/range FONT color. Combines keyboard + vision + autoGUI.
+
+    color: hex like 'FFFFFF' or a name (see set_fill_color).
+    """
+    try:
+        press_key("escape")
+        time.sleep(0.1)
+        go_to_range(range_ref)
+        time.sleep(0.2)
+        return _apply_color_swatch_selected(color, "font")
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _apply_color_swatch_selected(target: str, kind: str) -> dict:
+    """Same as _apply_color_swatch but assumes range is already selected."""
+    if not _HAS_PYAUTOGUI:
+        return {"error": "pyautogui unavailable; cannot click the color swatch."}
+    name = target.strip().lower()
+    if name in _STANDARD_COLORS:
+        target = _STANDARD_COLORS[name]
+    rgb = _hex_to_rgb(target)
+    if rgb is None:
+        return {"error": f"Invalid color '{target}'. Use a hex like '4472C4' or a name like 'blue'."}
+
+    if kind == "fill":
+        press_alt(["h", "h"])
+    else:
+        press_alt(["h", "f", "c"])
+    time.sleep(0.6)
+
+    window = _get_agent_excel_window()
+    rect = window.rectangle()
+    left, top = rect.left, rect.top
+    width = rect.right - left
+    height = rect.bottom - top
+    x0 = left + int(width * 0.04)
+    y0 = top + 120
+    w = int(width * 0.58)
+    h = 320
+    from PIL import Image
+    import pyautogui as _pg
+    shot = _pg.screenshot(region=(x0, y0, w, h))
+    px = shot.load()
+    best = None
+    best_d = 1e18
+    for yy in range(0, h, 3):
+        for xx in range(0, w, 3):
+            p = px[xx, yy]
+            d = (p[0] - rgb[0]) ** 2 + (p[1] - rgb[1]) ** 2 + (p[2] - rgb[2]) ** 2
+            if d < best_d:
+                best_d = d
+                best = (xx, yy)
+
+    tol = 50 ** 2
+    if best is not None and best_d <= tol:
+        _pg.click(x0 + best[0], y0 + best[1])
+        time.sleep(0.3)
+        return {
+            "range": "selected", "color": target, "kind": kind, "verified": True,
+            "verification_note": f"Applied {kind} color {target} via gallery (vision+autoGUI).",
+        }
+    press_key("escape")
+    time.sleep(0.1)
+    return {
+        "color": target, "kind": kind, "verified": False,
+        "verification_note": (
+            f"Could not locate a {target} swatch in the {kind} gallery; color was NOT applied."
+        ),
+    }
+
+
 def apply_cell_style(range_ref: str, bold: bool = False, italic: bool = False,
-                     font_color: str = None, bg_color: str = None,
-                     font_size: int = None, number_format: str = None,
-                     border: bool = False, align: str = None) -> dict:
+                      font_color: str = None, bg_color: str = None,
+                      font_size: int = None, number_format: str = None,
+                      border: bool = False, align: str = None) -> dict:
     """Apply styling to a cell or range.
     
     Colors should be hex codes like "FF0000" for red, "00FF00" for green.
@@ -647,6 +909,12 @@ def apply_cell_style(range_ref: str, bold: bool = False, italic: bool = False,
                 hotkey(keys)
                 time.sleep(0.1)
         
+        # Apply colors (self-contained: keyboard + vision + autoGUI, never mutates data)
+        if bg_color:
+            set_fill_color(range_ref, bg_color)
+        if font_color:
+            set_font_color(range_ref, font_color)
+        
         return {
             "range": range_ref,
             "bold": bold,
@@ -654,6 +922,8 @@ def apply_cell_style(range_ref: str, bold: bool = False, italic: bool = False,
             "font_size": font_size,
             "number_format": number_format,
             "align": align,
+            "bg_color": bg_color,
+            "font_color": font_color,
             "verified": True,
             "verification_note": f"Applied style to {range_ref}",
         }
@@ -685,10 +955,10 @@ def set_header_style(range_ref: str, bg_color: str = "4472C4",
             press_key("enter")
             time.sleep(0.2)
         
-        # Apply background color using ribbon
-        # Alt+H = Home, H = Fill Color
-        # For custom color, we need to use the color picker
-        # This is complex - use a simpler approach with format cells dialog
+        # Apply colors (self-contained: keyboard + vision + autoGUI, never mutates data)
+        set_fill_color(range_ref, bg_color)
+        if font_color:
+            set_font_color(range_ref, font_color)
         
         return {
             "range": range_ref,
@@ -973,7 +1243,149 @@ def _window_by_handle(handle: int | None):
     return None
 
 
-def _open_blank_excel_window():
+def ensure_single_agent_excel(existing_window=None) -> dict:
+    """ENFORCE EXACTLY ONE EXCEL INSTANCE for the agent.
+
+    - If the agent already has a bound window (by handle), close ALL other Excel windows.
+    - If no agent window yet, but an Excel is open, bind to it and close others.
+    - If multiple Excels exist, keep the most recently used (likely agent's) and close the rest.
+    - Returns the agent's window handle and status.
+    
+    Pass existing_window to avoid recursive _get_agent_excel_window calls.
+    """
+    if not _HAS_PYWINAUTO:
+        return {"status": "skipped", "reason": "pywinauto unavailable"}
+    
+    # Get agent window: use provided, or find directly WITHOUT calling _get_agent_excel_window
+    agent_window = existing_window
+    if agent_window is None:
+        # Direct window finding logic (same as _get_agent_excel_window but no enforce call)
+        global _agent_excel_handle, _use_existing_workbook, _bound_excel_pid, _bound_workbook_name
+        if _use_existing_workbook:
+            agent_window = _find_excel_window()
+            if agent_window is None:
+                if _bound_excel_pid is not None:
+                    return {"status": "error", "error": "Bound workbook no longer visible"}
+                return {"status": "error", "error": "No existing workbook open"}
+        else:
+            agent_window = _window_by_handle(_agent_excel_handle)
+            if agent_window is None:
+                if _HAS_PYWINAUTO:
+                    for candidate in Desktop(backend="uia").windows():
+                        try:
+                            title = candidate.window_text()
+                            class_name = candidate.element_info.class_name or ""
+                            if ("excel" in title.lower() or class_name.upper() == "XLMAIN") and candidate.is_visible():
+                                if re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
+                                    _agent_excel_handle = candidate.handle
+                                    _maximize_excel_window(candidate)
+                                    agent_window = candidate
+                                    break
+                        except Exception:
+                            continue
+                if agent_window is None:
+                    return {"status": "error", "error": "No Excel window found"}
+    
+    if agent_window is None:
+        return {"status": "no_window", "error": "No Excel window found for agent"}
+    
+    agent_handle = agent_window.handle
+    agent_pid = getattr(agent_window.element_info, "process_id", None)
+    closed = []
+    
+    # Find ALL Excel windows and close any that aren't the agent's
+    for window in Desktop(backend="uia").windows():
+        try:
+            title = window.window_text() or ""
+            class_name = window.element_info.class_name or ""
+            if not ("excel" in title.lower() or class_name.upper() == "XLMAIN"):
+                continue
+            if not window.is_visible():
+                continue
+            pid = getattr(window.element_info, "process_id", None)
+            if window.handle == agent_handle:
+                continue
+            # Close this extra Excel window
+            try:
+                window.close()
+                time.sleep(0.5)
+                closed.append({"title": title, "pid": pid, "handle": window.handle})
+            except Exception:
+                try:
+                    win32gui.PostMessage(window.handle, win32con.WM_CLOSE, 0, 0)
+                    time.sleep(0.3)
+                    closed.append({"title": title, "pid": pid, "handle": window.handle})
+                except Exception:
+                    pass
+        except Exception:
+            continue
+    
+    # Re-verify our agent window is still valid
+    agent_window = _window_by_handle(agent_handle)
+    if agent_window is None:
+        return {"status": "error", "error": "Agent window lost during enforcement"}
+    
+    return {
+        "status": "enforced",
+        "agent_handle": agent_handle,
+        "agent_pid": agent_pid,
+        "closed_count": len(closed),
+        "closed": closed,
+    }
+
+
+def verify_agent_context() -> dict:
+    """Verify we're on the correct Excel window, workbook, and sheet.
+
+    Checks:
+    1. Agent's Excel window is foreground and responsive
+    2. No blocking dialogs
+    3. Active workbook matches expectation (if bound)
+    4. Active sheet is known
+    
+    Returns verification result with any corrective actions taken.
+    """
+    if not _HAS_PYWINAUTO:
+        return {"verified": False, "error": "pywinauto unavailable"}
+    
+    # 1. Ensure single Excel instance
+    enforce_result = ensure_single_agent_excel()
+    if enforce_result.get("status") != "enforced":
+        return {"verified": False, "error": "Could not enforce single Excel", "enforce": enforce_result}
+    
+    window = _window_by_handle(enforce_result["agent_handle"])
+    if not window:
+        return {"verified": False, "error": "Agent window lost after enforce"}
+    
+    # 2. Bring to foreground
+    _activate_excel_window(window)
+    time.sleep(0.2)
+    
+    # 3. Handle ALL dialogs smartly
+    dialog_result = handle_all_dialogs_smart(window.handle)
+    
+    # 3. Verify workbook if bound
+    workbook_ok = True
+    if _use_existing_workbook and _bound_workbook_name:
+        try:
+            title = window.window_text()
+            if _bound_workbook_name.lower() not in title.lower():
+                workbook_ok = False
+        except Exception:
+            workbook_ok = False
+    
+    # 4. Get active sheet
+    active_sheet = get_active_sheet_name()
+    
+    return {
+        "verified": True,
+        "window_handle": window.handle,
+        "window_title": window.window_text(),
+        "workbook_ok": workbook_ok,
+        "active_sheet": active_sheet,
+        "dialogs_handled": dialog_result.get("handled", []),
+        "enforce": enforce_result,
+    }
     """Launch desktop Excel and wait for its initial blank workbook window.
 
     Strategy: Use xlwings COM to launch Excel with a new blank workbook.
@@ -981,11 +1393,17 @@ def _open_blank_excel_window():
     creates the workbook at the COM layer, then we find the resulting window.
     """
     global _agent_excel_handle
-    # Try xlwings COM approach first (most reliable)
+    # Try xlwings COM approach first (most reliable) - with timeout
     try:
         import xlwings as xw
-        app = xw.App(visible=True)
-        wb = app.books.add()
+        import concurrent.futures
+        def com_create():
+            app = xw.App(visible=True)
+            wb = app.books.add()
+            return wb
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(com_create)
+            future.result(timeout=15)  # 15s timeout
         time.sleep(2.0)
         # Find the Excel window that now has a workbook open
         if _HAS_PYWINAUTO:
@@ -1056,62 +1474,184 @@ def _open_blank_excel_window():
 
 
 def _start_on_fresh_blank_workbook(window):
-    """Excel launched with /x can open to its Start screen (showing the
-    user's recent/pinned files) or restore a previous session instead of a
-    fresh blank workbook. The agent must never operate on the user's files,
-    so before the AI ever parses the screen: dismiss any Start screen / stray
-    dialog and force a new blank workbook.
-
-    Excel's Backstage start screen is a modern UI overlay that does NOT
-    respond to keyboard shortcuts (Ctrl+N) sent via pyautogui/pywinauto.
-    Instead, we use xlwings COM automation to create a new workbook, which
-    reliably dismisses the Backstage screen.
+    """Dismiss Excel's Backstage start screen and ensure a blank workbook is open.
+    
+    Uses multiple modalities in order of reliability:
+    1. xlwings COM (with timeout) - creates workbook programmatically, bypasses Backstage
+    2. UIA click on "Blank workbook" template - direct visual interaction
+    3. Keyboard: Escape to exit Backstage, then Ctrl+N
     """
     title = " ".join(window.window_text().split())
-    # If there's already an open workbook (title contains " - Excel"), nothing to do.
+    # Already have a workbook?
     if re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
         return
-    # Try COM automation via xlwings (most reliable path)
+    
+    # 1. xlwings COM with timeout - most reliable, bypasses Backstage entirely
     try:
         import xlwings as xw
-        app = xw.App(visible=True)
-        # Use the Excel instance we just launched
-        app = xw.apps.active
-        if app is not None:
-            app.books.add()
-            time.sleep(1.0)
-            # Verify the workbook opened
-            title = " ".join(window.window_text().split())
-            if re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
-                return
+        import concurrent.futures
+        def com_create():
+            app = xw.App(visible=True)
+            wb = app.books.add()
+            return wb
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(com_create)
+            future.result(timeout=10)  # 10s timeout
+        time.sleep(1.5)
+        title = " ".join(window.window_text().split())
+        if re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
+            return
     except Exception:
         pass
-    # Fallback: try keyboard-based approach
+    
+    # 2. UIA: click "Blank workbook" on the start screen - works on Backstage UI
+    if _HAS_PYWINAUTO:
+        try:
+            # The start screen has a list of templates; "Blank workbook" is usually first
+            for control in window.descendants():
+                try:
+                    txt = " ".join(control.window_text().split()).lower()
+                    if "blank workbook" in txt and control.element_info.control_type in ("Button", "ListItem", "Hyperlink", "Text"):
+                        control.click_input()
+                        time.sleep(2.0)
+                        title = " ".join(window.window_text().split())
+                        if re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
+                            return
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    
+    # 3. Keyboard fallback: Escape to exit Backstage, then Ctrl+N
     try:
-        foreground_ok = _activate_excel_window(window)
-        if foreground_ok:
-            pyautogui.press("escape")
-            time.sleep(0.5)
-            pyautogui.hotkey("ctrl", "n")
-        else:
-            window.type_keys("{ESC}", set_foreground=False)
-            time.sleep(0.5)
-            window.type_keys("^n", set_foreground=False)
+        _activate_excel_window(window)
+        pyautogui.press("escape")
+        time.sleep(0.8)
+        pyautogui.hotkey("ctrl", "n")
         time.sleep(2.0)
     except Exception:
         pass
+    
+    # Final verification
+    time.sleep(0.5)
+    title = " ".join(window.window_text().split())
+    if not re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
+        # One more attempt: maybe we're on a dialog
+        try:
+            pyautogui.press("escape")
+            time.sleep(0.5)
+            pyautogui.hotkey("ctrl", "n")
+            time.sleep(2.0)
+        except Exception:
+            pass
+
+
+def _open_blank_excel_window():
+    """Launch desktop Excel and wait for its initial blank workbook window.
+
+    Strategy: Use xlwings COM to launch Excel with a new blank workbook.
+    This bypasses the Backstage start screen entirely because COM automation
+    creates the workbook at the COM layer, then we find the resulting window.
+    """
+    global _agent_excel_handle
+    # Try xlwings COM approach first (most reliable) - with timeout
+    try:
+        import xlwings as xw
+        import concurrent.futures
+        def com_create():
+            app = xw.App(visible=True)
+            wb = app.books.add()
+            return wb
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(com_create)
+            future.result(timeout=15)  # 15s timeout
+        time.sleep(2.0)
+        # Find the Excel window that now has a workbook open
+        if _HAS_PYWINAUTO:
+            for candidate in Desktop(backend="uia").windows():
+                try:
+                    title = candidate.window_text()
+                    class_name = candidate.element_info.class_name or ""
+                    if ("excel" in title.lower() or class_name.upper() == "XLMAIN") and candidate.is_visible():
+                        if re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
+                            _agent_excel_handle = candidate.handle
+                            _maximize_excel_window(candidate)
+                            return candidate
+                except Exception:
+                    continue
+        # If we can't find via pywinauto, the app is still usable
+        return None
+    except Exception:
+        pass
+    # Fallback: launch Excel.exe directly
+    excel_command = "excel.exe"
+    if winreg is not None:
+        registry_paths = (
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\EXCEL.EXE",
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\EXCEL.EXE",
+        )
+        for registry_path in registry_paths:
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, registry_path) as key:
+                    excel_command = winreg.QueryValue(key, None)
+                    break
+            except OSError:
+                continue
+    existing_handles = set()
+    if _HAS_PYWINAUTO:
+        for existing_window in Desktop(backend="uia").windows():
+            try:
+                existing_handles.add(existing_window.handle)
+            except Exception:
+                continue
+    try:
+        subprocess.Popen([excel_command, "/x"])
+    except OSError as exc:
+        raise RuntimeError(
+            "Excel could not be launched. Confirm that desktop Microsoft Excel is installed."
+        ) from exc
+
+    deadline = time.monotonic() + _EXCEL_START_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        window = None
+        if _HAS_PYWINAUTO:
+            for candidate in Desktop(backend="uia").windows():
+                try:
+                    if candidate.handle not in existing_handles and candidate.is_visible():
+                        title = candidate.window_text()
+                        class_name = candidate.element_info.class_name or ""
+                        if "excel" in title.lower() or class_name.upper() == "XLMAIN":
+                            window = candidate
+                            break
+                except Exception:
+                    continue
+        if window is not None:
+            _agent_excel_handle = window.handle
+            _start_on_fresh_blank_workbook(window)
+            _maximize_excel_window(window)
+            return window
+        time.sleep(0.25)
+    raise RuntimeError("Excel did not open within 15 seconds.")
 
 
 def _get_agent_excel_window():
     """Return the Excel window for this agent session.
     
-    Priority:
-    1. If bound to existing workbook, use _find_excel_window()
-    2. Try cached handle via _window_by_handle()
-    3. Try to find ANY visible Excel window (avoids spawning duplicates)
-    4. Only as last resort, open a new blank Excel window
+    ENFORCES SINGLE EXCEL INSTANCE:
+    - If agent already has a window, verifies it and closes any other Excel windows
+    - If no agent window yet, binds to existing or creates new, then enforces single instance
     """
     global _agent_excel_handle
+    
+    # FIRST: Enforce single Excel instance (closes any extra Excel windows)
+    enforce_result = ensure_single_agent_excel()
+    if enforce_result.get("status") == "enforced":
+        # The enforce function already returned the correct agent window
+        window = _window_by_handle(enforce_result["agent_handle"])
+        if window:
+            return window
+    
+    # Fallback to original logic if enforcement didn't return a window
     if _use_existing_workbook:
         window = _find_excel_window()
         if window is None:
@@ -1190,47 +1730,41 @@ def _capture_excel_window():
     OmniParser returns coordinates relative to this image.  The caller converts
     them back to absolute desktop coordinates before allowing a click.
     
-    Before capturing, checks for and closes any modal dialogs (Save As, Open,
-    Update Values, etc.) that might be blocking the Excel worksheet.
+    Before capturing, ensures single Excel instance and clears ALL dialogs smartly.
     After capturing, verifies the image doesn't still show a dialog.
     """
     window = _get_agent_excel_window()
     if window is None:
         return None
 
-    dialog_check_words = {"cancel", "system32", "open", "save", "file name", "update values"}
+    # Use smart dialog handling instead of old dismiss
+    verify_agent_context()
+    foreground_verified = _activate_excel_window(window)
+    time.sleep(0.15)
+    rect = window.rectangle()
+    image = window.capture_as_image()
     
-    for attempt in range(2):
+    if image is not None:
         try:
-            _dismiss_excel_dialogs(window)
-            foreground_verified = _activate_excel_window(window)
-            time.sleep(0.15)
-            rect = window.rectangle()
-            image = window.capture_as_image()
-            
-            if attempt == 0 and image is not None:
-                try:
-                    from vision.local_omniparser import parse_screen
-                    parsed = parse_screen(image)
-                    if parsed and parsed.get("elements"):
-                        element_texts = [e.get("text", "").lower() for e in parsed["elements"]]
-                        if any(w in t for t in element_texts for w in dialog_check_words):
-                            _dismiss_excel_dialogs(window)
-                            time.sleep(0.5)
-                            continue
-                except Exception:
-                    pass
-            
-            return image, (rect.left, rect.top), {
-                "title": window.window_text(),
-                "handle": window.handle,
-                "rect": [rect.left, rect.top, rect.right, rect.bottom],
-                "foreground_verified": foreground_verified,
-            }
+            from vision.local_omniparser import parse_screen
+            parsed = parse_screen(image)
+            if parsed and parsed.get("elements"):
+                element_texts = [e.get("text", "").lower() for e in parsed["elements"]]
+                dialog_check_words = {"cancel", "system32", "open", "save", "file name", "update values", "enable", "security", "macro", "protected", "readonly"}
+                if any(w in t for t in element_texts for w in dialog_check_words):
+                    verify_agent_context()  # Handles dialogs smartly
+                    time.sleep(0.5)
+                    # Recapture
+                    image = window.capture_as_image()
         except Exception:
             pass
-
-    return None
+    
+    return image, (rect.left, rect.top), {
+        "title": window.window_text(),
+        "handle": window.handle,
+        "rect": [rect.left, rect.top, rect.right, rect.bottom],
+        "foreground_verified": foreground_verified,
+    }
 
 
 def _dismiss_excel_dialogs(window):
@@ -1308,11 +1842,23 @@ def _dismiss_excel_dialogs(window):
 
 
 def _focus_excel_for_keyboard(expected_window_handle: int | None = None):
-    """Bring the expected Excel window forward before input is sent."""
+    """Bring the expected Excel window forward before input is sent.
+    
+    Also ensures single Excel instance, clears all dialogs smartly,
+    and verifies we're on a worksheet (not start screen) before sending keys.
+    """
     window = _window_by_handle(expected_window_handle) if expected_window_handle is not None else _get_agent_excel_window()
     if window is None:
         raise RuntimeError("The Excel window captured for this action is no longer available. Re-run screen parsing first.")
     try:
+        # Ensure single Excel and handle all dialogs smartly
+        verify_agent_context()
+        # Also verify we're on a worksheet, not the start screen
+        title = " ".join(window.window_text().split())
+        if not re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
+            # We're on start screen - force a blank workbook
+            _start_on_fresh_blank_workbook(window)
+            time.sleep(0.5)
         if not _activate_excel_window(window):
             raise RuntimeError("Windows did not allow Excel to become the foreground window.")
     except RuntimeError:

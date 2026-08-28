@@ -18,7 +18,7 @@ from codegen.executor import run_generated_code
 from agent import providers
 from agent.prompts import build_system_prompt
 
-VISUAL_TOOL_NAMES = {"take_screenshot", "parse_screen", "click", "double_click", "type_text", "press_key", "hotkey", "scroll", "activate_ribbon_tab", "press_alt", "press_shortcut", "go_to_range", "paste_table", "fill_formula_down", "format_currency", "format_bold", "autofit_columns", "create_clustered_column_chart", "create_pie_chart", "execute_excel_shortcut", "batch_excel_operations", "search_cached_elements", "find_and_click", "click_ribbon_tab", "click_button", "rename_sheet", "go_to_sheet", "navigate_to_cell_on_sheet", "verify_task_completion", "get_active_sheet_name", "verify_current_sheet", "get_sheet_info", "get_cell_value", "apply_cell_style", "set_header_style", "apply_dashboard_theme"}
+VISUAL_TOOL_NAMES = {"take_screenshot", "parse_screen", "click", "double_click", "type_text", "press_key", "hotkey", "scroll", "activate_ribbon_tab", "press_alt", "press_shortcut", "go_to_range", "paste_table", "fill_formula_down", "format_currency", "format_bold", "autofit_columns", "create_clustered_column_chart", "create_pie_chart", "execute_excel_shortcut", "batch_excel_operations", "search_cached_elements", "find_and_click", "click_ribbon_tab", "click_button", "rename_sheet", "go_to_sheet", "navigate_to_cell_on_sheet", "verify_task_completion", "get_active_sheet_name", "verify_current_sheet", "get_sheet_info", "get_cell_value", "apply_cell_style", "set_header_style", "set_fill_color", "set_font_color", "apply_dashboard_theme"}
 READ_ONLY_TOOL_NAMES = {"take_screenshot", "parse_screen"}
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
