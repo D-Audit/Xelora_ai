@@ -1509,7 +1509,20 @@ def parse_screen(zone: str = "window", use_cache: bool = True) -> dict:
     else:
         window_info["zone"] = "window"
     
-    parsed = parse_image(image)
+    try:
+        parsed = parse_image(image)
+    except Exception as exc:
+        # Catching OmniParser: never let a parser failure crash the task loop.
+        # Return a structured, non-fatal error so the agent can fall back to UIA/shortcuts.
+        return {
+            "verified": False,
+            "error": f"OmniParser failed: {exc}",
+            "capture_target": "excel_window",
+            "from_cache": False,
+            "elements": [],
+            "fallback_advice": "Visual recognition failed. Use UIA tools (find_and_click, go_to_range, hotkey) instead of parse_screen.",
+            "zone": window_info.get("zone", "window"),
+        }
     
     # Filter out dialog elements - only keep Excel worksheet elements
     _filter_dialog_elements(parsed["elements"], window_info)
@@ -2262,6 +2275,33 @@ def _is_tab_selected(target) -> bool:
     except Exception:
         return False
     return False
+
+
+def press_alt(keys: list[str]) -> dict:
+    """Send an Alt-key ribbon sequence, e.g. press_alt(['h','o','i']) for Format Cells.
+
+    Unlike a plain hotkey, this presses Alt to reveal Excel's keytips, then sends
+    each following key in order (Alt+H, O, I opens the Format Cells dialog). It is
+    the reliable way to reach ribbon commands that have no direct Ctrl shortcut.
+    """
+    _require_display()
+    window = _get_agent_excel_window()
+    _ensure_agent_workbook(window)
+    _focus_excel_for_keyboard()
+    keys = [str(k).strip().lower() for k in keys if str(k).strip()]
+    if not keys:
+        raise RuntimeError("press_alt requires a non-empty list of keys.")
+    # Alt first to open keytips, then each key in sequence.
+    pyautogui.press("alt")
+    time.sleep(0.35)
+    for k in keys:
+        pyautogui.press(k)
+        time.sleep(0.2)
+    return {
+        "sent": ["alt", *keys],
+        "verified": True,
+        "verification_note": "Alt sequence sent. If a dialog opened, capture it with parse_screen(zone='popup').",
+    }
 
 
 def scroll(clicks: int) -> dict:

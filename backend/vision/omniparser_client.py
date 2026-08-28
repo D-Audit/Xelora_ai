@@ -3,23 +3,37 @@
 import base64
 import io
 import math
+import time
 
 import requests
 
 import config
 
 
-def parse_image(image) -> dict:
+def parse_image(image, retries: int = 3) -> dict:
     """Parse a PIL Image into structured UI elements.
 
     Routing:
     - OMNIPARSER_LOCAL_MODE=true  →  run YOLOv9 + Florence-2 in-process
     - OMNIPARSER_URL set          →  call external HTTP service
     - neither configured          →  raise RuntimeError
+
+    Retries transient failures (model load, OCR hiccup, network blip) with
+    exponential backoff before giving up, so a single bad frame doesn't abort a task.
     """
-    if config.OMNIPARSER_LOCAL_MODE:
-        return _parse_local(image)
-    return _parse_http(image)
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            if config.OMNIPARSER_LOCAL_MODE:
+                return _parse_local(image)
+            return _parse_http(image)
+        except Exception as exc:  # noqa: BLE001 - we retry any transient parser failure
+            last_exc = exc
+            if attempt < retries:
+                time.sleep(min(2 ** attempt, 8))
+    raise RuntimeError(
+        f"OmniParser failed after {retries} attempts: {last_exc}"
+    ) from last_exc
 
 
 def _parse_local(image) -> dict:

@@ -47,6 +47,16 @@ VISION_TOOLS_CLAUDE = [
         "input_schema": {"type": "object", "properties": {"tab_name": {"type": "string", "description": "Name of the tab (e.g., 'Home', 'Insert', 'Page Layout', 'Data')"}}, "required": ["tab_name"]},
     },
     {
+        "name": "activate_ribbon_tab",
+        "description": "Open a ribbon tab using its Excel keyboard shortcut. Use before execute_excel_shortcut when a command lives on a specific tab. This is the keyboard-driven equivalent of click_ribbon_tab.",
+        "input_schema": {"type": "object", "properties": {"tab": {"type": "string", "description": "Tab name: home, insert, page_layout, formulas, data, review, view, help"}, "fallback_keys": {"type": "array", "items": {"type": "string"}, "description": "Optional explicit keys (e.g. ['alt','n'] for Insert)"}}, "required": ["tab"]},
+    },
+    {
+        "name": "press_alt",
+        "description": "Send an Alt-key ribbon sequence to reach commands without a direct Ctrl shortcut. Example: press_alt(['h','o','i']) opens Format Cells; press_alt(['n','c']) inserts a chart. Use when execute_excel_shortcut lacks the command. This is more reliable than parse_screen for ribbon commands.",
+        "input_schema": {"type": "object", "properties": {"keys": {"type": "array", "items": {"type": "string"}, "description": "Keys to send after Alt, e.g. ['h','o','i']"}}, "required": ["keys"]},
+    },
+    {
         "name": "click_button",
         "description": "Click a button by name. Uses UIA first (fast, no screenshot), then falls back to OmniParser.",
         "input_schema": {"type": "object", "properties": {"button_name": {"type": "string", "description": "Name of the button"}}, "required": ["button_name"]},

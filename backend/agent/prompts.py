@@ -399,8 +399,13 @@ NAVIGATION RULES:
   * Shift+F11 = Insert NEW WORKSHEET (NOT F11! F11 creates a CHART sheet)
   * Ctrl+PageDown = Next sheet, Ctrl+PageUp = Previous sheet
 - IMPORTANT: To create a new worksheet, use Shift+F11. NEVER use F11 (that creates a chart).
+- For ribbon commands WITHOUT a direct Ctrl shortcut (e.g. Format Cells, Insert Chart),
+  use press_alt with the key sequence: press_alt(['h','o','i']) for Format Cells,
+  press_alt(['n','c']) for Insert Chart. press_alt is more reliable than parse_screen.
 - Only call parse_screen when you need to interact with a ribbon button, dialog, or
   UI element that has no keyboard shortcut. Use the narrowest zone possible.
+- If parse_screen returns an error (OmniParser unavailable), DO NOT retry blindly.
+  Fall back to UIA tools: find_and_click, click_ribbon_tab, go_to_range, hotkey, press_alt.
 
 CROSS-SHEET NAVIGATION (CRITICAL):
 - NEVER use go_to_range with a sheet prefix like "Sheet1!A1" — it often fails.
