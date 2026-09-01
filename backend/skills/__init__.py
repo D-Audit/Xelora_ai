@@ -13,5 +13,14 @@ Two registration paths feed skills.base.SKILL_REGISTRY:
    agent/core.py and mcp_server/server.py need no changes either way.
 """
 
+import os
+
 from skills import loader
-loader.load_all()
+
+# Generated-code workers import only ``skills.excel_shared`` to resolve the
+# workbook that the parent task already chose.  Loading every registered skill
+# there adds avoidable startup time to each isolated Python worker and is not
+# needed for codegen safety.  The normal backend process always loads the full
+# signed registry.
+if os.getenv("XELORA_SKIP_SKILL_REGISTRY") != "1":
+    loader.load_all()

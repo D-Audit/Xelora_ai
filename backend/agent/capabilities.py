@@ -72,7 +72,10 @@ def build_execution_capabilities() -> dict[str, Any]:
             },
             "code_generation": {
                 "enabled": bool(config.ENABLE_CODEGEN_LAYER and not config.VISUAL_ONLY_MODE),
-                "use_when": "No verified skill covers the required workbook operation.",
+                "use_when": (
+                    "No available skill or safe visible command can perform the specific operation, "
+                    "or a verified skill failure explicitly requested a focused code fallback."
+                ),
             },
             "name_box_and_shortcuts": {
                 "enabled": bool(config.ENABLE_VISUAL_FALLBACK),
@@ -85,14 +88,38 @@ def build_execution_capabilities() -> dict[str, Any]:
                 "methods": ["UI Automation", "native Excel dialogs", "OmniParser for unknown visible controls"],
             },
         },
-        "selection_order": [
-            "Inspect the workbook state before changing an unfamiliar workbook.",
-            "Use a verified skill/API when it exactly covers the goal.",
-            "Use focused code generation only when no skill covers the goal.",
-            "Use Name Box navigation and a shortcut for a simple, safe visible command.",
-            "Use UI Automation, then OmniParser, only for a required visible control or popup.",
-            "Read the workbook or popup back after every important change.",
-        ],
+        "selection_policy": {
+            "principle": (
+                "There is no fixed tool order. For each atomic goal, choose the fastest safe "
+                "available capability using the current workbook and UI evidence."
+            ),
+            "navigation_and_reveal": (
+                "Use Name Box / Go To, sheet navigation shortcuts, or UI Automation to show and "
+                "select the relevant sheet, range, or chart without taking a screenshot."
+            ),
+            "standard_visible_command": (
+                "Use a documented shortcut or Ribbon KeyTip when it performs the whole command "
+                "and the resulting dialog/object can be verified."
+            ),
+            "structured_excel_change": (
+                "Use a dedicated skill/API when exact formulas, table structure, chart series, "
+                "formatting, placement, or workbook verification matter."
+            ),
+            "chart_choice": (
+                "For a simple selected source range, a verified chart shortcut is eligible. "
+                "For an exact dashboard chart (series, title, layout, style, or placement), use "
+                "the chart skill/API and visibly reveal the completed chart afterwards."
+            ),
+            "code_generation": (
+                "Use only for a genuinely uncovered operation, a verified requested fallback, or "
+                "large generated raw data that cannot fit a safe tool payload. Record why the "
+                "other available routes are unsuitable."
+            ),
+            "verification": (
+                "Read the workbook or popup back after every important change. A visible reveal "
+                "does not replace workbook verification."
+            ),
+        },
         "failure_policy": {
             "never": [
                 "repeat an unverified action blindly",
@@ -165,10 +192,12 @@ def planning_context(workbook_state: Any, excel_version_info: Any) -> str:
         "UI Automation, and OmniParser only for unknown visible controls.\n"
         f"- Excel capability evidence: {excel_version_info!r}\n"
         f"- Workbook-state evidence: {state!r}\n"
-        "- Do not use a fixed workflow. Choose the smallest valid method from the "
-        "live capability catalogue. Call get_execution_capabilities when you need "
-        "the full named skill/shortcut list. After any verified failure, read the "
-        "failure's recovery_options and choose a different compatible layer.\n"
+        "- Do not use a fixed workflow or a codegen-first workflow. Choose the smallest valid "
+        "method from the live capability catalogue for each atomic goal. Name Box/shortcuts, "
+        "skills, and code generation are alternatives selected by evidence, not a task script. "
+        "Call get_execution_capabilities when you need the full named skill/shortcut list. "
+        "After any verified failure, read the failure's recovery_options and choose a different "
+        "compatible layer.\n"
     )
 
 

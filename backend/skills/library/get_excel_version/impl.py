@@ -29,7 +29,11 @@ def run():
     app = wb.app
 
     try:
-        capabilities = get_excel_capabilities(wb)
+        # This is executed before the model's first action. Do not write a
+        # dynamic-array probe formula here: a slow or modal Excel UI must not
+        # delay the entire task or trigger an Excel restart. Legacy formulas
+        # work on every supported Excel version, including Excel 2016.
+        capabilities = get_excel_capabilities(wb, probe_dynamic_arrays=False)
         full_version = capabilities.get("application_version") or str(app.api.Version)
         build = capabilities.get("application_build") or str(app.api.Build)
     except Exception as e:

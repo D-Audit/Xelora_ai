@@ -91,7 +91,7 @@
   },
   "create_new_workbook": {
     "category": "structure",
-    "sha256_impl": "b8bc33e4215a9b2527a7938b1a17cdff1fff9759b64c3de2e512403fc266c748",
+    "sha256_impl": "682226f4de48ae3cb674115c84a9ccd52bcaaa30e5ebff2d4169b5d055ab0757",
     "sha256_skill_md": "6e24dd171367f8de475881e9073944f81f36d28a5d0462176f592b2b0596176b"
   },
   "create_pivot_table": {
@@ -108,6 +108,11 @@
     "category": "structure",
     "sha256_impl": "d1dd97ac6d5990e2a7e25855226a67e15506cd724c809c635d610bb911311eca",
     "sha256_skill_md": "8b135de50207f464dedc0b0fc92a5d73ed43dad4c5f83181a67b7f5593856a5a"
+  },
+  "create_sheets": {
+    "category": "structure",
+    "sha256_impl": "cd9591928b17d33f5168175a024816cafd42e34bc5f66c8d6003457766fdbf6c",
+    "sha256_skill_md": "8e19b57ff72277e2febc09c586a3e40219f364a975f211330d2b933895969c7d"
   },
   "create_vba_macro": {
     "category": "vba",
@@ -181,7 +186,7 @@
   },
   "get_excel_version": {
     "category": "read",
-    "sha256_impl": "c10a7846bdf8013f74b680ffabeab76466dc74f068c7f6eff0254fa614c18afb",
+    "sha256_impl": "4c4f106754e841c80b98cdb6d84dbf0ed09fc3f265e234405cf6d855d917cb4a",
     "sha256_skill_md": "dd4b43ac58b30dd624f041cb7ac1020da8a4cce4f524e0398f99902c73becb8a"
   },
   "group_rows_columns": {
@@ -211,8 +216,8 @@
   },
   "insert_formula": {
     "category": "write",
-    "sha256_impl": "c657b0679fdd1ad5d521c63f50338227d1d74095d5356718fe30a8700871faea",
-    "sha256_skill_md": "7180f5599ff2fdab979bc8b4d207bb0bf2ae5871af6779e8a2a0d7c2d3644420"
+    "sha256_impl": "e35dff68990ad1ecf1975b2506ebd0de33f5ca5293a627d882d0c795121ed068",
+    "sha256_skill_md": "d97f7978d8e0877e1467c7c5b9e3ef9e060dc34cc2909487d4ff3f86b396b7c9"
   },
   "insert_picture": {
     "category": "dashboard",
@@ -226,7 +231,7 @@
   },
   "inspect_workbook": {
     "category": "read",
-    "sha256_impl": "fc504143ff373f1fae6009388e6f787388f20bdbbf70388825e0865be800803f",
+    "sha256_impl": "bc03f45f20e5e3e5469cd4988de9e1469477e278e6587b57ed9f142b9299035f",
     "sha256_skill_md": "30e90d4ed40685f8c3366a42d7dfe4efee5be13406617be1d43c044d9b7ea58e"
   },
   "list_vba_macros": {
@@ -251,7 +256,7 @@
   },
   "open_workbook": {
     "category": "structure",
-    "sha256_impl": "68fd5afd4ce40b87c2f2ff3b9c34e10f5cb01e986716ec4934d9dab65a5e0961",
+    "sha256_impl": "8292d2d3d7d4fc33c4a1dab658ea95856ea8d9f28b54c032374d8086fe224bda",
     "sha256_skill_md": "6774cb6bd90f1029a6f067c70d9bce4dbaab3baf2edea7cbb6ecf365d3bad8f8"
   },
   "position_chart": {

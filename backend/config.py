@@ -35,7 +35,7 @@ AI_PROVIDER = _local_agent_setting("AI_PROVIDER", "gemini").strip().lower()
 # load-balancer and will never send concurrent Excel actions.
 AI_PROVIDER_FALLBACK_CHAIN = [
     provider.strip().lower()
-    for provider in _local_agent_setting("AI_PROVIDER_FALLBACK_CHAIN", "claude").split(",")
+    for provider in _local_agent_setting("AI_PROVIDER_FALLBACK_CHAIN", "openrouter,claude,gemini").split(",")
     if provider.strip() and provider.strip().lower() != AI_PROVIDER
 ]
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -46,6 +46,12 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 MAX_STEPS_PER_TASK = int(_local_agent_setting("MAX_STEPS_PER_TASK", "60"))
 MAX_RETRIES_PER_ACTION = int(_local_agent_setting("MAX_RETRIES_PER_ACTION", "2"))
 SKILL_TIMEOUT_SECONDS = int(_local_agent_setting("SKILL_TIMEOUT_SECONDS", "60"))
+# Startup must not appear frozen because an optional Excel-version probe is
+# slow.  Formula planning can safely begin in legacy-compatible mode and do a
+# deeper capability check only when it is genuinely needed.
+INITIAL_EXCEL_CHECK_TIMEOUT_SECONDS = int(
+    _local_agent_setting("INITIAL_EXCEL_CHECK_TIMEOUT_SECONDS", "8")
+)
 # A large visual workbook needs more than the old 80-action ceiling, but the
 # cap remains finite so a faulty UI loop cannot keep typing indefinitely.
 # Use the same .env precedence as the other local automation controls.
@@ -58,6 +64,9 @@ VISUAL_ONLY_MODE = _local_agent_setting("VISUAL_ONLY_MODE", "false").lower() == 
 # the precise workbook work.  Visual controls remain a narrow fallback for
 # native shortcuts and dialogs that have no dependable object-model path.
 HYBRID_VISIBLE_MODE = _local_agent_setting("HYBRID_VISIBLE_MODE", "true").lower() == "true"
+# A visible hybrid session should use the available working area by default.
+# This stays configurable for kiosk, remote-desktop, or multi-window setups.
+MAXIMIZE_EXCEL_WINDOW = _local_agent_setting("MAXIMIZE_EXCEL_WINDOW", "true").lower() == "true"
 ENABLE_VISUAL_CHECKPOINTS = _local_agent_setting("ENABLE_VISUAL_CHECKPOINTS", "true").lower() == "true"
 ENABLE_VISIBLE_RANGE_NAVIGATION = _local_agent_setting("ENABLE_VISIBLE_RANGE_NAVIGATION", "true").lower() == "true"
 # Visual recognition is optional. A backend restart or Uvicorn reload applies
@@ -128,16 +137,65 @@ GEMINI_RATE_LIMIT_WAIT_SECONDS = int(os.getenv("GEMINI_RATE_LIMIT_WAIT_SECONDS",
 # A model response that takes a full minute makes the desktop agent look
 # frozen. Fail over quickly; model switching is cheaper than blocking Excel.
 GEMINI_TIMEOUT_SECONDS = int(os.getenv("GEMINI_TIMEOUT_SECONDS", "20"))
+# A Gemini turn may try more than one model, but never indefinitely.
+GEMINI_TOTAL_TIMEOUT_SECONDS = int(os.getenv("GEMINI_TOTAL_TIMEOUT_SECONDS", "45"))
 
 # OpenRouter settings
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_MODEL_CHAIN = [
     m.strip() for m in os.getenv(
         "OPENROUTER_MODEL_CHAIN",
-        "openrouter/free"
+        # Curated only for verified tool calling.  Do not treat every model
+        # available through OpenRouter as an agent model: Xelora needs native
+        # function calls to make safe, observable Excel actions.
+        "deepseek/deepseek-v4-flash-0731,xiaomi/mimo-v2.5,tencent/hy3,minimax/minimax-m3:free,openrouter/free"
     ).split(",") if m.strip()
 ]
-OPENROUTER_TIMEOUT_SECONDS = int(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "120"))
+# Fail over quickly rather than making a desktop task appear frozen for two
+# minutes per model.  The model chain provides the availability resilience.
+OPENROUTER_TIMEOUT_SECONDS = int(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "35"))
+OPENROUTER_INTER_MODEL_DELAY_SECONDS = float(
+    os.getenv("OPENROUTER_INTER_MODEL_DELAY_SECONDS", "0")
+)
+# Applies across the complete OpenRouter model chain, not per model.  This is
+# what prevents five fallback models from looking like a multi-minute freeze.
+OPENROUTER_TOTAL_TIMEOUT_SECONDS = int(
+    os.getenv("OPENROUTER_TOTAL_TIMEOUT_SECONDS", "45")
+)
+CLAUDE_TIMEOUT_SECONDS = int(os.getenv("CLAUDE_TIMEOUT_SECONDS", "35"))
+
+
+def validate_ai_provider_configuration() -> None:
+    """Reject an explicitly selected provider that has no credential.
+
+    Secondary providers are optional and are skipped until their keys are
+    configured.  The primary provider is different: accepting a task only to
+    fail on its first model request is misleading, so fail loudly at startup.
+    """
+    configured_keys = {
+        "gemini": GEMINI_API_KEY,
+        "claude": ANTHROPIC_API_KEY,
+        "openrouter": OPENROUTER_API_KEY,
+    }
+    if AI_PROVIDER not in configured_keys:
+        raise RuntimeError(
+            "AI_PROVIDER must be one of: gemini, claude, openrouter. "
+            f"Received {AI_PROVIDER!r}."
+        )
+    if not configured_keys[AI_PROVIDER]:
+        env_name = {
+            "gemini": "GEMINI_API_KEY",
+            "claude": "ANTHROPIC_API_KEY",
+            "openrouter": "OPENROUTER_API_KEY",
+        }[AI_PROVIDER]
+        raise RuntimeError(
+            f"AI_PROVIDER={AI_PROVIDER} requires {env_name} to be set. "
+            "Add the key to backend/.env, then restart the backend."
+        )
+    if AI_PROVIDER == "openrouter" and not OPENROUTER_MODEL_CHAIN:
+        raise RuntimeError(
+            "AI_PROVIDER=openrouter requires at least one OPENROUTER_MODEL_CHAIN entry."
+        )
 ALLOW_NO_AUTH = os.getenv("ALLOW_NO_AUTH", "false").lower() == "true"
 
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]

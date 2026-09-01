@@ -8,12 +8,20 @@ import os
 import subprocess
 import time
 import xlwings as xw
+import config
 
 _CURRENT_WORKBOOK_NAME = contextvars.ContextVar("current_workbook_name", default=None)
+_CURRENT_EXCEL_PID = contextvars.ContextVar("current_excel_pid", default=None)
+_TASK_BOOTSTRAP_WORKBOOK = contextvars.ContextVar("task_bootstrap_workbook", default=False)
 _RESTART_COUNT = contextvars.ContextVar("excel_restart_count", default=0)
 
 _LAST_KNOWN_WORKBOOK_PATH = None
 _LAST_KNOWN_APP_PID = None
+# Keep a strong reference to every Excel instance Xelora starts through
+# xlwings.  On Windows, dropping the last ``xw.App`` wrapper can release the
+# final COM reference and make Excel exit after the first inspection.  A PID
+# alone is not enough to keep that process alive.
+_OWNED_EXCEL_APPS = {}
 
 MAX_RESTARTS_PER_TASK = 2
 RESPONSIVENESS_TIMEOUT_SECONDS = 20
@@ -23,11 +31,81 @@ _DYNAMIC_ARRAY_SUPPORT_CACHE = {}  # keyed by app.pid - avoids re-probing every 
 _EXCEL_CAPABILITY_CACHE = {}  # keyed by app.pid; safe to reuse for one Excel process
 
 
-def bind_workbook_context(workbook_name: str | None):
-    """Called once per task. Also resets the restart counter, so a
-    restart cap is per-task, not a permanent global limit."""
+def bind_workbook_context(workbook_name: str | None, excel_app_pid: int | None = None):
+    """Bind all automation in this task to one workbook *and* Excel process.
+
+    A workbook name alone is not a safe identity: Excel can have several
+    unsaved ``Book1`` workbooks open, including in separate processes.  The
+    process ID is therefore retained whenever it is known.  Legacy callers
+    that only know a name preserve an already-bound PID for that same task.
+    """
     _CURRENT_WORKBOOK_NAME.set(workbook_name)
+    if workbook_name is None:
+        _CURRENT_EXCEL_PID.set(None)
+        _TASK_BOOTSTRAP_WORKBOOK.set(False)
+    elif excel_app_pid is not None:
+        _CURRENT_EXCEL_PID.set(int(excel_app_pid))
     _RESTART_COUNT.set(0)
+
+
+def _app_pid(app) -> int | None:
+    """Return an xlwings application's PID without making routing fail."""
+    try:
+        return int(app.pid)
+    except Exception:
+        return None
+
+
+def retain_owned_excel_app(app) -> int | None:
+    """Keep an Xelora-created Excel process alive for the server lifetime."""
+    app_pid = _app_pid(app)
+    if app_pid is not None:
+        _OWNED_EXCEL_APPS[app_pid] = app
+    return app_pid
+
+
+def _forget_owned_excel_app(app_pid: int | None) -> None:
+    if app_pid is not None:
+        _OWNED_EXCEL_APPS.pop(int(app_pid), None)
+
+
+def _bind_resolved_workbook(book) -> None:
+    """Record the exact workbook process after a successful live lookup."""
+    global _LAST_KNOWN_WORKBOOK_PATH, _LAST_KNOWN_APP_PID
+    app_pid = _app_pid(book.app)
+    _CURRENT_WORKBOOK_NAME.set(book.name)
+    _CURRENT_EXCEL_PID.set(app_pid)
+    _LAST_KNOWN_WORKBOOK_PATH = book.fullname
+    _LAST_KNOWN_APP_PID = app_pid
+
+
+def start_task_workbook():
+    """Start exactly one dedicated, visible workbook for a new-workbook task.
+
+    This intentionally does not use ``xw.apps.active``.  Attaching a new task
+    to the user's active Excel process, then later creating a second workbook,
+    was the source of the stray Book1/Book2 windows.  A task that requested a
+    new workbook owns this one process and one startup workbook; existing
+    user workbooks are left untouched.
+    """
+    app = xw.App(visible=True)
+    retain_owned_excel_app(app)
+    _harden_app(app)
+    workbook = _active_or_new_workbook(app)
+    _ensure_workbook_has_path(workbook)
+    restore_screen_updating(app)
+    _bind_resolved_workbook(workbook)
+    _TASK_BOOTSTRAP_WORKBOOK.set(True)
+    return workbook
+
+
+def use_task_bootstrap_workbook() -> bool:
+    """Whether this task has an untouched startup workbook to save as output."""
+    return bool(_TASK_BOOTSTRAP_WORKBOOK.get())
+
+
+def mark_task_bootstrap_workbook_used() -> None:
+    _TASK_BOOTSTRAP_WORKBOOK.set(False)
 
 
 def normalize_workbook_path(file_path: str) -> str:
@@ -125,14 +203,48 @@ def restore_screen_updating(app):
         pass
 
 
+def _maximize_excel_window(app) -> dict:
+    """Maximize the live Excel application and read its state back.
+
+    xlwings' ``visible`` flag only makes the window appear; it deliberately
+    preserves whatever small/restored size Excel last used.  Excel's COM
+    ``WindowState`` is the native, monitor-aware way to maximize it without
+    sending a mouse click or stealing keyboard focus.
+    """
+    if not config.MAXIMIZE_EXCEL_WINDOW:
+        return {"requested": False, "verified": False, "status": "disabled"}
+
+    # Excel's documented XlWindowState value for xlMaximized.
+    xl_maximized = -4137
+    try:
+        app.api.WindowState = xl_maximized
+        current_state = int(app.api.WindowState)
+        return {
+            "requested": True,
+            "verified": current_state == xl_maximized,
+            "status": "maximized" if current_state == xl_maximized else "state_not_maximized",
+            "window_state": current_state,
+        }
+    except Exception as exc:
+        # Window size must not make a verified workbook edit fail.  The caller
+        # logs this as an observable UX limitation while preserving Excel work.
+        return {
+            "requested": True,
+            "verified": False,
+            "status": "maximize_unavailable",
+            "error": str(exc),
+        }
+
+
 def keep_workbook_visible(wb=None) -> dict:
     """Keep the workbook on the user's desktop while automation runs.
 
     Skills still use Excel's object model for reliable edits, but they should
     never make the work feel hidden.  This helper restores redraw, ensures the
     Excel instance is visible, and asks Excel to activate the target workbook.
-    It deliberately does not force-focus the window, so it cannot steal a
-    keystroke from the Xelora chat while a task is running.
+    It maximizes Excel through its native COM window state but deliberately
+    does not force-focus it, so it cannot steal a keystroke from the Xelora
+    chat while a task is running.
     """
     wb = wb or get_active_workbook()
     app = wb.app
@@ -141,6 +253,7 @@ def keep_workbook_visible(wb=None) -> dict:
     except Exception:
         pass
     restore_screen_updating(app)
+    window = _maximize_excel_window(app)
     try:
         wb.activate()
     except Exception:
@@ -149,6 +262,8 @@ def keep_workbook_visible(wb=None) -> dict:
         "workbook": wb.name,
         "visible": True,
         "screen_updating": True,
+        "maximized": window["verified"],
+        "maximize_status": window["status"],
     }
 
 
@@ -203,7 +318,7 @@ def supports_dynamic_arrays(app) -> bool:
     return supported
 
 
-def get_excel_capabilities(wb=None) -> dict:
+def get_excel_capabilities(wb=None, *, probe_dynamic_arrays: bool = True) -> dict:
     """Return a capability profile for the *running* Excel instance.
 
     ``Application.Version`` alone is deliberately not treated as an edition:
@@ -213,7 +328,7 @@ def get_excel_capabilities(wb=None) -> dict:
     """
     wb = wb or get_active_workbook()
     app = wb.app
-    if app.pid in _EXCEL_CAPABILITY_CACHE:
+    if probe_dynamic_arrays and app.pid in _EXCEL_CAPABILITY_CACHE:
         return _EXCEL_CAPABILITY_CACHE[app.pid]
 
     def _read_api(name):
@@ -222,7 +337,12 @@ def get_excel_capabilities(wb=None) -> dict:
         except Exception:
             return None
 
-    dynamic_arrays = supports_dynamic_arrays(app)
+    # Writing a probe formula during task startup can block on a slow Excel
+    # calculation/UI state. Start safely with legacy-compatible formulas;
+    # deeper capability probing is only needed when a later feature requires
+    # it. This also avoids touching the user's worksheet before the task has
+    # made any requested change.
+    dynamic_arrays = supports_dynamic_arrays(app) if probe_dynamic_arrays else False
     profile = {
         "application_version": _read_api("Version"),
         "application_build": _read_api("Build"),
@@ -238,8 +358,10 @@ def get_excel_capabilities(wb=None) -> dict:
             "SUMIFS/COUNTIFS, and ordinary ranges. Do not use XLOOKUP, LET, "
             "FILTER, UNIQUE, SORT, SEQUENCE, RANDARRAY, HSTACK, or VSTACK."
         ),
+        "dynamic_array_probe": "completed" if probe_dynamic_arrays else "deferred",
     }
-    _EXCEL_CAPABILITY_CACHE[app.pid] = profile
+    if probe_dynamic_arrays:
+        _EXCEL_CAPABILITY_CACHE[app.pid] = profile
     return profile
 
 
@@ -303,11 +425,13 @@ def force_restart_excel_and_reopen():
 
     killed_note = "no tracked Excel process ID - did not force-kill anything."
     if _LAST_KNOWN_APP_PID:
+        _forget_owned_excel_app(_LAST_KNOWN_APP_PID)
         subprocess.run(["taskkill", "/F", "/PID", str(_LAST_KNOWN_APP_PID)], capture_output=True)
         killed_note = f"killed Excel process PID {_LAST_KNOWN_APP_PID} (only that one process)."
         time.sleep(1)
 
     app = xw.App(visible=True)
+    retain_owned_excel_app(app)
 
     if not _wait_until_responsive(app):
         raise RuntimeError(
@@ -330,34 +454,47 @@ def force_restart_excel_and_reopen():
         _LAST_KNOWN_WORKBOOK_PATH = wb.fullname
 
     restore_screen_updating(app)
+    _maximize_excel_window(app)
+    # Preserve the per-task restart count; rebinding after recovery must not
+    # make a repeatedly hung Excel instance eligible for unlimited restarts.
+    _CURRENT_WORKBOOK_NAME.set(wb.name)
+    _CURRENT_EXCEL_PID.set(_app_pid(app))
     return wb, killed_note
 
 
 def get_active_workbook():
     global _LAST_KNOWN_WORKBOOK_PATH, _LAST_KNOWN_APP_PID
     pinned_name = _CURRENT_WORKBOOK_NAME.get()
+    pinned_pid = _CURRENT_EXCEL_PID.get()
 
     if pinned_name:
         for app in xw.apps:
+            app_pid = _app_pid(app)
+            if pinned_pid is not None and app_pid != pinned_pid:
+                continue
             for book in app.books:
                 if book.name == pinned_name:
                     _harden_app(app)
                     _ensure_workbook_has_path(book)
                     restore_screen_updating(app)
-                    _LAST_KNOWN_WORKBOOK_PATH = book.fullname
-                    _LAST_KNOWN_APP_PID = app.pid
+                    _bind_resolved_workbook(book)
                     return book
 
         # A pinned task must never fall through to an unrelated active
         # workbook.  It is safer to stop and ask the user to reopen the named
         # file than to make a correct-looking change to the wrong workbook.
+        identity = (
+            f" in Excel process {pinned_pid}"
+            if pinned_pid is not None else ""
+        )
         raise RuntimeError(
-            f"The task's target workbook '{pinned_name}' is not open in Excel. "
+            f"The task's target workbook '{pinned_name}'{identity} is not open in Excel. "
             "Reopen that workbook and retry the action."
         )
 
     if len(xw.apps) == 0:
         app = xw.App(visible=True)
+        retain_owned_excel_app(app)
         _harden_app(app)
         wb = _active_or_new_workbook(app)
     else:
@@ -367,8 +504,7 @@ def get_active_workbook():
 
     _ensure_workbook_has_path(wb)
     restore_screen_updating(app)
-    _LAST_KNOWN_WORKBOOK_PATH = wb.fullname
-    _LAST_KNOWN_APP_PID = app.pid
+    _bind_resolved_workbook(wb)
     return wb
 
 

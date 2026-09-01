@@ -67,9 +67,43 @@ def _attribute_path(node) -> str | None:
     return None
 
 
+def _formula_literal(node: ast.AST) -> bool:
+    """Whether a value assignment is trying to smuggle an Excel formula."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value.lstrip().startswith("=")
+    if isinstance(node, ast.JoinedStr):
+        first_text = next(
+            (
+                value.value
+                for value in node.values
+                if isinstance(value, ast.Constant) and isinstance(value.value, str)
+            ),
+            "",
+        )
+        return first_text.lstrip().startswith("=")
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return any(_formula_literal(item) for item in node.elts)
+    return False
+
+
+def _literal_sheet_name(node: ast.Subscript) -> str | None:
+    """Return a literal ``wb.sheets['Name']`` target when one is present."""
+    if not isinstance(node.value, ast.Attribute) or node.value.attr != "sheets":
+        return None
+    slice_node = node.slice
+    if isinstance(slice_node, ast.Constant) and isinstance(slice_node.value, str):
+        return slice_node.value
+    return None
+
+
 def _check_ast(code: str):
     tree = ast.parse(code)
+    referenced_sheets: set[str] = set()
     for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript):
+            sheet_name = _literal_sheet_name(node)
+            if sheet_name:
+                referenced_sheets.add(sheet_name)
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = alias.name.split(".")[0]
@@ -111,6 +145,34 @@ def _check_ast(code: str):
                 f"Direct Excel formula assignment via '.{node.attr}' is not allowed in generated code. "
                 f"Use the insert_formula skill so formulas go through verification and timeout handling."
             )
+        elif (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Attribute) and target.attr.lower() == "value"
+                for target in node.targets
+            )
+            and _formula_literal(node.value)
+        ):
+            raise CodeRejected(
+                "Writing a formula-looking string through '.value' is not allowed in generated code. "
+                "Use the insert_formula skill so Excel writes and verifies the formula."
+            )
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr.lower() == "save"
+        ):
+            raise CodeRejected(
+                "Generated code must not save or rename the workbook. Use save_workbook only after "
+                "the final workbook inspection succeeds."
+            )
+
+    if len(referenced_sheets) > 1:
+        raise CodeRejected(
+            "Generated code must have one atomic worksheet target, not a multi-sheet workbook build. "
+            "Use create_sheets and the dedicated Excel skills for workbook structure, formulas, "
+            "tables, charts, and final saving."
+        )
 
 
 _RUNNER_TEMPLATE = """
@@ -119,8 +181,9 @@ import sys
 from skills.excel_shared import bind_workbook_context, get_active_workbook  # noqa: F401
 
 WORKBOOK_NAME = {workbook_name}
+EXCEL_APP_PID = {excel_app_pid}
 if WORKBOOK_NAME:
-    bind_workbook_context(WORKBOOK_NAME)
+    bind_workbook_context(WORKBOOK_NAME, EXCEL_APP_PID)
 
 def get_task_workbook():
     # Resolve the workbook pinned to this task, never Excel's global active book.
@@ -129,6 +192,24 @@ def get_task_workbook():
 result = None
 
 {user_code}
+
+# A Save As operation can change the workbook's visible name.  Return the live
+# identity from the same COM session so the parent task never remains pinned to
+# the stale Book1 name after a successful generated operation.
+if isinstance(result, dict):
+    try:
+        # Generated workbook code conventionally keeps its bound Book in
+        # ``wb``. Reuse that exact COM object after Save As rather than
+        # resolving the old name again. Never open/attach to Excel merely to
+        # enrich a data-only code result that did not use a task workbook.
+        _result_workbook = globals().get("wb")
+        if _result_workbook is None and WORKBOOK_NAME:
+            _result_workbook = get_task_workbook()
+        if _result_workbook is not None:
+            result.setdefault("workbook_name", _result_workbook.name)
+            result.setdefault("excel_app_pid", _result_workbook.app.pid)
+    except Exception:
+        pass
 
 print("___RESULT_START___")
 print(json.dumps(result if result is not None else {{"_runner_error": "code ran but did not set `result`"}}, default=str))
@@ -146,6 +227,9 @@ def _subprocess_env(project_root: str) -> dict:
     some calls - setting PYTHONPATH explicitly is what fixes it."""
     env = os.environ.copy()
     env["PYTHONPATH"] = project_root + os.pathsep + env.get("PYTHONPATH", "")
+    # The generated worker only needs skills.excel_shared. Avoid paying the
+    # import cost of the complete signed skill catalogue on every fallback.
+    env["XELORA_SKIP_SKILL_REGISTRY"] = "1"
     return env
 
 
@@ -154,6 +238,7 @@ def run_generated_code(
     project_root: str,
     timeout_seconds: int = 100,
     workbook_name: str | None = None,
+    excel_app_pid: int | None = None,
 ) -> dict:
     """
     Validates and runs AI-generated Excel automation code in a
@@ -181,6 +266,7 @@ def run_generated_code(
         # This is Python source, not JSON.  ``json.dumps(None)`` produces
         # ``null``, which crashes the subprocess before user code runs.
         workbook_name=repr(workbook_name),
+        excel_app_pid=repr(excel_app_pid),
     )
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:

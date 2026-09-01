@@ -37,7 +37,12 @@ except ImportError:
     _HAS_WINDOW_SAFETY = False
 
 
-def _run_skill_with_timeout(tool_name: str, tool_input: dict, timeout: int = SKILL_TIMEOUT_SECONDS):
+def _run_skill_with_timeout(
+    tool_name: str,
+    tool_input: dict,
+    timeout: int = SKILL_TIMEOUT_SECONDS,
+    recover_excel_on_timeout: bool = True,
+):
     ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     # The selected workbook is stored in a ContextVar.  New threads do not
     # inherit it automatically, which previously let a skill fall back to
@@ -52,9 +57,26 @@ def _run_skill_with_timeout(tool_name: str, tool_input: dict, timeout: int = SKI
         timed_out = True
         future.cancel()
 
+        if not recover_excel_on_timeout:
+            return {
+                "error": f"'{tool_name}' did not finish within {timeout}s.",
+                "verified": False,
+                "status": "timeout",
+                "verification_note": (
+                    "This optional startup check timed out. Excel was left open and no workbook "
+                    "restart was attempted. Xelora will use conservative Excel-compatible behavior."
+                ),
+            }
+
         from skills.excel_shared import force_restart_excel_and_reopen
+        recovered_identity = {}
         try:
-            force_restart_excel_and_reopen()
+            recovered_workbook, _ = force_restart_excel_and_reopen()
+            recovered_identity = {
+                "workbook_recovered": True,
+                "workbook_name": recovered_workbook.name,
+                "excel_app_pid": recovered_workbook.app.pid,
+            }
             recovery_note = "Excel was automatically restarted to clear the hang - everything written before this point is safely saved."
         except Exception as recovery_error:
             recovery_note = f"Attempted auto-recovery but it also failed: {recovery_error}"
@@ -64,6 +86,7 @@ def _run_skill_with_timeout(tool_name: str, tool_input: dict, timeout: int = SKI
                      f"Excel was restarted to recover the automation session. {recovery_note}",
             "verified": False,
             "status": "timeout_recovered",
+            **recovered_identity,
         }
     finally:
         ex.shutdown(wait=not timed_out, cancel_futures=True)
@@ -74,6 +97,10 @@ class AgentTask:
         self.instruction = instruction
         self.user_id = user_id
         self.workbook_name = workbook_name
+        # Set after the first live workbook inspection.  Names such as Book1
+        # are not unique, so all later codegen and visual fallback work must
+        # retain this process identity too.
+        self.excel_app_pid = None
         self.messages = [{"role": "user", "content": instruction}]
         self.is_paused = False
         self.is_done = False
@@ -95,6 +122,11 @@ class AgentTask:
         self.final_verification_requested = False
         self.formula_error_repair_requested = False
         self.last_formula_error_audit = None
+        # A formula that stored but returned #REF!, #VALUE!, or blank output
+        # is a hard dependency boundary. The task may inspect freely and
+        # repair the affected sheet, but it may not build downstream sheets
+        # from an unverified calculation.
+        self.pending_formula_repair = None
         # Gemini may return several parallel function calls in one response.
         # Their results must be returned together, otherwise a later unsigned
         # call is treated as a malformed new tool turn.
@@ -211,6 +243,7 @@ class AgentTask:
             self.final_verification_requested = False
             self.formula_error_repair_requested = False
             self.last_formula_error_audit = None
+            self.pending_formula_repair = None
             self.workbook_state = None
             self.execution_capabilities = None
             self.gemini_expected_function_responses = 0
@@ -529,19 +562,31 @@ def _normalise_visual_tool_result(tool_name: str, result):
     }
 
 
-def _is_lost_visual_excel_window(result: dict | None) -> bool:
-    """Recognise a lost task-bound Excel window as a terminal visual-session error."""
+def _is_lost_task_workbook(result: dict | None) -> bool:
+    """Recognise a lost task workbook as terminal in every execution mode.
+
+    Retrying with codegen, shortcuts, or another skill cannot recreate the
+    exact workbook safely. It only wastes time and risks editing a different
+    Excel window.
+    """
     if not isinstance(result, dict):
         return False
     detail = " ".join(
         str(result.get(key, "")) for key in ("error", "verification_note", "status")
     ).lower()
     return any(phrase in detail for phrase in (
+        "task's target workbook",
+        "target workbook is not open in excel",
         "xelora-owned excel window is no longer visible",
         "excel workbook bound to this task is no longer visible",
         "excel process is no longer visible",
         "agent window lost",
     ))
+
+
+def _is_lost_visual_excel_window(result: dict | None) -> bool:
+    """Backward-compatible name for visual callers."""
+    return _is_lost_task_workbook(result)
 
 
 def _has_pending_create_table_completion(task: AgentTask, popups: list[dict]) -> bool:
@@ -569,7 +614,14 @@ def _has_pending_create_table_completion(task: AgentTask, popups: list[dict]) ->
     return False
 
 
-def dispatch_action(tool_name: str, tool_input: dict, workbook_name: str | None = None):
+def dispatch_action(
+    tool_name: str,
+    tool_input: dict,
+    workbook_name: str | None = None,
+    excel_app_pid: int | None = None,
+    skill_timeout: int | None = None,
+    recover_excel_on_timeout: bool = True,
+):
     if tool_name == "get_execution_capabilities":
         return build_execution_capabilities(), "capability_catalog", None
 
@@ -613,7 +665,12 @@ def dispatch_action(tool_name: str, tool_input: dict, workbook_name: str | None 
         }, "input_guard", None
 
     if has_skill(tool_name):
-        return _run_skill_with_timeout(tool_name, tool_input), "skill", None
+        return _run_skill_with_timeout(
+            tool_name,
+            tool_input,
+            timeout=skill_timeout or SKILL_TIMEOUT_SECONDS,
+            recover_excel_on_timeout=recover_excel_on_timeout,
+        ), "skill", None
 
     if tool_name == "run_excel_code":
         if not config.ENABLE_CODEGEN_LAYER:
@@ -628,11 +685,31 @@ def dispatch_action(tool_name: str, tool_input: dict, workbook_name: str | None 
                     "status": "codegen_disabled_visual_mode",
                 }, "blocked", None
             return {"error": "The code-generation layer is disabled by configuration.", "verified": False}, "blocked", None
+        fallback_reason = str(tool_input.get("fallback_reason") or "").strip()
+        atomic_goal = str(tool_input.get("atomic_goal") or "").strip()
+        alternatives_considered = tool_input.get("alternatives_considered")
+        reveal_reference = str(tool_input.get("reveal_reference") or "").strip()
+        valid_alternatives = (
+            isinstance(alternatives_considered, list)
+            and any(isinstance(item, str) and item.strip() for item in alternatives_considered)
+        )
+        if not fallback_reason or not atomic_goal or not valid_alternatives or not reveal_reference:
+            return {
+                "verified": False,
+                "status": "codegen_selection_evidence_required",
+                "error": (
+                    "run_excel_code requires fallback_reason, atomic_goal, alternatives_considered, "
+                    "and reveal_reference. Choose a shortcut or skill when one can safely do the "
+                    "operation; otherwise name the one bounded goal, explain why the considered "
+                    "routes are unsuitable, and state the result range or chart source to reveal."
+                ),
+            }, "codegen_guard", None
         code = tool_input.get("code", "")
         result = run_generated_code(
             code,
             project_root=PROJECT_ROOT,
             workbook_name=workbook_name,
+            excel_app_pid=excel_app_pid,
         )
         if result.get("verified") is True:
             # The codegen runner uses a separate process. Save the same
@@ -641,7 +718,7 @@ def dispatch_action(tool_name: str, tool_input: dict, workbook_name: str | None 
             try:
                 from skills.excel_shared import bind_workbook_context, save_active_workbook_best_effort
 
-                bind_workbook_context(workbook_name)
+                bind_workbook_context(workbook_name, excel_app_pid)
                 save_active_workbook_best_effort()
             except Exception:
                 pass
@@ -710,10 +787,14 @@ def _adopt_workbook_from_result(task: AgentTask, result: dict, db=None, db_task_
         return
 
     task.workbook_name = workbook_name
+    excel_app_pid = result.get("excel_app_pid")
+    if not isinstance(excel_app_pid, int):
+        excel_app_pid = getattr(task, "excel_app_pid", None)
+    task.excel_app_pid = excel_app_pid
     try:
         from skills.excel_shared import bind_workbook_context
 
-        bind_workbook_context(workbook_name)
+        bind_workbook_context(workbook_name, excel_app_pid)
     except Exception:
         pass
 
@@ -727,6 +808,46 @@ def _adopt_workbook_from_result(task: AgentTask, result: dict, db=None, db_task_
                 db.commit()
         except Exception:
             # Persistence failure must not discard a verified workbook action.
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+
+def _adopt_recovered_workbook_identity(task: AgentTask, result: dict, db=None, db_task_id: int = None) -> None:
+    """Rebind after a timeout restart even though the timed-out action failed.
+
+    A restart creates a new Excel process by design.  Task 265 retained the
+    dead PID after this recovery, so subsequent Name Box navigation and
+    checkpoints correctly refused to touch the new workbook window.  The
+    recovered workbook identity is safe evidence from the restart routine,
+    not evidence that the original action succeeded.
+    """
+    if not isinstance(result, dict) or result.get("workbook_recovered") is not True:
+        return
+    workbook_name = result.get("workbook_name")
+    excel_app_pid = result.get("excel_app_pid")
+    if not isinstance(workbook_name, str) or not workbook_name.strip() or not isinstance(excel_app_pid, int):
+        return
+
+    task.workbook_name = workbook_name
+    task.excel_app_pid = excel_app_pid
+    try:
+        from skills.excel_shared import bind_workbook_context
+
+        bind_workbook_context(workbook_name, excel_app_pid)
+    except Exception:
+        pass
+
+    if db is not None and db_task_id is not None:
+        try:
+            from models import Task
+
+            db_task = db.get(Task, db_task_id)
+            if db_task is not None:
+                db_task.workbook_name = workbook_name
+                db.commit()
+        except Exception:
             try:
                 db.rollback()
             except Exception:
@@ -788,7 +909,12 @@ def _detect_excel_version_once(task: AgentTask):
     if task.excel_version_info is not None:
         return task.excel_version_info
     try:
-        result, _, _ = dispatch_action("get_excel_version", {})
+        result, _, _ = dispatch_action(
+            "get_excel_version",
+            {},
+            skill_timeout=config.INITIAL_EXCEL_CHECK_TIMEOUT_SECONDS,
+            recover_excel_on_timeout=False,
+        )
         task.excel_version_info = result
     except Exception as e:
         task.excel_version_info = {"status": "detection_failed", "error": str(e), "verified": False}
@@ -916,10 +1042,27 @@ def _capture_visual_checkpoint(task: AgentTask, tool_name: str) -> None:
 
 def _visible_range_reference(tool_name: str, tool_input: dict) -> str | None:
     """Return the range worth showing in the Name Box before a skill edits it."""
-    range_keys = ("cell", "start_cell", "cell_range", "data_range", "source_range", "reference")
+    range_keys = (
+        "reveal_reference", "cell", "start_cell", "cell_range", "data_range",
+        "source_range", "reference",
+    )
     address = next((tool_input.get(key) for key in range_keys if tool_input.get(key)), None)
-    if not isinstance(address, str) or "!" in address:
-        return address if isinstance(address, str) else None
+    if not isinstance(address, str):
+        return None
+    if "!" in address:
+        sheet_name, cell_reference = address.rsplit("!", 1)
+        stripped_sheet = sheet_name.strip()
+        # Excel accepts quoted sheet names universally, but bare multi-word
+        # names make Ctrl+G reject the reference. Normalise this UI-only
+        # representation instead of letting a missing quote silently skip
+        # the visible navigation.
+        if not (
+            len(stripped_sheet) >= 2
+            and stripped_sheet.startswith("'")
+            and stripped_sheet.endswith("'")
+        ) and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", stripped_sheet):
+            stripped_sheet = "'" + stripped_sheet.replace("'", "''") + "'"
+        return f"{stripped_sheet}!{cell_reference.strip()}"
 
     # Workbook-wide actions such as creating a worksheet do not have a target
     # range.  Selecting a made-up cell would look human but provide no value.
@@ -952,6 +1095,45 @@ def _show_target_in_excel(task: AgentTask, tool_name: str, tool_input: dict) -> 
         # visual navigation failure must not turn into a duplicate edit or
         # block the verified operation.
         task.log_step(f"⌖ Name Box navigation skipped for {tool_name}: {exc}")
+
+
+def _show_verified_result_in_excel(
+    task: AgentTask,
+    tool_name: str,
+    tool_input: dict,
+    result: dict,
+) -> None:
+    """Reveal an outcome that did not have an existing range before it ran.
+
+    Most structured skills are already shown through the Name Box before they
+    edit their target. A newly created sheet does not exist yet, and a bounded
+    codegen batch should show its changed range after it has completed.
+    """
+    if (
+        config.VISUAL_ONLY_MODE
+        or not config.HYBRID_VISIBLE_MODE
+        or not config.ENABLE_VISIBLE_RANGE_NAVIGATION
+    ):
+        return
+
+    reference = None
+    if tool_name == "create_sheet":
+        sheet_name = result.get("sheet_name")
+        if isinstance(sheet_name, str) and sheet_name.strip():
+            escaped = sheet_name.strip().replace("'", "''")
+            reference = f"'{escaped}'!A1"
+    elif tool_name == "run_excel_code":
+        reference = _visible_range_reference(tool_name, tool_input)
+
+    if reference is None:
+        return
+    try:
+        from vision import ui_control
+
+        ui_control.go_to_range(reference)
+        task.log_step(f"Showing verified result {reference} in Excel after {tool_name}.")
+    except Exception as exc:
+        task.log_step(f"Result navigation skipped for {tool_name}: {exc}")
 
 
 def _live_sheet_names() -> list[str]:
@@ -1202,6 +1384,45 @@ _OBSERVATION_TOOL_NAMES = {
     "verify_task_completion", "get_execution_capabilities",
 }
 
+
+_FORMULA_REPAIR_FAILURE_STATUSES = {
+    "formula_error",
+    "formula_blank_result",
+    "formula_not_preserved",
+    "fill_down_not_preserved",
+}
+
+
+def _pending_formula_repair_blocks_action(task: AgentTask, tool_name: str, tool_input: dict) -> bool:
+    """Whether a failed calculation must be repaired before this write.
+
+    Formula errors are different from a cosmetic failure: a summary or chart
+    built on top of one is necessarily untrustworthy. We permit read-only
+    inspection and repairs on the affected sheet only; all other writes wait
+    for a verified repaired formula and a read-back audit.
+    """
+    pending = getattr(task, "pending_formula_repair", None)
+    if not isinstance(pending, dict) or tool_name in _OBSERVATION_TOOL_NAMES:
+        return False
+    expected_sheet = str(pending.get("sheet_name") or "").strip().casefold()
+    supplied_sheet = str(tool_input.get("sheet_name") or "").strip().casefold()
+    return not expected_sheet or supplied_sheet != expected_sheet
+
+
+def _formula_repair_audit_passed(task: AgentTask, tool_name: str, tool_input: dict, result: dict) -> bool:
+    """Clear a formula repair hold only after an explicit, clean read-back."""
+    pending = getattr(task, "pending_formula_repair", None)
+    if not isinstance(pending, dict) or tool_name != "inspect_workbook":
+        return False
+    if result.get("verified") is not True or not pending.get("formula_rewritten"):
+        return False
+    expected_sheet = str(pending.get("sheet_name") or "").strip().casefold()
+    supplied_sheet = str(tool_input.get("sheet_name") or "").strip().casefold()
+    # A workbook-wide audit has no supplied sheet and is stronger evidence.
+    if supplied_sheet and supplied_sheet != expected_sheet:
+        return False
+    return not result.get("formula_errors") and int(result.get("formula_error_count") or 0) == 0
+
 _VISUAL_SAVE_TOOL_NAMES = {"save_workbook"}
 
 
@@ -1275,11 +1496,13 @@ _CODEGEN_FALLBACK_PREFLIGHT_STATUSES = {
     "invalid_path",
     "invalid_row_shape",
     "invalid_structured_reference",
+    "table_name_used_as_sheet_reference",
     "no_data_found",
     "not_found",
     "refused",
     "spill_area_blocked",
     "trust_not_enabled",
+    "whole_column_reference_blocked",
 }
 
 
@@ -1347,7 +1570,8 @@ def _schedule_codegen_fallback(task: AgentTask, tool_name: str, tool_input: dict
         "instruction": (
             "Generate a focused run_excel_code call for the same workbook goal. "
             "Use the original skill arguments already present in the tool-call history; "
-            "do not repeat the failed skill first."
+            "do not repeat the failed skill first. Include fallback_reason naming this verified "
+            "failure, one atomic_goal, alternatives_considered, and a valid reveal_reference for the result."
         ),
     }
 
@@ -1447,8 +1671,23 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 task.log_step(task.final_response)
                 return task
     if not config.VISUAL_ONLY_MODE and can_start_excel_session:
-        from skills.excel_shared import bind_workbook_context
-        bind_workbook_context(task.workbook_name)
+        # A task that asks for a new workbook must not attach to whichever
+        # Excel window happens to be active.  Give it one dedicated startup
+        # workbook before planning; a later create_new_workbook call saves
+        # that same Book1 instead of creating Book2.
+        instruction = task.instruction.lower()
+        use_existing = bool(re.search(
+            r"\b(existing|open|current|my)\s+(excel\s+)?(workbook|spreadsheet|data)\b"
+            r"|\buse\s+(the|this|my)\s+(excel\s+)?(workbook|spreadsheet|data)\b",
+            instruction,
+        ))
+        from skills.excel_shared import bind_workbook_context, start_task_workbook
+        if not use_existing and not task.workbook_name:
+            workbook = start_task_workbook()
+            task.workbook_name = workbook.name
+            task.excel_app_pid = workbook.app.pid
+        else:
+            bind_workbook_context(task.workbook_name, task.excel_app_pid)
         _keep_excel_visible(task)
 
     excel_version_info = _detect_excel_version_once(task) if can_start_excel_session else None
@@ -1496,7 +1735,8 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             task.log_step(f"Using Excel Go To for: {go_to_reference}")
             try:
                 result, execution_layer, generated_code = dispatch_action(
-                    tool_name, tool_input, workbook_name=task.workbook_name
+                    tool_name, tool_input, workbook_name=task.workbook_name,
+                    excel_app_pid=task.excel_app_pid,
                 )
             except Exception as exc:
                 result = {"error": str(exc), "verified": False}
@@ -1520,7 +1760,8 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             task.log_step(f"Using Excel shortcut for the {tab.title()} tab: {' + '.join(keys)}")
             try:
                 result, execution_layer, generated_code = dispatch_action(
-                    tool_name, tool_input, workbook_name=task.workbook_name
+                    tool_name, tool_input, workbook_name=task.workbook_name,
+                    excel_app_pid=task.excel_app_pid,
                 )
             except Exception as exc:
                 result = {"error": str(exc), "verified": False}
@@ -1639,6 +1880,20 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 task.structured_steps.append({"type": "reasoning", "text": text})
 
         if not tool_calls:
+            if not text_blocks:
+                # An empty provider response is not a decision and never
+                # means that the requested Excel work is complete. Providers
+                # normally filter this themselves; this guard protects every
+                # provider and prevents a blank workbook from being reported
+                # as a finished task.
+                task.is_done = True
+                task.final_response = (
+                    "INCOMPLETE: The AI provider returned no action and no response text. "
+                    "No workbook change was made. Retry after the model service is available."
+                )
+                task.log_step(task.final_response)
+                task.chat_transcript.append({"role": "assistant", "text": task.final_response})
+                break
             if task.awaiting_approval:
                 task.is_done = True
                 task.final_response = text_blocks[-1] if text_blocks else (
@@ -1892,6 +2147,30 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 providers.submit_tool_result(task, tool_call, result)
                 continue
 
+            if _pending_formula_repair_blocks_action(task, tool_name, tool_input):
+                pending = task.pending_formula_repair or {}
+                result = {
+                    "verified": False,
+                    "status": "formula_repair_required",
+                    "error": (
+                        f"Formula verification failed on '{pending.get('sheet_name')}' "
+                        f"at {pending.get('cell')}. Do not create or edit another worksheet yet. "
+                        "Inspect the affected sheet, repair the formula or its source data there, "
+                        "then run inspect_workbook to confirm it has no Excel formula errors."
+                    ),
+                    "failed_formula": pending,
+                }
+                task.log_step(
+                    f"Blocked {tool_name}: formula repair is still required on "
+                    f"{pending.get('sheet_name')} before dependent work can continue."
+                )
+                task.structured_steps.append({
+                    "type": "action", "tool_name": tool_name, "execution_layer": "formula_repair_guard",
+                    "input": tool_input, "result": result, "status": "blocked",
+                })
+                providers.submit_tool_result(task, tool_call, result)
+                continue
+
             if (
                 tool_name not in _OBSERVATION_TOOL_NAMES
                 and action_signature in task.successful_action_signatures
@@ -2107,7 +2386,8 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                     execution_layer, generated_code = "popup_gate", None
                 else:
                     result, execution_layer, generated_code = dispatch_action(
-                        tool_name, tool_input, workbook_name=task.workbook_name
+                        tool_name, tool_input, workbook_name=task.workbook_name,
+                        excel_app_pid=task.excel_app_pid,
                     )
                 status = "success"
                 is_failure = isinstance(result, dict) and result.get("verified") is False
@@ -2138,6 +2418,23 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             )
 
             if is_failure:
+                _adopt_recovered_workbook_identity(task, result, db, db_task_id)
+                if (
+                    tool_name == "insert_formula"
+                    and isinstance(result, dict)
+                    and result.get("status") in _FORMULA_REPAIR_FAILURE_STATUSES
+                ):
+                    task.pending_formula_repair = {
+                        "sheet_name": tool_input.get("sheet_name"),
+                        "cell": tool_input.get("cell"),
+                        "formula": tool_input.get("formula"),
+                        "status": result.get("status"),
+                        "formula_rewritten": False,
+                    }
+                    task.log_step(
+                        "Formula verification failed; downstream worksheet changes are paused until "
+                        f"'{tool_input.get('sheet_name')}' is repaired and audited."
+                    )
                 result.setdefault(
                     "recovery_options",
                     recovery_options(tool_name, execution_layer, result),
@@ -2149,8 +2446,8 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                     tool_name=tool_name,
                     safe_to_continue=False,
                 )
-                visual_window_lost = config.VISUAL_ONLY_MODE and _is_lost_visual_excel_window(result)
-                if visual_window_lost:
+                workbook_lost = _is_lost_task_workbook(result)
+                if workbook_lost:
                     status = "failed"
                     task.set_recovery_state(
                         "needs_user_action",
@@ -2199,6 +2496,22 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             else:
                 task.log_step(f"✅ Done: {tool_name} ({execution_layer}) -> {result}")
 
+                pending = getattr(task, "pending_formula_repair", None)
+                if (
+                    isinstance(pending, dict)
+                    and tool_name == "insert_formula"
+                    and str(tool_input.get("sheet_name") or "").strip().casefold()
+                    == str(pending.get("sheet_name") or "").strip().casefold()
+                ):
+                    pending["formula_rewritten"] = True
+                    task.log_step(
+                        "Formula repair was written. A clean workbook inspection is still required "
+                        "before work can move to another sheet."
+                    )
+                if _formula_repair_audit_passed(task, tool_name, tool_input, result):
+                    task.pending_formula_repair = None
+                    task.log_step("Formula repair audit passed; dependent workbook work may continue.")
+
             task.structured_steps.append({
                 "type": "action", "tool_name": tool_name, "execution_layer": execution_layer,
                 "input": tool_input, "result": result, "status": status,
@@ -2234,6 +2547,7 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                     task.final_verification_requested = False
                     task.final_save_requested = False
                 _keep_excel_visible(task)
+                _show_verified_result_in_excel(task, tool_name, tool_input, result)
                 _capture_visual_checkpoint(task, tool_name)
 
             if config.VISUAL_ONLY_MODE and status == "success" and tool_name not in READ_ONLY_TOOL_NAMES:
@@ -2244,11 +2558,11 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
 
             providers.submit_tool_result(task, tool_call, result)
 
-            if is_failure and config.VISUAL_ONLY_MODE and _is_lost_visual_excel_window(result):
+            if is_failure and _is_lost_task_workbook(result):
                 task.is_done = True
                 task.final_response = (
-                    "INCOMPLETE: The Excel window bound to this task was closed or became unavailable. "
-                    "Xelora stopped safely and did not send any recovery shortcuts or open a new workbook. "
+                    "INCOMPLETE: The workbook bound to this task became unavailable. "
+                    "Xelora stopped safely and did not try another workbook, code generation, or shortcuts. "
                     "Keep the intended workbook open, then start a new task."
                 )
                 task.chat_transcript.append({"role": "assistant", "text": task.final_response})

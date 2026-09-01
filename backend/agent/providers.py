@@ -11,6 +11,7 @@ options every turn, in the priority order explained in the system prompt.
 
 import base64
 import json
+import time
 
 import config
 from skills.registry import claude_tools, gemini_tools
@@ -18,9 +19,11 @@ from skills.registry import claude_tools, gemini_tools
 CODEGEN_TOOL_CLAUDE = {
     "name": "run_excel_code",
     "description": (
-        "Runs real Python (xlwings) against the live workbook for anything "
-        "the skill library doesn't cover, or for the exact goal of a skill result that "
-        "explicitly requires codegen fallback. Must use native Excel features, never a "
+        "Runs real Python (xlwings) only when no available skill or safe visible command "
+        "covers the exact operation, for a large raw-data batch that cannot fit a tool payload, "
+        "or for the exact goal of a skill result that explicitly requires codegen fallback. "
+        "The call must explain that decision and name the result range/chart source that Excel "
+        "should visibly reveal. Must use native Excel features, never a "
         "precomputed value. Allowed imports are xlwings, datetime, math, random, "
         "re, json, and statistics. Never assign .formula or .formula2 here: use the "
         "insert_formula skill (with fill_to for a formula column) so formula writes are "
@@ -30,8 +33,27 @@ CODEGEN_TOOL_CLAUDE = {
     ),
     "input_schema": {
         "type": "object",
-        "properties": {"code": {"type": "string", "description": "Python source code to execute."}},
-        "required": ["code"],
+        "properties": {
+            "code": {"type": "string", "description": "Python source code to execute."},
+            "fallback_reason": {
+                "type": "string",
+                "description": "Why the available shortcut and skill routes cannot safely perform this exact operation."
+            },
+            "atomic_goal": {
+                "type": "string",
+                "description": "One bounded worksheet-level goal, not a whole-workbook build."
+            },
+            "alternatives_considered": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Named shortcuts/skills considered, with why each is unsuitable for this one atomic goal."
+            },
+            "reveal_reference": {
+                "type": "string",
+                "description": "A valid range or defined name to visibly select after the change, e.g. 'Sales Summary'!A1."
+            },
+        },
+        "required": ["code", "fallback_reason", "atomic_goal", "alternatives_considered", "reveal_reference"],
     },
 }
 
@@ -376,9 +398,18 @@ _GEMINI_READ_ONLY_TOOL_NAMES = {
 # after that first verified edit, the model receives the complete catalogue in
 # AUTO mode for specialist operations.
 _GEMINI_INITIAL_MUTATION_TOOLS = {
-    "create_sheet", "write_cell", "write_table", "insert_formula",
+    "create_sheet", "create_sheets", "write_cell", "write_table", "insert_formula",
     "apply_formatting", "conditional_formatting", "freeze_panes",
     "auto_fit_columns", "sort_range", "create_pivot_table", "create_chart",
+}
+
+# Gemini's initial forced-call decoder needs a bounded catalogue. These
+# verified visual choices keep that technical limit from hard-wiring the
+# first real workbook action to skills or codegen. They are added only when
+# their tool declarations are actually available for this session.
+_GEMINI_INITIAL_VISUAL_MUTATION_TOOLS = {
+    "go_to_range", "go_to_sheet", "execute_excel_shortcut", "press_alt",
+    "press_shortcut", "create_clustered_column_chart", "create_pie_chart",
 }
 
 
@@ -566,34 +597,6 @@ def _gemini_tool_config(task):
         # Enough actions - let model finish
         return None
 
-    if _is_new_dashboard_build(task) and not task.final_verification_requested:
-        created_sheets = _successful_actions(action_steps, "create_sheet")
-        written_tables = _successful_actions(action_steps, "write_table")
-        if not created_sheets:
-            # Do not let Gemini write to an invented sheet name and create it
-            # later in the same function-call batch. Excel must have the
-            # destination sheet before a table can be written.
-            return {
-                "function_calling_config": {
-                    "mode": "ANY",
-                    "allowed_function_names": ["create_sheet"],
-                }
-            }
-        if not written_tables:
-            # A model cannot reliably fit hundreds of generated data rows in
-            # one function-call payload. Let it use the verified codegen path
-            # to populate a large demo dataset, then it will call write_table
-            # with rows=[] to turn that existing data into an Excel Table.
-            data_creation_tools = {"write_table"}
-            if config.ENABLE_CODEGEN_LAYER:
-                data_creation_tools.add("run_excel_code")
-            return {
-                "function_calling_config": {
-                    "mode": "ANY",
-                    "allowed_function_names": sorted(data_creation_tools),
-                }
-            }
-
     if not action_steps:
         # Inspection is a safe, universally valid first step. Forcing a
         # single tiny schema avoids Gemini's state-limit error and gives the
@@ -640,14 +643,15 @@ def _gemini_tool_config(task):
         # The first inspection succeeded, but Gemini has not yet changed the
         # workbook. Require a real, task-relevant Excel operation instead of
         # accepting another textual completion claim.
-        names = sorted(
-            _GEMINI_INITIAL_MUTATION_TOOLS
-            | ({"run_excel_code"} if config.ENABLE_CODEGEN_LAYER else set())
-        )
+        names = set(_GEMINI_INITIAL_MUTATION_TOOLS)
+        if config.ENABLE_VISUAL_FALLBACK:
+            names |= _GEMINI_INITIAL_VISUAL_MUTATION_TOOLS
+        if config.ENABLE_CODEGEN_LAYER:
+            names.add("run_excel_code")
         return {
             "function_calling_config": {
                 "mode": "ANY",
-                "allowed_function_names": names,
+                "allowed_function_names": sorted(names),
             }
         }
 
@@ -657,7 +661,14 @@ def _gemini_tool_config(task):
 def call_claude(task, system_prompt: str):
     from anthropic import Anthropic
 
-    client = Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    # A provider fallback must not inherit the SDK's default multi-minute
+    # retry behaviour.  Core will hand off to the next configured provider on
+    # an availability failure, after preserving the workbook state safely.
+    client = Anthropic(
+        api_key=config.ANTHROPIC_API_KEY,
+        timeout=config.CLAUDE_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
     request = dict(
         model="claude-sonnet-4-6",
         max_tokens=1024,
@@ -1064,14 +1075,9 @@ def _is_transient_gemini_transport_error(error: Exception) -> bool:
 
 
 def call_gemini(task, system_prompt: str):
-    import time
     from google import genai
     from google.genai import errors, types
 
-    client = genai.Client(
-        api_key=config.GEMINI_API_KEY,
-        http_options=types.HttpOptions(timeout=config.GEMINI_TIMEOUT_SECONDS * 1000),
-    )
     last_user_msg = task.messages[-1]["content"]
     tool_config = _gemini_tool_config(task)
     allowed_function_names = None
@@ -1103,8 +1109,16 @@ def call_gemini(task, system_prompt: str):
     RETRIES_PER_MODEL = 1
     last_error = None
     reset_tool_turn_for_fallback = False
+    deadline = time.monotonic() + config.GEMINI_TOTAL_TIMEOUT_SECONDS
 
     for model_offset in range(len(config.GEMINI_MODEL_CHAIN)):
+        remaining_seconds = deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            last_error = TimeoutError(
+                f"Gemini model chain exceeded its {config.GEMINI_TOTAL_TIMEOUT_SECONDS}s response budget."
+            )
+            task.log_step("Gemini response budget reached; handing off without waiting for more models.")
+            break
         model_index = (task.gemini_model_index + model_offset) % len(config.GEMINI_MODEL_CHAIN)
         model_name = config.GEMINI_MODEL_CHAIN[model_index]
         history = _convert_history_for_gemini(task.messages[:-1])
@@ -1115,6 +1129,18 @@ def call_gemini(task, system_prompt: str):
 
         for attempt in range(RETRIES_PER_MODEL):
             try:
+                remaining_seconds = deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    last_error = TimeoutError(
+                        f"Gemini model chain exceeded its {config.GEMINI_TOTAL_TIMEOUT_SECONDS}s response budget."
+                    )
+                    break
+                client = genai.Client(
+                    api_key=config.GEMINI_API_KEY,
+                    http_options=types.HttpOptions(
+                        timeout=max(1, int(min(config.GEMINI_TIMEOUT_SECONDS, remaining_seconds) * 1000))
+                    ),
+                )
                 response = client.models.generate_content(
                     model=model_name,
                     contents=contents,
@@ -1164,7 +1190,7 @@ def call_gemini(task, system_prompt: str):
                     f"Gemini model '{model_name}' had a transient network/read timeout; switching models."
                 )
 
-    raise last_error
+    raise last_error or RuntimeError("Gemini did not return a usable response from any configured model.")
 
 
 def _parse_gemini_response(task, response):
@@ -1269,7 +1295,6 @@ def call_openrouter(task, system_prompt: str):
     Supports OpenAI-compatible API format.
     Free models: openrouter/free, gpt-oss-120b:free, google/gemma-3-27b-it:free
     """
-    import time
     import requests
     
     api_key = config.OPENROUTER_API_KEY
@@ -1279,9 +1304,9 @@ def call_openrouter(task, system_prompt: str):
     model_chain = config.OPENROUTER_MODEL_CHAIN  # Already a list from config.py
     timeout = config.OPENROUTER_TIMEOUT_SECONDS
     
-    # Debug output
+    # Diagnostic output deliberately excludes credentials. Logs are often
+    # pasted into support chats and must never reveal an API-key prefix.
     import sys
-    print(f"[OpenRouter] API Key: {api_key[:10]}...", file=sys.stderr)
     print(f"[OpenRouter] Model chain: {model_chain}", file=sys.stderr)
     print(f"[OpenRouter] Timeout: {timeout}", file=sys.stderr)
     
@@ -1342,14 +1367,33 @@ def call_openrouter(task, system_prompt: str):
             }
         })
     
-    # Try each model in the chain
+    # Try each verified function-calling model in the chain.  The chain is
+    # deliberately short and curated in config.py; routing to every available
+    # OpenRouter model would make a failure path slower and less predictable.
     models_to_try = model_chain  # Already a list from config.py
-    
     last_error = None
-    for model in models_to_try:
+    deadline = time.monotonic() + config.OPENROUTER_TOTAL_TIMEOUT_SECONDS
+    for model_index, model in enumerate(models_to_try):
         try:
-            # Rate limiting delay for free models (3 seconds between calls)
-            time.sleep(3)
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                last_error = TimeoutError(
+                    f"OpenRouter model chain exceeded its {config.OPENROUTER_TOTAL_TIMEOUT_SECONDS}s response budget."
+                )
+                task.log_step("OpenRouter response budget reached; handing off without waiting for more models.")
+                break
+            # Optional deployment-specific spacing.  There is no deliberate
+            # three-second wait before the first model or every normal task.
+            # That pause previously made the desktop agent look stuck.
+            if model_index and config.OPENROUTER_INTER_MODEL_DELAY_SECONDS > 0:
+                time.sleep(min(config.OPENROUTER_INTER_MODEL_DELAY_SECONDS, remaining_seconds))
+                remaining_seconds = deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    last_error = TimeoutError(
+                        f"OpenRouter model chain exceeded its {config.OPENROUTER_TOTAL_TIMEOUT_SECONDS}s response budget."
+                    )
+                    task.log_step("OpenRouter response budget reached; handing off without waiting for more models.")
+                    break
             
             headers = {
                 "Authorization": f"Bearer {api_key}",
@@ -1380,19 +1424,22 @@ def call_openrouter(task, system_prompt: str):
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers=headers,
                     json=payload,
-                    timeout=timeout
+                    timeout=max(1, min(timeout, remaining_seconds))
                 )
-            except requests.exceptions.Timeout:
+            except requests.exceptions.Timeout as exc:
+                last_error = exc
                 print(f"[OpenRouter] Timeout with {model} after {timeout}s", file=sys.stderr)
                 task.log_step(f"OpenRouter timeout with {model}")
                 continue
             except requests.exceptions.ConnectionError as e:
+                last_error = e
                 print(f"[OpenRouter] Connection error with {model}: {e}", file=sys.stderr)
                 task.log_step(f"OpenRouter connection error with {model}")
                 continue
             
             if response.status_code == 429:
                 # Rate limited, try next model
+                last_error = RuntimeError(f"OpenRouter rate limited model '{model}' (HTTP 429).")
                 task.log_rate_limit(model)
                 continue
             
@@ -1429,6 +1476,17 @@ def call_openrouter(task, system_prompt: str):
             print(f"[OpenRouter] Tool calls: {len(tool_calls)}", file=sys.stderr)
             print(f"[OpenRouter] Text: {text[:100] if text else '(empty)'}", file=sys.stderr)
             
+            if not tool_calls and not isinstance(text, str):
+                text = ""
+            if not tool_calls and not text.strip():
+                last_error = RuntimeError(
+                    f"OpenRouter model '{model}' returned neither text nor a tool call."
+                )
+                task.log_step(
+                    f"OpenRouter model '{model}' returned an empty response; trying the next configured model."
+                )
+                continue
+
             return tool_calls, [text] if text else [], "end_turn" if not tool_calls else "tool_use"
             
         except requests.exceptions.RequestException as e:
@@ -1444,16 +1502,22 @@ def call_openrouter(task, system_prompt: str):
     
     if last_error:
         print(f"[OpenRouter] All models failed. Last error: {last_error}", file=sys.stderr)
-    raise Exception("All OpenRouter models failed")
+        raise last_error
+    raise RuntimeError("OpenRouter did not return a usable response from any configured model.")
 
 
 def submit_openrouter_tool_result(task, tool_call_id: str, result: dict):
     """Submit tool result back to OpenRouter (stored in message history)."""
     # OpenRouter uses OpenAI format - results are stored as messages
+    # Excel returns native ``datetime`` and ``Decimal`` values when a range is
+    # read.  Unlike Gemini's response normaliser, this OpenAI-compatible path
+    # previously passed those objects directly to json.dumps(), which stopped
+    # the whole task after a perfectly valid read_range call.  Tool results
+    # are conversation data, so stringify only values JSON cannot represent.
     task.messages.append({
         "role": "tool",
         "tool_call_id": tool_call_id,
-        "content": json.dumps(result)
+        "content": json.dumps(result, default=str)
     })
 
 

@@ -42,32 +42,44 @@ def _inspect_sheet(wb, sheet):
     header_guess = False
     formula_map = {}
     formula_errors = []
+    formula_scan_warning = None
     if used:
         values = normalize(used.value)
         first_row = normalize(used.rows[0].value)[0]
         header_guess = all(isinstance(v, str) for v in first_row if v is not None)
+
+        # Scan displayed cell values independently of formula metadata.  A
+        # COM failure while reading Range.Formula must never hide #REF! or
+        # #VALUE! cells from the completion guard.
+        for r_idx, row in enumerate(values):
+            for c_idx, cell_value in enumerate(row):
+                if _is_excel_error(cell_value) and len(formula_errors) < MAX_REPORTED_FORMULA_ERRORS:
+                    formula_errors.append({
+                        "sheet": sheet_name,
+                        "address": used.offset(r_idx, c_idx).address,
+                        "error": cell_value.strip().upper(),
+                        "formula": None,
+                    })
 
         try:
             formulas = used.formula
             formulas = normalize(formulas)
             for r_idx, row in enumerate(formulas):
                 for c_idx, cell_formula in enumerate(row):
-                    cell_value = _matrix_value(values, r_idx, c_idx)
-                    if _is_excel_error(cell_value) and len(formula_errors) < MAX_REPORTED_FORMULA_ERRORS:
-                        formula_errors.append({
-                            "sheet": sheet_name,
-                            "address": used.offset(r_idx, c_idx).address,
-                            "error": cell_value.strip().upper(),
-                            "formula": cell_formula if isinstance(cell_formula, str) and cell_formula.startswith("=") else None,
-                        })
                     if isinstance(cell_formula, str) and cell_formula.startswith("="):
                         addr = used.offset(r_idx, c_idx).address
                         formula_map[addr] = {
                             "formula": cell_formula,
                             "referenced_ranges": _extract_range_refs(cell_formula),
                         }
-        except Exception:
-            pass  # formula scan is best-effort, never blocks the read
+                        for error in formula_errors:
+                            if error["address"] == addr:
+                                error["formula"] = cell_formula
+        except Exception as exc:
+            # Keep the value-based error audit above.  Formula text enriches
+            # diagnostics but is not allowed to erase detected workbook
+            # errors when a legacy Excel/COM bridge rejects Range.Formula.
+            formula_scan_warning = f"Could not read formula metadata: {exc}"
 
     existing_tables = [t.name for t in sheet.tables] if hasattr(sheet, "tables") else []
     existing_charts = [c.name for c in sheet.charts] if hasattr(sheet, "charts") else []
@@ -91,6 +103,7 @@ def _inspect_sheet(wb, sheet):
         "formulas_found": formula_map,
         "formula_errors": formula_errors,
         "formula_error_count": len(formula_errors),
+        "formula_scan_warning": formula_scan_warning,
         "other_sheets_in_workbook": other_sheets,
         "verified": True,
     }
@@ -110,6 +123,10 @@ def run(sheet_name: str | None = None):
     ][:MAX_REPORTED_FORMULA_ERRORS]
     return {
         "workbook_name": wb.name,
+        # Workbook names such as Book1 are not unique across Excel processes.
+        # The agent uses this PID to keep later skills, codegen, and visual
+        # fallbacks attached to the exact process that inspection observed.
+        "excel_app_pid": wb.app.pid,
         "sheet_reports": sheet_reports,
         "formula_errors": formula_errors,
         "formula_error_count": sum(report["formula_error_count"] for report in sheet_reports),

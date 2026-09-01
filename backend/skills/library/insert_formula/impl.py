@@ -23,6 +23,10 @@ _AT_COLUMN_REF_RE = re.compile(r"\[@[^\]]+\]")
 
 _STRUCTURED_REF_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\[([^\[\]]+)\]")
 _SPILL_REF_RE = re.compile(r"[A-Za-z]+\d+#")
+_TABLE_AS_SHEET_REF_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)!")
+_WHOLE_COLUMN_REF_RE = re.compile(
+    r"(?:(?:'[^']+'|[A-Za-z_][A-Za-z0-9_]*)!)?\$?[A-Z]{1,3}:\$?[A-Z]{1,3}(?!\d)"
+)
 
 MAX_HEAVY_FUNCTIONS_PER_FORMULA = 2
 
@@ -46,6 +50,27 @@ def _first_excel_error_in_range(sheet, rng):
                 return {
                     "address": sheet.range((start_row + row_index, start_column + column_index)).address,
                     "value": value.strip().upper(),
+                }
+    return None
+
+
+def _first_blank_formula_result(sheet, rng):
+    """Return the first formula result Excel left blank in ``rng``.
+
+    A stored formula is not proof that a calculation is usable.  In task 265
+    the agent wrote formulas before their source cells were populated; Excel
+    left the outputs blank, yet the old verifier reported success.  Blank
+    results are therefore failures by default.  The rare formula deliberately
+    designed to return an empty string can opt in with ``allow_blank_result``.
+    """
+    values = normalize(rng.value)
+    start_row, start_column = rng.row, rng.column
+    for row_index, row in enumerate(values):
+        for column_index, value in enumerate(row):
+            if value is None or (isinstance(value, str) and value == ""):
+                return {
+                    "address": sheet.range((start_row + row_index, start_column + column_index)).address,
+                    "value": value,
                 }
     return None
 
@@ -130,7 +155,59 @@ def _validate_structured_references(wb, formula: str):
     return True, None
 
 
-def run(sheet_name: str, cell: str, formula: str, fill_to: str | None = None):
+def _validate_table_qualifiers(wb, formula: str):
+    """Reject the common but invalid ``TableName!A1`` formula syntax.
+
+    The log for task 265 used ``SalesData!$M:$M``.  ``SalesData`` is an
+    Excel Table, not a worksheet, so that reference can only calculate to an
+    error.  It also makes the agent look as though a formula was written when
+    no usable business result exists.
+    """
+    for table_name in _TABLE_AS_SHEET_REF_RE.findall(formula):
+        list_object = _find_table_by_name(wb, table_name)
+        if list_object is None:
+            continue
+        try:
+            actual_sheet = list_object.Parent.Name
+        except Exception:
+            actual_sheet = None
+        correction = (
+            f"Use structured references such as {table_name}[Revenue] and "
+            f"{table_name}[Region]"
+        )
+        if actual_sheet:
+            correction += f", or the worksheet reference '{actual_sheet}'!$M$2:$M$361"
+        return False, (
+            f"'{table_name}' is an Excel Table name, not a worksheet name, so "
+            f"'{table_name}!...' is invalid. {correction}."
+        )
+    return True, None
+
+
+def _validate_bounded_ranges(formula: str):
+    """Reject full-column formula ranges that can hang desktop Excel.
+
+    In the failing run, ``=AVERAGE(SalesData!M:M)`` ran for sixty seconds and
+    forced an Excel restart.  Workbook tables or explicit used-row ranges are
+    both faster and precise.
+    """
+    whole_columns = _WHOLE_COLUMN_REF_RE.findall(formula)
+    if whole_columns:
+        return False, (
+            f"Whole-column reference(s) {whole_columns} are not allowed in an automated formula. "
+            "Use a Table column (for example SalesData[Revenue]) or a bounded range such as "
+            "'Sales Data'!$M$2:$M$361. Whole Excel columns can make calculation hang."
+        )
+    return True, None
+
+
+def run(
+    sheet_name: str,
+    cell: str,
+    formula: str,
+    fill_to: str | None = None,
+    allow_blank_result: bool = False,
+):
     wb = get_active_workbook()
     sheet = wb.sheets[sheet_name]
     rng = sheet.range(cell)
@@ -200,6 +277,22 @@ def run(sheet_name: str, cell: str, formula: str, fill_to: str | None = None):
             "sheet": sheet_name, "cell": cell, "formula": formula,
             "status": "invalid_structured_reference", "verified": False,
             "verification_note": ref_error,
+        }
+
+    table_qualifiers_ok, table_qualifier_error = _validate_table_qualifiers(wb, formula)
+    if not table_qualifiers_ok:
+        return {
+            "sheet": sheet_name, "cell": cell, "formula": formula,
+            "status": "table_name_used_as_sheet_reference", "verified": False,
+            "verification_note": table_qualifier_error,
+        }
+
+    bounded_ranges_ok, bounded_range_error = _validate_bounded_ranges(formula)
+    if not bounded_ranges_ok:
+        return {
+            "sheet": sheet_name, "cell": cell, "formula": formula,
+            "status": "whole_column_reference_blocked", "verified": False,
+            "verification_note": bounded_range_error,
         }
 
     if _formula_may_spill(formula):
@@ -306,6 +399,23 @@ def run(sheet_name: str, cell: str, formula: str, fill_to: str | None = None):
             ),
         }
 
+    if not allow_blank_result:
+        blank_result = _first_blank_formula_result(sheet, checked_range)
+        if blank_result:
+            return {
+                "sheet": sheet_name, "cell": cell, "formula": formula, "fill_to": fill_to,
+                "calculated_value": calculated_value, "fill_end_value": fill_end_value,
+                "formula_blank_cell": blank_result["address"],
+                "status": "formula_blank_result",
+                "attempts": attempts, "verified": False,
+                "verification_note": (
+                    "Formula was stored but Excel returned a blank result at "
+                    f"{blank_result['address']}. Populate or repair its source data before "
+                    "continuing with dependent worksheet changes. If an empty result is truly "
+                    "intended, retry with allow_blank_result=true."
+                ),
+            }
+
     def _normalise_formula(value):
         return re.sub(r"\\s+", "", str(value or "")).upper()
 
@@ -338,6 +448,7 @@ def run(sheet_name: str, cell: str, formula: str, fill_to: str | None = None):
 
     return {
         "sheet": sheet_name, "cell": cell, "formula": formula, "fill_to": fill_to,
+        "allow_blank_result": allow_blank_result,
         "calculated_value": calculated_value, "fill_end_value": fill_end_value,
         "status": "formula_written",
         "attempts": attempts, "verified": True,

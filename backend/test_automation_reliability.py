@@ -7,6 +7,9 @@ threads, unverified codegen results, path expansion, and Gemini tool history.
 
 import os
 import io
+import time
+import json
+from datetime import datetime
 import unittest
 from unittest.mock import patch
 
@@ -20,8 +23,9 @@ from agent.reveal import progress_snapshot
 from codegen.executor import run_generated_code
 from skills.base import SKILL_REGISTRY
 from skills import excel_shared
-from skills.library.insert_formula.impl import _check_complexity
-from skills.library.insert_formula.impl import _first_excel_error_in_range
+from skills.library.insert_formula.impl import _check_complexity, _validate_bounded_ranges, _validate_table_qualifiers
+from skills.library.insert_formula.impl import _first_excel_error_in_range, _first_blank_formula_result
+from skills.library.inspect_workbook import impl as inspect_workbook_impl
 from skills.library.create_pivot_table.impl import _pivot_name
 from skills.library.write_table.impl import _table_values_match, run as write_table
 from vision import ui_control
@@ -87,6 +91,118 @@ class AutomationReliabilityTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "OMNIPARSER_LOCAL_MODE=true"):
                 config.validate_local_omniparser_configuration()
+
+    def test_openrouter_tool_result_serializes_excel_datetime_values(self):
+        task = core.AgentTask("Read a workbook range.")
+
+        providers.submit_openrouter_tool_result(
+            task,
+            "tool-call-1",
+            {"verified": True, "values": [[datetime(2024, 1, 31, 0, 0)]]},
+        )
+
+        content = json.loads(task.messages[-1]["content"])
+        self.assertEqual("2024-01-31 00:00:00", content["values"][0][0])
+
+    def test_blank_formula_result_is_reported_with_exact_cell(self):
+        formula_range = _Object(value=[[25], [None]], row=2, column=4)
+        sheet = _Object(range=lambda coordinates: _Object(address="$D$3"))
+
+        result = _first_blank_formula_result(sheet, formula_range)
+
+        self.assertEqual({"address": "$D$3", "value": None}, result)
+
+    def test_formula_preflight_rejects_table_name_used_as_worksheet(self):
+        table = _Object(Name="SalesData", Parent=_Object(Name="Sales Data"))
+        workbook = _Object(sheets=[_Object(api=_Object(ListObjects=[table]))])
+
+        valid, error = _validate_table_qualifiers(
+            workbook,
+            "=SUM(SalesData!$M:$M)",
+        )
+
+        self.assertFalse(valid)
+        self.assertIn("Excel Table name", error)
+        self.assertIn("SalesData[Revenue]", error)
+
+    def test_formula_preflight_rejects_whole_column_reference(self):
+        valid, error = _validate_bounded_ranges("=AVERAGE('Sales Data'!M:M)")
+
+        self.assertFalse(valid)
+        self.assertIn("Whole-column reference", error)
+
+    def test_timeout_recovery_rebinds_the_task_to_the_restarted_excel_pid(self):
+        task = core.AgentTask("Build a workbook.")
+        task.workbook_name = "Book1.xlsx"
+        task.excel_app_pid = 111
+
+        with patch("skills.excel_shared.bind_workbook_context") as bind_context:
+            core._adopt_recovered_workbook_identity(
+                task,
+                {
+                    "verified": False,
+                    "workbook_recovered": True,
+                    "workbook_name": "Book1.xlsx",
+                    "excel_app_pid": 222,
+                },
+            )
+
+        self.assertEqual("Book1.xlsx", task.workbook_name)
+        self.assertEqual(222, task.excel_app_pid)
+        bind_context.assert_called_once_with("Book1.xlsx", 222)
+
+    def test_workbook_audit_reports_displayed_error_when_formula_metadata_fails(self):
+        class _UsedRange:
+            address = "$A$1:$B$2"
+            value = [["Label", "Result"], ["Revenue", "#VALUE!"]]
+            rows = [_Object(value=[["Label", "Result"]])]
+
+            @property
+            def formula(self):
+                raise RuntimeError("Legacy Excel formula metadata unavailable")
+
+            def offset(self, row, column):
+                addresses = {(0, 0): "$A$1", (0, 1): "$B$1", (1, 0): "$A$2", (1, 1): "$B$2"}
+                return _Object(address=addresses[(row, column)])
+
+        sheet = _Object(
+            name="Summary",
+            used_range=_UsedRange(),
+            tables=[],
+            charts=[],
+            api=_Object(PivotTables=lambda: []),
+        )
+        workbook = _Object(sheets=[sheet], names=[])
+
+        report = inspect_workbook_impl._inspect_sheet(workbook, sheet)
+
+        self.assertEqual(1, report["formula_error_count"])
+        self.assertEqual("$B$2", report["formula_errors"][0]["address"])
+        self.assertEqual("#VALUE!", report["formula_errors"][0]["error"])
+        self.assertIn("Could not read formula metadata", report["formula_scan_warning"])
+
+    def test_formula_repair_guard_blocks_another_sheet_until_repair_audit(self):
+        task = core.AgentTask("Build a sales workbook.")
+        task.pending_formula_repair = {
+            "sheet_name": "Monthly Budget",
+            "cell": "D2",
+            "formula_rewritten": False,
+        }
+
+        self.assertTrue(core._pending_formula_repair_blocks_action(
+            task, "write_table", {"sheet_name": "Sales Summary"}
+        ))
+        self.assertFalse(core._pending_formula_repair_blocks_action(
+            task, "write_table", {"sheet_name": "Monthly Budget"}
+        ))
+
+        task.pending_formula_repair["formula_rewritten"] = True
+        self.assertTrue(core._formula_repair_audit_passed(
+            task,
+            "inspect_workbook",
+            {"sheet_name": "Monthly Budget"},
+            {"verified": True, "formula_errors": [], "formula_error_count": 0},
+        ))
 
     def test_sheet_tab_failure_snapshot_lists_raw_tabitem_text(self):
         product_tab = _Object(
@@ -167,6 +283,8 @@ class AutomationReliabilityTests(unittest.TestCase):
         }
         self.assertIn("insert_table", operations)
         self.assertIn("save", operations)
+        self.assertIn("chart_choice", catalog["selection_policy"])
+        self.assertIn("no fixed tool order", catalog["selection_policy"]["principle"].lower())
 
     def test_capability_catalog_is_available_as_a_read_only_tool(self):
         result, layer, generated = core.dispatch_action("get_execution_capabilities", {})
@@ -251,15 +369,75 @@ class AutomationReliabilityTests(unittest.TestCase):
         self.assertIn("Never call execute_excel_shortcut('save_as')", prompt)
 
     def test_skill_worker_inherits_selected_workbook(self):
-        excel_shared.bind_workbook_context("OnlyThisWorkbook.xlsx")
+        excel_shared.bind_workbook_context("OnlyThisWorkbook.xlsx", 4321)
 
         def fake_skill(_tool_name, **_tool_input):
-            return {"workbook_name": excel_shared._CURRENT_WORKBOOK_NAME.get(), "verified": True}
+            return {
+                "workbook_name": excel_shared._CURRENT_WORKBOOK_NAME.get(),
+                "excel_app_pid": excel_shared._CURRENT_EXCEL_PID.get(),
+                "verified": True,
+            }
 
         with patch("agent.core.run_skill", side_effect=fake_skill):
             result = core._run_skill_with_timeout("fake", {})
 
         self.assertEqual("OnlyThisWorkbook.xlsx", result["workbook_name"])
+        self.assertEqual(4321, result["excel_app_pid"])
+
+    def test_batch_sheet_creation_skill_is_available_to_the_planner(self):
+        self.assertIn("create_sheets", SKILL_REGISTRY)
+        schema = SKILL_REGISTRY["create_sheets"]["input_schema"]
+        self.assertEqual(["sheet_names"], schema["required"])
+
+    def test_visible_workbook_session_maximizes_excel_without_forcing_focus(self):
+        app = _Object(visible=False, screen_updating=False, api=_Object(WindowState=0))
+        workbook = _Object(
+            name="Book1.xlsx",
+            app=app,
+            activate=lambda: setattr(workbook, "activated", True),
+            activated=False,
+        )
+
+        with patch("skills.excel_shared.config.MAXIMIZE_EXCEL_WINDOW", True):
+            details = excel_shared.keep_workbook_visible(workbook)
+
+        self.assertTrue(app.visible)
+        self.assertTrue(app.screen_updating)
+        self.assertEqual(-4137, app.api.WindowState)
+        self.assertTrue(workbook.activated)
+        self.assertTrue(details["maximized"])
+
+    def test_startup_capability_profile_does_not_write_a_formula_probe(self):
+        app = _Object(pid=751, api=_Object(Version="16.0", Build="4266"))
+        workbook = _Object(app=app)
+
+        with patch("skills.excel_shared.supports_dynamic_arrays") as probe:
+            profile = excel_shared.get_excel_capabilities(
+                workbook,
+                probe_dynamic_arrays=False,
+            )
+
+        probe.assert_not_called()
+        self.assertFalse(profile["dynamic_arrays"])
+        self.assertEqual("deferred", profile["dynamic_array_probe"])
+
+    def test_optional_startup_timeout_does_not_restart_excel(self):
+        def slow_skill(_tool_name, **_tool_input):
+            time.sleep(0.05)
+            return {"verified": True}
+
+        with patch("agent.core.run_skill", side_effect=slow_skill), patch(
+            "skills.excel_shared.force_restart_excel_and_reopen"
+        ) as restart:
+            result = core._run_skill_with_timeout(
+                "get_excel_version",
+                {},
+                timeout=0.01,
+                recover_excel_on_timeout=False,
+            )
+
+        self.assertEqual("timeout", result["status"])
+        restart.assert_not_called()
 
     def test_codegen_requires_explicit_verified_result(self):
         success = run_generated_code(
@@ -353,15 +531,58 @@ class AutomationReliabilityTests(unittest.TestCase):
         self.assertIn("First inspect the live workbook", task.messages[0]["content"])
         self.assertEqual("retry_pending", task.recovery_state["phase"])
 
+    def test_openrouter_defaults_are_a_curated_function_calling_chain(self):
+        self.assertEqual(
+            [
+                "deepseek/deepseek-v4-flash-0731",
+                "xiaomi/mimo-v2.5",
+                "tencent/hy3",
+                "minimax/minimax-m3:free",
+                "openrouter/free",
+            ],
+            config.OPENROUTER_MODEL_CHAIN,
+        )
+        self.assertEqual(35, config.OPENROUTER_TIMEOUT_SECONDS)
+        self.assertEqual(0, config.OPENROUTER_INTER_MODEL_DELAY_SECONDS)
+        self.assertEqual(45, config.OPENROUTER_TOTAL_TIMEOUT_SECONDS)
+        self.assertEqual(45, config.GEMINI_TOTAL_TIMEOUT_SECONDS)
+        self.assertEqual(35, config.CLAUDE_TIMEOUT_SECONDS)
+
+    def test_openrouter_empty_reply_is_rejected_not_treated_as_completion(self):
+        response = _Object(
+            status_code=200,
+            raise_for_status=lambda: None,
+            json=lambda: {"choices": [{"message": {"content": ""}}]},
+        )
+        task = core.AgentTask("Create a workbook.")
+
+        with patch("agent.providers.config.OPENROUTER_API_KEY", "configured"), patch(
+            "agent.providers.config.OPENROUTER_MODEL_CHAIN", ["test/model"]
+        ), patch("requests.post", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "returned neither text nor a tool call"):
+                providers.call_openrouter(task, "Use Excel tools.")
+
+    def test_selected_openrouter_without_a_key_fails_loudly_at_startup(self):
+        with patch("config.AI_PROVIDER", "openrouter"), patch(
+            "config.OPENROUTER_API_KEY", ""
+        ):
+            with self.assertRaisesRegex(RuntimeError, "OPENROUTER_API_KEY"):
+                config.validate_ai_provider_configuration()
+
     def test_verified_workbook_observation_binds_the_task_for_later_codegen(self):
         task = core.AgentTask("Create a report")
-        observed = {"verified": True, "workbook_name": "Book1_52.xlsx"}
+        observed = {
+            "verified": True,
+            "workbook_name": "Book1_52.xlsx",
+            "excel_app_pid": 9821,
+        }
 
         with patch("skills.excel_shared.bind_workbook_context") as bind_context:
             core._adopt_workbook_from_result(task, observed)
 
         self.assertEqual("Book1_52.xlsx", task.workbook_name)
-        bind_context.assert_called_once_with("Book1_52.xlsx")
+        self.assertEqual(9821, task.excel_app_pid)
+        bind_context.assert_called_once_with("Book1_52.xlsx", 9821)
 
     def test_codegen_dispatch_forwards_the_task_workbook_identity(self):
         expected = {"verified": True, "verification_note": "Verified the pinned workbook."}
@@ -370,13 +591,68 @@ class AutomationReliabilityTests(unittest.TestCase):
             "agent.core.config.ENABLE_CODEGEN_LAYER", True
         ), patch("agent.core.run_generated_code", return_value=expected) as generated:
             result, layer, code = core.dispatch_action(
-                "run_excel_code", {"code": "result = {}"}, workbook_name="Pinned.xlsx"
+                "run_excel_code",
+                {
+                    "code": "result = {}",
+                    "fallback_reason": "The requested batch is too large for a safe tool payload.",
+                    "atomic_goal": "Populate raw Sales Data input rows.",
+                    "alternatives_considered": [
+                        "write_table: the required raw-data payload exceeds the provider limit."
+                    ],
+                    "reveal_reference": "Sheet1!A1",
+                },
+                workbook_name="Pinned.xlsx",
+                excel_app_pid=9911,
             )
 
         self.assertEqual(expected, result)
         self.assertEqual("codegen", layer)
         self.assertEqual("result = {}", code)
         self.assertEqual("Pinned.xlsx", generated.call_args.kwargs["workbook_name"])
+        self.assertEqual(9911, generated.call_args.kwargs["excel_app_pid"])
+
+    def test_codegen_dispatch_requires_selection_evidence(self):
+        result, layer, code = core.dispatch_action(
+            "run_excel_code", {"code": "result = {}"}
+        )
+
+        self.assertFalse(result["verified"])
+        self.assertEqual("codegen_selection_evidence_required", result["status"])
+        self.assertEqual("codegen_guard", layer)
+        self.assertIsNone(code)
+
+    def test_codegen_rejects_a_multi_sheet_build_before_excel_runs(self):
+        result = run_generated_code(
+            "wb = get_task_workbook()\n"
+            "first = wb.sheets['Sales Data']\n"
+            "second = wb.sheets['Sales Summary']\n"
+            "result = {'verified': True, 'verification_note': 'Not reached.'}",
+            BACKEND_ROOT,
+        )
+
+        self.assertFalse(result["verified"])
+        self.assertEqual("rejected_by_sandbox", result["status"])
+        self.assertIn("one atomic worksheet target", result["error"])
+
+    def test_codegen_rejects_formula_text_written_through_value(self):
+        result = run_generated_code(
+            "wb = get_task_workbook()\n"
+            "ws = wb.sheets['Sales Summary']\n"
+            "ws.range('A1').value = '=SUM(A2:A3)'\n"
+            "result = {'verified': True, 'verification_note': 'Not reached.'}",
+            BACKEND_ROOT,
+        )
+
+        self.assertFalse(result["verified"])
+        self.assertEqual("rejected_by_sandbox", result["status"])
+        self.assertIn("formula-looking string", result["error"])
+
+    def test_visible_reference_quotes_a_multi_word_sheet_name(self):
+        reference = core._visible_range_reference(
+            "run_excel_code", {"reveal_reference": "Executive Dashboard!A1"}
+        )
+
+        self.assertEqual("'Executive Dashboard'!A1", reference)
 
     def test_operational_skill_failure_is_scheduled_for_codegen(self):
         with patch("agent.core.config.ENABLE_CODEGEN_LAYER", True), patch(
@@ -577,19 +853,18 @@ class AutomationReliabilityTests(unittest.TestCase):
         self.assertEqual("ANY", config["function_calling_config"]["mode"])
         self.assertEqual(["inspect_workbook"], config["function_calling_config"]["allowed_function_names"])
 
-    def test_new_dashboard_creates_its_sheet_before_writing_a_table(self):
+    def test_new_dashboard_initial_tools_allow_a_batch_sheet_skill(self):
         task = core.AgentTask("Create a sales dashboard with generated dummy data.")
-
-        config = providers._gemini_tool_config(task)
-        self.assertEqual(["create_sheet"], config["function_calling_config"]["allowed_function_names"])
-
-        task.structured_steps.append({
-            "type": "action", "tool_name": "create_sheet", "status": "success",
+        task.structured_steps = [{
+            "type": "action", "tool_name": "inspect_workbook", "status": "success",
             "result": {"verified": True},
-        })
+        }]
+
         config = providers._gemini_tool_config(task)
-        self.assertIn("write_table", config["function_calling_config"]["allowed_function_names"])
-        self.assertIn("run_excel_code", config["function_calling_config"]["allowed_function_names"])
+        allowed = config["function_calling_config"]["allowed_function_names"]
+
+        self.assertIn("create_sheet", allowed)
+        self.assertIn("create_sheets", allowed)
 
     def test_forced_gemini_schema_contains_only_allowed_tools(self):
         tools = providers.build_gemini_tools(["inspect_workbook"])
@@ -609,6 +884,8 @@ class AutomationReliabilityTests(unittest.TestCase):
         self.assertEqual("ANY", config["function_calling_config"]["mode"])
         self.assertIn("create_sheet", config["function_calling_config"]["allowed_function_names"])
         self.assertIn("write_table", config["function_calling_config"]["allowed_function_names"])
+        self.assertIn("execute_excel_shortcut", config["function_calling_config"]["allowed_function_names"])
+        self.assertIn("go_to_range", config["function_calling_config"]["allowed_function_names"])
 
     def test_gemini_forces_codegen_when_core_schedules_skill_recovery(self):
         task = core.AgentTask("Create a sales dashboard in Excel.")
@@ -989,6 +1266,11 @@ class AutomationReliabilityTests(unittest.TestCase):
             "error": "The Xelora-owned Excel window is no longer visible. Refusing to create an additional blank workbook."
         }))
         self.assertFalse(core._is_lost_visual_excel_window({"error": "The table range is invalid."}))
+
+    def test_lost_pinned_workbook_is_terminal_in_hybrid_mode_too(self):
+        self.assertTrue(core._is_lost_task_workbook({
+            "error": "The task's target workbook 'Book1.xlsx' in Excel process 99 is not open in Excel."
+        }))
 
     def test_system_switch_and_close_shortcuts_are_rejected_before_ui_input(self):
         for keys in (

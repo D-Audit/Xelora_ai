@@ -56,6 +56,11 @@ def on_startup():
         print(f"REFUSING TO START: {exc}")
         raise SystemExit(1) from exc
     try:
+        config.validate_ai_provider_configuration()
+    except RuntimeError as exc:
+        print(f"REFUSING TO START: {exc}")
+        raise SystemExit(1) from exc
+    try:
         providers.validate_provider_tool_catalogues()
     except RuntimeError as exc:
         print(f"REFUSING TO START: {exc}")

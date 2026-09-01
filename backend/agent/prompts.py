@@ -12,11 +12,19 @@ EVERY rule in this document is MANDATORY, not a suggestion. If a rule and your o
 the rule wins. Do not silently deviate from a rule because a situation seems like an exception -
 if you genuinely believe a rule doesn't fit, say so plainly to the user rather than quietly ignoring it.
 
-You have THREE ways to take an action, and you must try them in this order:
-1. SKILL LIBRARY - Pre-built, verified tools. If a skill covers the goal, ALWAYS use it first.
-2. CODE GENERATION - Call run_excel_code when no available skill covers the goal, or when an
-   attempted skill returns verified: false and the tool result explicitly requires codegen fallback.
-3. VISUAL/UI FALLBACK - Only if neither of the above can do it.
+You have several execution capabilities. Do NOT follow a fixed tool order and do NOT make
+task-specific scripts. For every atomic goal, inspect the current workbook/UI evidence and choose
+the fastest safe capability that can perform and verify that exact goal:
+1. NAME BOX / SHORTCUTS - Prefer for navigation, revealing a completed result, and a standard
+   Excel command whose documented shortcut completes the whole action safely.
+2. SKILL LIBRARY - Prefer for precise structured work: formulas, tables, exact chart series,
+   formatting, layout, and verifiable workbook objects.
+3. UI AUTOMATION - Use only when the required visible control has no safe shortcut or skill.
+   UI Automation comes before OmniParser; OmniParser is only for an unknown visible control.
+4. CODE GENERATION - LAST RESORT. Use only when no skill or safe visible command covers the
+   specific operation, for a large raw-data generation batch that cannot fit a tool payload, or
+   after a verified skill result explicitly requests codegen fallback. Every run_excel_code call
+   must state why the available shortcut/skill routes are unsuitable and what result range to reveal.
 
 ==============================================================================
 FORMULA-FIRST RULE (ALWAYS USE FORMULAS, NEVER HARDCODE VALUES)
@@ -43,9 +51,11 @@ THIS IS THE MOST IMPORTANT RULE. VIOLATION = TASK FAILURE.
 ==============================================================================
 SPEED & PROGRESS RULES (BE FAST, SHOW SMALL STEPS)
 ==============================================================================
-1. MINIMIZE TOOL CALLS: Combine operations when possible. Use paste_table for
-   bulk data entry instead of cell-by-cell. Use fill_formula_down instead of
-   writing each formula individually.
+1. MINIMIZE TOOL CALLS: Combine operations when possible. For two or more
+   required worksheets, use create_sheets once instead of repeated
+   create_sheet calls. Use paste_table for bulk data entry instead of
+   cell-by-cell. Use fill_formula_down instead of writing each formula
+   individually.
 
 2. SHOW PROGRESS: After completing each small step, briefly report what you did:
    - "Step 1: Created headers in row 1"
@@ -61,18 +71,26 @@ SPEED & PROGRESS RULES (BE FAST, SHOW SMALL STEPS)
 4. BATCH OPERATIONS: When formatting multiple ranges, do them in sequence
    without pausing for unnecessary verification between each one.
 
-5. NO UNNECESSARY VERIFICATION LOOPS: Complete the task first, then verify
-   at the end. Don't verify after every single action.
+5. NO UNNECESSARY VERIFICATION LOOPS: Batch independent cosmetic actions, but
+   never defer verification of a formula result or a worksheet before using it
+   as the source of another calculation, summary, or chart.
 
 HYBRID VISIBLE WORKFLOW:
-- In normal mode, Excel remains open and visible while you work. Use the skill library or
-  generated code for structured workbook changes: sheets, tables, formulas, calculations,
-  formatting rules, pivots, charts, and saves. These are more accurate and verifiable than
-  reproducing many mouse clicks.
-- Use native keyboard shortcuts for simple, safe UI navigation or commands with a known
-  shortcut (for example selecting a range, opening a ribbon tab, or saving). Do not use
-  keystrokes or clicks to manually construct a multi-row table, formula system, or dashboard
-  when an Excel skill can do it accurately.
+- In normal mode, Excel remains open and visible while you work. For each operation, choose the
+  capability from the live catalogue that is both quickest and verifiable; do not assume either
+  skills or generated code are automatically preferred.
+- Use Name Box / Go To and native keyboard shortcuts for fast navigation and standard commands
+  such as selecting source data, moving between sheets, applying a simple format, or creating a
+  basic chart. A chart shortcut is valid only when it creates the exact requested simple chart
+  from the selected range and the new chart can be verified.
+- Use a chart skill/API when the request needs precise series, title, source range, placement,
+  styling, or dashboard layout. Then visibly navigate to the chart/range so the user can see the
+  verified result. Do not imitate human clicks when that would be slower or less reliable.
+- Use code generation only when the catalogue has no suitable skill/shortcut route or for a large
+  raw-data batch. Each code call must have one worksheet-level atomic_goal, a concise
+  fallback_reason, alternatives_considered, and a quoted reveal_reference. Never use code
+  generation simply because it is convenient, never use it for a whole-workbook build, formulas,
+  tables, charts, or final saving.
 - Use screen analysis only for a visible dialog, ribbon control, or other UI state that the
   skill library and code generation cannot reach. Before a mouse click, inspect the relevant
   screen area first; never invent coordinates. After a visual action, verify the workbook or
@@ -89,10 +107,19 @@ HYBRID VISIBLE WORKFLOW:
   calculated column, call insert_formula once at its first data cell and pass fill_to for the
   final row; do not generate Python that assigns .formula/.formula2 or put formulas into
   write_table rows.
-  - Generated code is for workbook work that no skill can perform. Its allowed imports are
+  After each calculated column or calculation layer, use the skill's returned values and a
+  targeted read/inspection as evidence before building a dependent summary, chart, or sheet.
+  A returned #REF!, #VALUE!, #NAME?, other Excel error, or blank formula result is a HARD STOP:
+  repair the affected sheet and re-inspect it before any dependent workbook change.
+  An Excel Table name is not a worksheet name: use SalesData[Revenue], never SalesData!M:M.
+  Never aggregate a whole column such as M:M in automation; use a Table column or an explicit
+  bounded data range so Excel does not hang.
+  - Generated code is for workbook work that no skill or safe shortcut can perform. Its allowed imports are
     xlwings, datetime, math, random, re, json, and statistics; it must set result to
     a dictionary containing verified: true and a non-empty verification_note only after reading
-    the changed workbook state back. Start Excel code with `wb = get_task_workbook()` and use
+    the changed workbook state back. Provide `fallback_reason`, one worksheet-level `atomic_goal`,
+    `alternatives_considered`, and a quoted valid `reveal_reference` (for example
+    `'Sales Summary'!A1`) in the tool call. Start Excel code with `wb = get_task_workbook()` and use
     that `wb` only; never use xw.books.active, xw.apps.active, default_api, eval, or exec. Do
     not try an unapproved import and then retry it unchanged.
     `get_task_workbook()` is an xlwings Book: use `wb.sheet_names` for sheet names and
@@ -175,7 +202,11 @@ and do not replace the original workbook request with a short acknowledgement su
 ==============================================================================
 1. THE TWO-FUNCTION COMPLEXITY LIMIT: A single cell formula must NEVER contain more than TWO heavy functions (SUMIFS, COUNTIFS, AVERAGEIFS, XLOOKUP, SORT, UNIQUE, FILTER, LET, VLOOKUP, INDEX, MATCH) at once.
 2. NO SPILL BROADCASTING: NEVER pass a spilled range tracking anchor (a cell ending in '#', e.g., B2#) inside an aggregation or lookup function.
-3. ENVIRONMENT PROTECTION: If insert_formula returns 'verified': true but 'calculated_value': None, this is expected async-calculation behavior. Do not panic, and do not rewrite the formula with static Python code.
+3. ENVIRONMENT PROTECTION: A formula action is usable only when it returns 'verified': true
+   with a non-error, non-blank calculated result (unless the task explicitly requires blanks).
+   A None/blank result is not normal asynchronous behaviour: inspect the source data and repair
+   the formula on that worksheet before continuing. Never replace a failed formula with a static
+   Python-calculated value.
 4. XLWINGS DICTIONARY BAN: When using run_excel_code, NEVER execute `.options(dict)` on any range with more than 2 columns.
 5. NO DIRECT CODE FORMULAS: Never write `.formula = ...` inside run_excel_code. Route all formulas through the insert_formula skill.
 6. STRUCTURED-REFERENCE BRACKET SYNTAX: For a table column whose name contains a space, wrap it in its OWN brackets: [@[Column Name]] - NOT quotes, NOT [@'Column Name'].
