@@ -5,6 +5,7 @@ to Excel, the DB, or the AI - it's pure environment plumbing.
 """
 
 import os
+import importlib
 from pathlib import Path
 from dotenv import dotenv_values, load_dotenv
 
@@ -28,6 +29,15 @@ def _local_agent_setting(name: str, default: str) -> str:
     return value if value is not None else os.getenv(name, default)
 
 AI_PROVIDER = _local_agent_setting("AI_PROVIDER", "gemini").strip().lower()
+# A configured secondary provider keeps an in-progress workbook task alive
+# when the primary provider is rate-limited or its DNS/network route fails.
+# It is used only after a verified availability failure; it is not a normal
+# load-balancer and will never send concurrent Excel actions.
+AI_PROVIDER_FALLBACK_CHAIN = [
+    provider.strip().lower()
+    for provider in _local_agent_setting("AI_PROVIDER_FALLBACK_CHAIN", "claude").split(",")
+    if provider.strip() and provider.strip().lower() != AI_PROVIDER
+]
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 LOCAL_API_KEY = os.getenv("LOCAL_API_KEY", "")
@@ -36,7 +46,10 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 MAX_STEPS_PER_TASK = int(_local_agent_setting("MAX_STEPS_PER_TASK", "60"))
 MAX_RETRIES_PER_ACTION = int(_local_agent_setting("MAX_RETRIES_PER_ACTION", "2"))
 SKILL_TIMEOUT_SECONDS = int(_local_agent_setting("SKILL_TIMEOUT_SECONDS", "60"))
-MAX_VISUAL_ACTIONS_PER_TASK = int(os.getenv("MAX_VISUAL_ACTIONS_PER_TASK", 80))
+# A large visual workbook needs more than the old 80-action ceiling, but the
+# cap remains finite so a faulty UI loop cannot keep typing indefinitely.
+# Use the same .env precedence as the other local automation controls.
+MAX_VISUAL_ACTIONS_PER_TASK = int(_local_agent_setting("MAX_VISUAL_ACTIONS_PER_TASK", "240"))
 
 ENABLE_CODEGEN_LAYER = _local_agent_setting("ENABLE_CODEGEN_LAYER", "true").lower() == "true"
 ENABLE_VISUAL_FALLBACK = _local_agent_setting("ENABLE_VISUAL_FALLBACK", "false").lower() == "true"
@@ -84,6 +97,27 @@ OMNIPARSER_LOCAL_MODE = _local_agent_setting("OMNIPARSER_LOCAL_MODE", "false").l
 # if you don't need icon descriptions and want snappy visual responses.
 ENABLE_FLORENCE_CAPTION = _local_agent_setting("ENABLE_FLORENCE_CAPTION", "true").lower() == "true"
 
+
+def validate_local_omniparser_configuration() -> None:
+    """Fail at service startup when the opted-in local parser is unavailable.
+
+    Local mode previously deferred its import until the first screen parse.
+    That made every unresolved visual click wait through parser retries before
+    reporting a missing module. Startup validation turns the configuration
+    error into one clear, actionable failure instead.
+    """
+    if not OMNIPARSER_LOCAL_MODE:
+        return
+    try:
+        importlib.import_module("vision.local_omniparser")
+    except Exception as exc:
+        raise RuntimeError(
+            "OMNIPARSER_LOCAL_MODE=true requires the local parser module "
+            "'vision.local_omniparser', but it could not be imported. "
+            "Install/provide that module or set OMNIPARSER_LOCAL_MODE=false "
+            "and configure OMNIPARSER_URL."
+        ) from exc
+
 GEMINI_MODEL_CHAIN = [
     m.strip() for m in os.getenv(
         "GEMINI_MODEL_CHAIN",
@@ -91,7 +125,9 @@ GEMINI_MODEL_CHAIN = [
     ).split(",") if m.strip()
 ]
 GEMINI_RATE_LIMIT_WAIT_SECONDS = int(os.getenv("GEMINI_RATE_LIMIT_WAIT_SECONDS", "0"))
-GEMINI_TIMEOUT_SECONDS = int(os.getenv("GEMINI_TIMEOUT_SECONDS", "60"))
+# A model response that takes a full minute makes the desktop agent look
+# frozen. Fail over quickly; model switching is cheaper than blocking Excel.
+GEMINI_TIMEOUT_SECONDS = int(os.getenv("GEMINI_TIMEOUT_SECONDS", "20"))
 
 # OpenRouter settings
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")

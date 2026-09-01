@@ -16,10 +16,15 @@ import config
 from skills.registry import has_skill, run_skill
 from codegen.executor import run_generated_code
 from agent import providers
+from agent.capabilities import (
+    build_execution_capabilities,
+    planning_context,
+    recovery_options,
+)
 from agent.prompts import build_system_prompt
 
-VISUAL_TOOL_NAMES = {"take_screenshot", "parse_screen", "click", "double_click", "type_text", "press_key", "hotkey", "scroll", "activate_ribbon_tab", "press_alt", "press_shortcut", "go_to_range", "paste_table", "fill_formula_down", "format_currency", "format_bold", "autofit_columns", "create_clustered_column_chart", "create_pie_chart", "execute_excel_shortcut", "batch_excel_operations", "search_cached_elements", "find_and_click", "click_ribbon_tab", "click_button", "rename_sheet", "go_to_sheet", "navigate_to_cell_on_sheet", "verify_task_completion", "get_active_sheet_name", "verify_current_sheet", "get_sheet_info", "get_cell_value", "apply_cell_style", "set_header_style", "set_fill_color", "set_font_color", "apply_dashboard_theme"}
-READ_ONLY_TOOL_NAMES = {"take_screenshot", "parse_screen"}
+VISUAL_TOOL_NAMES = {"take_screenshot", "parse_screen", "click", "double_click", "hover_and_read_tooltip", "inspect_popup", "click_popup_button", "click_popup_control", "set_popup_text", "save_workbook", "type_text", "press_key", "hotkey", "scroll", "activate_ribbon_tab", "press_alt", "press_shortcut", "go_to_range", "paste_table", "fill_formula_down", "format_currency", "format_bold", "autofit_columns", "create_clustered_column_chart", "create_pie_chart", "execute_excel_shortcut", "batch_excel_operations", "search_cached_elements", "find_and_click", "click_ribbon_tab", "click_button", "create_sheet", "rename_sheet", "go_to_sheet", "navigate_to_cell_on_sheet", "verify_task_completion", "get_active_sheet_name", "verify_current_sheet", "get_sheet_info", "get_cell_value", "apply_cell_style", "set_header_style", "set_fill_color", "set_font_color", "apply_dashboard_theme"}
+READ_ONLY_TOOL_NAMES = {"take_screenshot", "parse_screen", "inspect_popup", "search_cached_elements", "get_execution_capabilities"}
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -76,11 +81,20 @@ class AgentTask:
         self.structured_steps = []
         self.retry_counts = {}
         self.gemini_model_index = 0
+        # The task normally stays with the configured primary provider.  This
+        # changes only after a proven provider availability failure, never
+        # because an Excel action merely failed verification.
+        self.active_provider = config.AI_PROVIDER
+        self.provider_failover_history = []
         self.final_response = None
         self.chat_transcript = [{"role": "user", "text": instruction}]
         self.excel_version_info = None  # filled in once at task start, see run_task()
+        self.workbook_state = None  # semantic, read-only state used for tool selection
+        self.execution_capabilities = None
         self.text_only_action_retry_used = False
         self.final_verification_requested = False
+        self.formula_error_repair_requested = False
+        self.last_formula_error_audit = None
         # Gemini may return several parallel function calls in one response.
         # Their results must be returned together, otherwise a later unsigned
         # call is treated as a malformed new tool turn.
@@ -92,10 +106,21 @@ class AgentTask:
         # lets both providers enforce the fallback instead of merely hoping
         # the model remembers a sentence in the prompt.
         self.pending_codegen_fallback = None
+        # A task may be actively recovering after a failed action. This is
+        # visible to the user, but it never authorizes overlapping or
+        # speculative Excel writes. The executor remains serial.
+        self.recovery_state = None
+        self.recovery_guard_block_count = 0
         self.successful_visual_actions = set()
         self.successful_action_signatures = set()
         self.visual_checkpoints = []
         self.visual_checkpoint_unavailable = False
+        # For structured visual-only workbook builds, the controller derives
+        # the promised worksheet list from the user's instruction.  The model
+        # may not replace that list with a convenient partial list such as
+        # ["Sheet1"] when it asks to verify completion.
+        self.required_visual_sheet_names = []
+        self.final_save_requested = False
         # Direct imperative requests (for example, "click the Insert tab")
         # already state the action the user wants.  Start those tasks in
         # execution mode; descriptive or exploratory requests still begin
@@ -184,10 +209,18 @@ class AgentTask:
             self.retry_counts = {}
             self.text_only_action_retry_used = False
             self.final_verification_requested = False
+            self.formula_error_repair_requested = False
+            self.last_formula_error_audit = None
+            self.workbook_state = None
+            self.execution_capabilities = None
             self.gemini_expected_function_responses = 0
             self.gemini_function_response_order = []
             self.gemini_function_response_batch = []
+            self.active_provider = config.AI_PROVIDER
+            self.provider_failover_history = []
             self.pending_codegen_fallback = None
+            self.recovery_state = None
+            self.recovery_guard_block_count = 0
             self.successful_visual_actions = set()
             self.successful_action_signatures = set()
             self.visual_checkpoints = []
@@ -206,6 +239,52 @@ class AgentTask:
             encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
             safe_message = message.encode(encoding, errors="backslashreplace").decode(encoding)
             print(safe_message)
+
+    def set_recovery_state(
+        self,
+        phase: str,
+        message: str,
+        *,
+        tool_name: str | None = None,
+        safe_to_continue: bool = False,
+    ) -> None:
+        """Publish a truthful, user-visible recovery checkpoint.
+
+        This is progress information, not a second executor. Dependent
+        workbook edits remain paused until the current action has either been
+        verified or stopped with a clear reason.
+        """
+        self.recovery_state = {
+            "phase": phase,
+            "message": message,
+            "tool_name": tool_name,
+            "safe_to_continue": safe_to_continue,
+        }
+        self.structured_steps.append({
+            "type": "recovery",
+            "phase": phase,
+            "text": message,
+            "tool_name": tool_name,
+            "safe_to_continue": safe_to_continue,
+        })
+        self.log_step(f"Recovery ({phase}): {message}")
+
+    def clear_recovery_state(self, message: str | None = None) -> None:
+        """End an active recovery only after a verified action succeeds."""
+        if self.recovery_state is None:
+            return
+        previous = self.recovery_state
+        self.recovery_state = None
+        self.recovery_guard_block_count = 0
+        if message:
+            self.structured_steps.append({
+                "type": "recovery",
+                "phase": "recovered",
+                "text": message,
+                "tool_name": previous.get("tool_name"),
+                "safe_to_continue": True,
+            })
+            self.log_step(f"Recovery complete: {message}")
 
     def log_rate_limit(self, model: str):
         """Log a rate limit hit for a model."""
@@ -424,7 +503,76 @@ def _finish_visual_only_routing_block(task: AgentTask) -> AgentTask:
     return task
 
 
+def _normalise_visual_tool_result(tool_name: str, result):
+    """Keep a malformed visual helper from crashing the agent loop.
+
+    Every provider tool must return an evidence mapping.  The guard converts a
+    legacy primitive return (such as a bare sheet-name string) into a normal
+    failed action, so the model can recover instead of the worker stopping
+    with ``'str' object has no attribute 'get'``.
+    """
+    if isinstance(result, dict):
+        if isinstance(result.get("verified"), bool):
+            return result
+        normalized = dict(result)
+        normalized["verified"] = False
+        normalized.setdefault("status", "missing_verification_evidence")
+        normalized.setdefault(
+            "error",
+            f"Visual tool '{tool_name}' returned without a boolean verified result.",
+        )
+        return normalized
+    return {
+        "verified": False,
+        "status": "invalid_visual_tool_result",
+        "error": f"Visual tool '{tool_name}' returned {type(result).__name__}, not a result mapping.",
+    }
+
+
+def _is_lost_visual_excel_window(result: dict | None) -> bool:
+    """Recognise a lost task-bound Excel window as a terminal visual-session error."""
+    if not isinstance(result, dict):
+        return False
+    detail = " ".join(
+        str(result.get(key, "")) for key in ("error", "verification_note", "status")
+    ).lower()
+    return any(phrase in detail for phrase in (
+        "xelora-owned excel window is no longer visible",
+        "excel workbook bound to this task is no longer visible",
+        "excel process is no longer visible",
+        "agent window lost",
+    ))
+
+
+def _has_pending_create_table_completion(task: AgentTask, popups: list[dict]) -> bool:
+    """Whether this task opened the valid Create Table dialog it now sees.
+
+    A large clipboard paste can make Excel expose Create Table just after the
+    first local wait expires. Only resume that dialog automatically when this
+    same task attempted ``insert_table`` and received that specific timeout;
+    a dialog a user opened independently is never accepted on their behalf.
+    """
+    if not any(
+        isinstance(popup, dict) and "create table" in str(popup.get("title", "")).lower()
+        for popup in popups
+    ):
+        return False
+    for step in reversed(getattr(task, "structured_steps", [])):
+        if step.get("type") != "action":
+            continue
+        if step.get("tool_name") not in {"execute_excel_shortcut", "press_shortcut"}:
+            continue
+        shortcut = str((step.get("input") or {}).get("shortcut_name", "")).strip().lower()
+        outcome = step.get("result") if isinstance(step.get("result"), dict) else {}
+        if shortcut == "insert_table" and outcome.get("status") == "create_table_dialog_not_found":
+            return True
+    return False
+
+
 def dispatch_action(tool_name: str, tool_input: dict, workbook_name: str | None = None):
+    if tool_name == "get_execution_capabilities":
+        return build_execution_capabilities(), "capability_catalog", None
+
     if config.VISUAL_ONLY_MODE:
         if tool_name not in VISUAL_TOOL_NAMES:
             # In OmniParser-only mode, suggest a visual equivalent when possible
@@ -446,8 +594,12 @@ def dispatch_action(tool_name: str, tool_input: dict, workbook_name: str | None 
                     "error": "Use go_to_range with a valid reference; raw Go To shortcuts can leave an unfinished dialog.",
                     "verified": False,
                 }, "blocked", None
+            if keys == ["ctrl", "s"]:
+                from vision import ui_control
+                return ui_control.save_workbook(), "visual", None
         from vision import ui_control
-        return getattr(ui_control, tool_name)(**tool_input), "visual", None
+        result = getattr(ui_control, tool_name)(**tool_input)
+        return _normalise_visual_tool_result(tool_name, result), "visual", None
 
     if tool_name == "write_table" and _write_table_input_contains_formula_values(tool_input):
         return {
@@ -501,7 +653,7 @@ def dispatch_action(tool_name: str, tool_input: dict, workbook_name: str | None 
                     "verified": False}, "visual", None
         from vision import ui_control
         func = getattr(ui_control, tool_name)
-        return func(**tool_input), "visual", None
+        return _normalise_visual_tool_result(tool_name, func(**tool_input)), "visual", None
 
     return {"error": f"Unknown tool '{tool_name}'", "verified": False}, "unknown", None
 
@@ -509,7 +661,7 @@ def dispatch_action(tool_name: str, tool_input: dict, workbook_name: str | None 
 def _suggest_visual_alternative(tool_name: str, tool_input: dict) -> str:
     """Suggest a visual UI alternative when a skill/API tool is unavailable."""
     alternatives = {
-        "create_sheet": "Use hotkey to open Insert menu, or use go_to_range to navigate and type a sheet name.",
+        "create_sheet": "Use create_sheet with the requested sheet name; it safely creates and verifies the tab before it is renamed or used.",
         "write_cell": "Use go_to_range to navigate to the cell, then type_text to enter the value.",
         "write_table": "Use go_to_range to navigate to the start cell, then paste_table with headers and rows.",
         "insert_formula": "Use go_to_range to navigate to the cell, type_text with the formula, then press_key('enter'). Use fill_formula_down for columns.",
@@ -523,7 +675,7 @@ def _suggest_visual_alternative(tool_name: str, tool_input: dict) -> str:
         "freeze_panes": "Use hotkey Alt+W+R+F for View > Freeze Panes.",
         "auto_fit_columns": "Use autofit_columns visual tool.",
         "conditional_formatting": "Use hotkey Alt+H+L for Home > Conditional Formatting.",
-        "save_workbook": "Use hotkey Ctrl+S.",
+        "save_workbook": "Use the visual save_workbook tool; provide file_name for a new workbook so it can complete Save As safely.",
         "export_to_pdf": "Use hotkey Ctrl+P for Print, then navigate to PDF export.",
         "open_workbook": "Use hotkey Ctrl+O to open a file.",
     }
@@ -619,7 +771,20 @@ def _detect_excel_version_once(task: AgentTask):
     every turn.
     """
     if config.VISUAL_ONLY_MODE:
-        return {"verified": True, "label": "visual-only mode", "supports_dynamic_arrays": False}
+        if task.excel_version_info is not None:
+            return task.excel_version_info
+        try:
+            from vision.ui_control import get_visual_excel_context
+
+            task.excel_version_info = get_visual_excel_context()
+        except Exception as exc:
+            task.excel_version_info = {
+                "verified": False,
+                "label": "visual-only mode (identity unavailable)",
+                "supports_dynamic_arrays": False,
+                "error": str(exc),
+            }
+        return task.excel_version_info
     if task.excel_version_info is not None:
         return task.excel_version_info
     try:
@@ -628,6 +793,48 @@ def _detect_excel_version_once(task: AgentTask):
     except Exception as e:
         task.excel_version_info = {"status": "detection_failed", "error": str(e), "verified": False}
     return task.excel_version_info
+
+
+def _inspect_workbook_state_once(task: AgentTask) -> dict:
+    """Collect read-only workbook evidence before the planner chooses write tools."""
+    if isinstance(task.workbook_state, dict):
+        return task.workbook_state
+
+    try:
+        if config.VISUAL_ONLY_MODE:
+            from vision import ui_control
+
+            context = ui_control.get_visual_excel_context()
+            popup = ui_control.inspect_popup()
+            sheets = ui_control.get_existing_sheet_names()
+            active = ui_control.get_active_sheet_name()
+            task.workbook_state = {
+                **context,
+                "sheet_names": sheets,
+                "active_sheet": active.get("sheet_name"),
+                "popup_status": popup.get("status"),
+                "verified": bool(context.get("verified") is True and popup.get("status") == "clean"),
+            }
+        else:
+            state, _, _ = dispatch_action("inspect_workbook", {}, workbook_name=task.workbook_name)
+            task.workbook_state = state if isinstance(state, dict) else {
+                "verified": False,
+                "error": "Workbook inspection did not return a result mapping.",
+            }
+    except Exception as exc:
+        task.workbook_state = {
+            "verified": False,
+            "error": f"Workbook inspection was unavailable: {exc}",
+        }
+
+    if task.workbook_state.get("verified") is True:
+        task.log_step("Workbook state inspected before tool selection.")
+    else:
+        task.log_step(
+            "Workbook state inspection was unavailable; the AI must use read-only evidence "
+            "before changing an unfamiliar workbook."
+        )
+    return task.workbook_state
 
 
 def _keep_excel_visible(task: AgentTask) -> None:
@@ -757,6 +964,137 @@ def _live_sheet_names() -> list[str]:
         return []
 
 
+def _required_visual_sheet_names(instruction: str) -> list[str]:
+    """Extract an explicitly ordered worksheet list from a user request.
+
+    This intentionally recognises only the unambiguous ``worksheets in this
+    order`` form.  It is a completion safeguard, not a guesser: ordinary
+    requests keep their existing visual workflow, while a structured workbook
+    request cannot be signed off against a partial, model-invented list.
+    """
+    if not isinstance(instruction, str):
+        return []
+    ordered_block = re.search(
+        r"(?:^|\n)\s*create\s+(?:these\s+)?worksheets?\s+in\s+(?:this\s+)?order\s*:\s*"
+        r"(.*?)(?=\n\s*before\s+finishing\b|\Z)",
+        instruction,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not ordered_block:
+        return []
+
+    names = []
+    for match in re.finditer(r"(?m)^\s*\d+\s*[.)]\s*([^\r\n]+?)\s*$", ordered_block.group(1)):
+        name = " ".join(match.group(1).split())
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _normalised_sheet_names(sheet_names) -> list[str]:
+    if not isinstance(sheet_names, list):
+        return []
+    return [" ".join(str(name).split()).casefold() for name in sheet_names if str(name).strip()]
+
+
+def _visual_completion_check_matches_required_sheets(task: AgentTask, step: dict) -> bool:
+    """Return true only for a successful completion check of the full promised list."""
+    expected = list(getattr(task, "required_visual_sheet_names", []) or [])
+    if not expected:
+        return True
+    if step.get("tool_name") != "verify_task_completion":
+        return False
+    if step.get("status") != "success":
+        return False
+    result = step.get("result")
+    if not isinstance(result, dict) or result.get("verified") is not True:
+        return False
+    return _normalised_sheet_names(step.get("input", {}).get("expected_sheets")) == _normalised_sheet_names(expected)
+
+
+def _has_post_change_visual_completion_check(task: AgentTask, after_index: int = -1) -> bool:
+    return any(
+        index > after_index
+        and step.get("type") == "action"
+        and _visual_completion_check_matches_required_sheets(task, step)
+        for index, step in enumerate(task.structured_steps)
+    )
+
+
+def _next_required_visual_sheet(task: AgentTask) -> str | None:
+    """Return the next worksheet that must be created and verified in order."""
+    required = list(getattr(task, "required_visual_sheet_names", []) or [])
+    if not required:
+        return None
+    completed = set()
+    for step in task.structured_steps:
+        if step.get("type") != "action" or step.get("tool_name") != "create_sheet":
+            continue
+        if step.get("status") != "success":
+            continue
+        result = step.get("result")
+        if not isinstance(result, dict) or result.get("verified") is not True:
+            continue
+        name = result.get("sheet_name") or step.get("input", {}).get("sheet_name")
+        if isinstance(name, str) and name.strip():
+            completed.add(" ".join(name.split()).casefold())
+    for sheet_name in required:
+        if " ".join(sheet_name.split()).casefold() not in completed:
+            return sheet_name
+    return None
+
+
+def _requested_workbook_file_name(instruction: str) -> str | None:
+    """Get an explicit local .xlsx filename without accepting a filesystem path."""
+    if not isinstance(instruction, str):
+        return None
+    match = re.search(
+        r"\bsave(?:\s+(?:the|this|your|finished))?(?:\s+workbook)?\s+as\s*:?\s*"
+        r"(?:\r?\n\s*)?([^\s\\/:*?\"<>|]+\.xlsx)\b",
+        instruction,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1) if match else None
+
+
+def _audit_workbook_formula_errors() -> dict:
+    """Read every worksheet for displayed Excel errors before completion."""
+    try:
+        audit = run_skill("inspect_workbook")
+    except Exception as exc:
+        return {
+            "verified": False,
+            "status": "formula_audit_failed",
+            "error": str(exc),
+            "formula_errors": [],
+        }
+    if not isinstance(audit, dict):
+        return {
+            "verified": False,
+            "status": "formula_audit_invalid_result",
+            "error": "inspect_workbook returned an invalid audit result.",
+            "formula_errors": [],
+        }
+    audit.setdefault("formula_errors", [])
+    return audit
+
+
+def _formula_error_summary(errors: list[dict], limit: int = 12) -> str:
+    """Format error coordinates for an actionable repair request."""
+    summary = []
+    for error in errors[:limit]:
+        if not isinstance(error, dict):
+            continue
+        location = f"{error.get('sheet', 'unknown sheet')}!{error.get('address', '?')}"
+        value = error.get("error", "Excel error")
+        formula = error.get("formula")
+        detail = f"{location} = {value}"
+        if isinstance(formula, str) and formula:
+            detail += f" ({formula})"
+        summary.append(detail)
+    return "; ".join(summary) or "The workbook audit reported formula errors without usable coordinates."
+
+
 def _is_unresolved_workbook_action(step: dict) -> bool:
     """Whether an action left a workbook change unresolved.
 
@@ -859,8 +1197,53 @@ def _user_facing_action_name(tool_name: str) -> str:
 
 _OBSERVATION_TOOL_NAMES = {
     "get_excel_version", "inspect_workbook", "read_range", "screenshot_active_window",
-    "take_screenshot", "parse_screen",
+    "take_screenshot", "parse_screen", "inspect_popup", "search_cached_elements",
+    "get_active_sheet_name", "verify_current_sheet", "get_sheet_info", "get_cell_value",
+    "verify_task_completion", "get_execution_capabilities",
 }
+
+_VISUAL_SAVE_TOOL_NAMES = {"save_workbook"}
+
+
+def _is_visual_save_attempt(tool_name: str, tool_input: dict) -> bool:
+    """Recognise every visual route that could save before verification."""
+    if tool_name in _VISUAL_SAVE_TOOL_NAMES:
+        return True
+    if tool_name == "execute_excel_shortcut":
+        return str(tool_input.get("shortcut_name", "")).strip().lower() in {"save", "save_as"}
+    if tool_name == "hotkey":
+        keys = tuple(str(key).lower().strip() for key in tool_input.get("keys", []))
+        return keys in {("ctrl", "s"), ("control", "s")}
+    return False
+
+
+def _visual_save_is_ready(task: AgentTask) -> bool:
+    """Allow the final visual save only after a post-change completion check."""
+    latest_change = -1
+    for index, step in enumerate(task.structured_steps):
+        if step.get("type") != "action":
+            continue
+        if step.get("tool_name") in _OBSERVATION_TOOL_NAMES | _VISUAL_SAVE_TOOL_NAMES:
+            continue
+        result = step.get("result")
+        if step.get("status") == "success" and isinstance(result, dict) and result.get("verified") is True:
+            latest_change = index
+
+    # A user may simply ask Xelora to save an existing workbook.  The ordering
+    # guard is for tasks that have already made a verified change.
+    if latest_change < 0:
+        return True
+    if getattr(task, "required_visual_sheet_names", None):
+        return _has_post_change_visual_completion_check(task, latest_change)
+    return any(
+        index > latest_change
+        and step.get("type") == "action"
+        and step.get("tool_name") == "verify_task_completion"
+        and step.get("status") == "success"
+        and isinstance(step.get("result"), dict)
+        and step["result"].get("verified") is True
+        for index, step in enumerate(task.structured_steps)
+    )
 
 # Code generation is deliberately not a substitute for skills whose safety
 # contract cannot be reproduced in the code runner. In particular, formula
@@ -1035,6 +1418,7 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
         task.awaiting_approval and task.defer_excel_until_approval
     )
     if config.VISUAL_ONLY_MODE and can_start_excel_session:
+        task.required_visual_sheet_names = _required_visual_sheet_names(task.instruction)
         if (
             not config.ALLOW_VISUAL_STRUCTURED_EDITS
             and _visual_only_requires_structured_workbook_automation(task.instruction)
@@ -1068,7 +1452,15 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
         _keep_excel_visible(task)
 
     excel_version_info = _detect_excel_version_once(task) if can_start_excel_session else None
+    workbook_state = _inspect_workbook_state_once(task) if can_start_excel_session else None
+    # Inspection is the first reliable source of the active workbook identity.
+    # Adopt it before the planner can call codegen, otherwise a subprocess can
+    # fall back to an unrelated global xlwings active workbook.
+    if isinstance(workbook_state, dict):
+        _adopt_workbook_from_result(task, workbook_state, db, db_task_id)
+    task.execution_capabilities = build_execution_capabilities()
     system_prompt = build_system_prompt(user_preferences, excel_version_info)
+    system_prompt += planning_context(workbook_state, excel_version_info)
     if task.awaiting_approval:
         if task.defer_excel_until_approval:
             system_prompt += (
@@ -1204,20 +1596,42 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             task._last_progress_time = current_time
             task._last_step_count = len(task.structured_steps)
 
-        if config.AI_PROVIDER == "claude":
-            tool_calls, text_blocks, stop_reason = providers.call_claude(task, system_prompt)
-        elif config.AI_PROVIDER == "openrouter":
-            tool_calls, text_blocks, stop_reason = providers.call_openrouter(task, system_prompt)
-            # Store assistant message with tool_calls for OpenRouter format
-            assistant_content = {"tool_calls": tool_calls} if tool_calls else {}
-            if text_blocks:
-                assistant_content["text"] = " ".join(text_blocks)
-            task.messages.append({
-                "role": "assistant",
-                "content": assistant_content
-            })
-        else:
-            tool_calls, text_blocks, stop_reason = providers.call_gemini(task, system_prompt)
+        try:
+            active_provider = providers.active_provider_name(task)
+            if active_provider == "claude":
+                tool_calls, text_blocks, stop_reason = providers.call_claude(task, system_prompt)
+            elif active_provider == "openrouter":
+                tool_calls, text_blocks, stop_reason = providers.call_openrouter(task, system_prompt)
+                # Store assistant message with tool_calls for OpenRouter format
+                assistant_content = {"tool_calls": tool_calls} if tool_calls else {}
+                if text_blocks:
+                    assistant_content["text"] = " ".join(text_blocks)
+                task.messages.append({
+                    "role": "assistant",
+                    "content": assistant_content
+                })
+            else:
+                tool_calls, text_blocks, stop_reason = providers.call_gemini(task, system_prompt)
+        except Exception as exc:
+            if providers.activate_available_provider_fallback(task, exc):
+                # The fallback begins from a clean, provider-neutral user turn
+                # and must inspect the persisted live workbook before writing.
+                # It therefore cannot replay a half-finished tool call from a
+                # provider that has just become unavailable.
+                continue
+            # The workbook can remain perfectly usable when every configured
+            # model is temporarily unavailable. End this run honestly instead
+            # of letting the worker crash and leaving the UI at "stopped
+            # unexpectedly". No keyboard recovery actions are sent here.
+            task.is_done = True
+            task.final_response = (
+                "INCOMPLETE: Xelora could not reach an AI model to continue this task. "
+                f"Reason: {exc}. No additional workbook input was sent after this failure; "
+                "retry the task after the model service is available."
+            )
+            task.log_step(task.final_response)
+            task.chat_transcript.append({"role": "assistant", "text": task.final_response})
+            break
 
         for text in text_blocks:
             if text:
@@ -1277,48 +1691,139 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 if config.VISUAL_ONLY_MODE
                 else {"get_excel_version", "inspect_workbook", "read_range", "screenshot_active_window"}
             )
-            # OmniParser is very expensive on CPU.  A visual task has already
-            # validated the target immediately before its click, so do not
-            # force a second full-screen parse merely to finish a one-step
-            # request.  Excel API tasks retain their final inspection.
-            requires_final_verification = not config.VISUAL_ONLY_MODE
-            verification_tool = "inspect_workbook"
+            required_visual_sheets = list(getattr(task, "required_visual_sheet_names", []) or [])
+            # A narrow one-step visual action does not need a workbook-wide
+            # screenshot.  A structured multi-sheet workbook build does: it
+            # must prove the exact sheet list the user requested before Xelora
+            # can report success.
+            requires_final_verification = (
+                not config.VISUAL_ONLY_MODE or bool(required_visual_sheets)
+            )
+            verification_tool = (
+                "verify_task_completion" if config.VISUAL_ONLY_MODE else "inspect_workbook"
+            )
             last_workbook_change = max(
                 (index for index, step in enumerate(action_steps)
-                 if step.get("tool_name") not in read_only_tools),
+                 if step.get("tool_name") not in read_only_tools | _VISUAL_SAVE_TOOL_NAMES),
                 default=-1,
             )
-            has_final_inspection = any(
-                index > last_workbook_change
-                and step.get("tool_name") == verification_tool
-                and step.get("status") == "success"
-                and isinstance(step.get("result"), dict)
-                and step["result"].get("verified") is True
-                for index, step in enumerate(action_steps)
-            )
+            if config.VISUAL_ONLY_MODE:
+                has_final_inspection = _has_post_change_visual_completion_check(
+                    task, last_workbook_change
+                )
+            else:
+                has_final_inspection = any(
+                    index > last_workbook_change
+                    and step.get("tool_name") == verification_tool
+                    and step.get("status") == "success"
+                    and isinstance(step.get("result"), dict)
+                    and step["result"].get("verified") is True
+                    and isinstance(step["result"].get("sheet_reports"), list)
+                    for index, step in enumerate(action_steps)
+                )
             if (requires_final_verification and has_attempted_action
                     and not has_final_inspection and not task.final_verification_requested):
                 task.final_verification_requested = True
-                actual_sheet_names = _live_sheet_names()
-                known_sheets = ", ".join(actual_sheet_names) if actual_sheet_names else "(could not read sheet names)"
                 task.log_step("Final verification required: requesting a fresh workbook inspection.")
+                if config.VISUAL_ONLY_MODE:
+                    required_json = json.dumps(required_visual_sheets)
+                    verification_request = (
+                        "Before giving a final answer, call verify_task_completion with expected_sheets "
+                        f"EXACTLY {required_json}. Do not substitute a partial list such as ['Sheet1']. "
+                        "It must confirm every required sheet exists after the final workbook change. "
+                        "Fix any missing sheets before trying the check again."
+                    )
+                else:
+                    actual_sheet_names = _live_sheet_names()
+                    known_sheets = ", ".join(actual_sheet_names) if actual_sheet_names else "(could not read sheet names)"
+                    verification_request = (
+                        f"Before giving a final answer, call {verification_tool} with NO sheet_name now as the final "
+                        "workbook-wide verification step. It must inspect every worksheet and report all formula errors. "
+                        "Compare the live state to every requested deliverable. Fix any gaps you find; if you cannot "
+                        "fix them, respond INCOMPLETE with the missing items. "
+                        f"The live workbook currently contains only these sheet names: {known_sheets}. "
+                        "Never inspect or claim a sheet name outside that exact list."
+                    )
+                task.messages.append({
+                    "role": "user",
+                    "content": verification_request,
+                })
+                continue
+
+            requested_file_name = _requested_workbook_file_name(task.instruction)
+            if (
+                config.VISUAL_ONLY_MODE
+                and requested_file_name
+                and has_final_inspection
+                and not any(
+                    index > last_workbook_change
+                    and step.get("tool_name") == "save_workbook"
+                    and step.get("status") == "success"
+                    and isinstance(step.get("result"), dict)
+                    and step["result"].get("verified") is True
+                    for index, step in enumerate(action_steps)
+                )
+                and not task.final_save_requested
+            ):
+                task.final_save_requested = True
+                task.log_step("Final verification passed; requesting the one required named workbook save.")
                 task.messages.append({
                     "role": "user",
                     "content": (
-                        f"Before giving a final answer, call {verification_tool} now as the final verification "
-                        "step. Compare the live state to every requested deliverable. Fix any gaps you "
-                        "find; if you cannot fix them, respond INCOMPLETE with the missing items. "
-                        f"The live workbook currently contains only these sheet names: {known_sheets}. "
-                        "Never inspect or claim a sheet name outside that exact list."
+                        "The required completion check passed. Now call save_workbook exactly once with "
+                        f"file_name='{requested_file_name}'. Do not use Save As, Ctrl+S, or any other save route."
                     ),
                 })
                 continue
+
+            formula_audit = None
+            formula_errors = []
+            if requires_final_verification and has_attempted_action and has_final_inspection:
+                formula_audit = _audit_workbook_formula_errors()
+                task.last_formula_error_audit = formula_audit
+                task.structured_steps.append({
+                    "type": "formula_audit",
+                    "result": formula_audit,
+                    "status": "success" if formula_audit.get("verified") is True else "failed",
+                })
+                formula_errors = [
+                    error for error in formula_audit.get("formula_errors", [])
+                    if isinstance(error, dict)
+                ]
+                if formula_errors and not task.formula_error_repair_requested:
+                    task.formula_error_repair_requested = True
+                    error_summary = _formula_error_summary(formula_errors)
+                    task.log_step(
+                        f"Formula audit found {len(formula_errors)} Excel error(s); requesting repair before completion."
+                    )
+                    task.messages.append({
+                        "role": "user",
+                        "content": (
+                            "The automatic workbook-wide formula audit found Excel errors. Do not finish. "
+                            "Inspect the affected sheets, correct each formula with insert_formula (never codegen), "
+                            "then call inspect_workbook with NO sheet_name again. Errors: "
+                            + error_summary
+                        ),
+                    })
+                    continue
+
             task.is_done = True
             final_text = text_blocks[-1] if text_blocks else "Task complete."
             if requires_final_verification and has_attempted_action and not has_final_inspection:
                 final_text = (
                     "INCOMPLETE: a final inspection of the workbook was not successfully completed, "
                     "so the requested work cannot be verified.\n\n" + final_text
+                )
+            elif formula_audit is not None and formula_audit.get("verified") is not True:
+                final_text = (
+                    "INCOMPLETE: Xelora could not complete its workbook-wide formula-error audit, "
+                    "so the workbook cannot be verified.\n\n" + final_text
+                )
+            elif formula_errors:
+                final_text = (
+                    "INCOMPLETE: the workbook still contains Excel formula errors: "
+                    + _formula_error_summary(formula_errors)
+                    + ".\n\n" + final_text
                 )
             task.final_response = _build_final_response_reality_check(task, final_text)
             task.chat_transcript.append({"role": "assistant", "text": task.final_response})
@@ -1407,26 +1912,203 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 providers.submit_tool_result(task, tool_call, result)
                 continue
 
+            # A failed workbook action may leave Excel in an unknown partial
+            # state. Until that state is read back, do not let a later tool
+            # call write elsewhere in the workbook merely because the model
+            # continued generating calls. The read-only inspection itself is
+            # still allowed so the task can recover rather than looking stuck.
+            active_recovery = task.recovery_state or {}
+            if (
+                active_recovery.get("phase") in {"inspecting_failure", "retry_pending"}
+                and tool_name not in _OBSERVATION_TOOL_NAMES
+            ):
+                task.recovery_guard_block_count += 1
+                result = {
+                    "verified": False,
+                    "status": "recovery_inspection_required",
+                    "error": (
+                        "The prior Excel action was not verified. Inspect the workbook or popup "
+                        "state before attempting another workbook change."
+                    ),
+                    "blocked_action": tool_name,
+                }
+                task.log_step(
+                    f"Recovery guard blocked {tool_name}; waiting for a read-only workbook or popup inspection."
+                )
+                task.structured_steps.append({
+                    "type": "action", "tool_name": tool_name, "execution_layer": "recovery_guard",
+                    "input": tool_input, "result": result, "status": "blocked",
+                })
+                providers.submit_tool_result(task, tool_call, result)
+                if task.recovery_guard_block_count >= 2:
+                    task.set_recovery_state(
+                        "needs_user_action",
+                        "Recovery stopped: the model did not request the required workbook inspection, so Xelora will not keep retrying blocked Excel writes.",
+                        tool_name=active_recovery.get("tool_name"),
+                        safe_to_continue=False,
+                    )
+                    task.is_done = True
+                    task.final_response = (
+                        "INCOMPLETE: Xelora stopped after the model repeatedly skipped the required "
+                        "read-only workbook inspection following an unverified Excel action."
+                    )
+                    task.chat_transcript.append({"role": "assistant", "text": task.final_response})
+                continue
+
+            if config.VISUAL_ONLY_MODE and tool_name == "verify_task_completion":
+                required_sheets = list(getattr(task, "required_visual_sheet_names", []) or [])
+                supplied_sheets = tool_input.get("expected_sheets")
+                if (
+                    required_sheets
+                    and _normalised_sheet_names(supplied_sheets) != _normalised_sheet_names(required_sheets)
+                ):
+                    result = {
+                        "verified": False,
+                        "status": "required_sheet_verification_mismatch",
+                        "error": (
+                            "This structured workbook must be verified against the exact requested sheet list: "
+                            + json.dumps(required_sheets)
+                            + ". Do not verify a partial or substituted list."
+                        ),
+                        "required_sheets": required_sheets,
+                    }
+                    task.log_step("Blocked a partial worksheet-completion check.")
+                    task.structured_steps.append({
+                        "type": "action", "tool_name": tool_name,
+                        "execution_layer": "required_sheet_verification_guard",
+                        "input": tool_input, "result": result, "status": "blocked",
+                    })
+                    providers.submit_tool_result(task, tool_call, result)
+                    continue
+
+            if config.VISUAL_ONLY_MODE and tool_name == "create_sheet":
+                next_required_sheet = _next_required_visual_sheet(task)
+                supplied_sheet_name = " ".join(str(tool_input.get("sheet_name", "")).split())
+                if (
+                    next_required_sheet
+                    and supplied_sheet_name.casefold() != next_required_sheet.casefold()
+                ):
+                    result = {
+                        "verified": False,
+                        "status": "worksheet_order_guard",
+                        "error": (
+                            f"Do not create '{supplied_sheet_name or 'an unnamed sheet'}' yet. "
+                            f"First create and verify the required worksheet '{next_required_sheet}'. "
+                            "Do not move to a later sheet after a sheet-creation failure."
+                        ),
+                        "next_required_sheet": next_required_sheet,
+                    }
+                    task.log_step(
+                        f"Blocked out-of-order worksheet creation; '{next_required_sheet}' is not verified yet."
+                    )
+                    task.structured_steps.append({
+                        "type": "action", "tool_name": tool_name,
+                        "execution_layer": "worksheet_order_guard",
+                        "input": tool_input, "result": result, "status": "blocked",
+                    })
+                    providers.submit_tool_result(task, tool_call, result)
+                    continue
+
+            if config.VISUAL_ONLY_MODE and _is_visual_save_attempt(tool_name, tool_input):
+                required_file_name = _requested_workbook_file_name(task.instruction)
+                supplied_file_name = str(tool_input.get("file_name", "")).strip()
+                if required_file_name and supplied_file_name.casefold() != required_file_name.casefold():
+                    result = {
+                        "verified": False,
+                        "status": "required_filename_mismatch",
+                        "error": (
+                            f"The user requested the final filename '{required_file_name}'. "
+                            "Use save_workbook with that exact file_name after completion verification."
+                        ),
+                    }
+                    task.log_step("Blocked a save that did not use the requested filename.")
+                    task.structured_steps.append({
+                        "type": "action", "tool_name": tool_name,
+                        "execution_layer": "required_filename_guard",
+                        "input": tool_input, "result": result, "status": "blocked",
+                    })
+                    providers.submit_tool_result(task, tool_call, result)
+                    continue
+
+            if (
+                config.VISUAL_ONLY_MODE
+                and _is_visual_save_attempt(tool_name, tool_input)
+                and not _visual_save_is_ready(task)
+            ):
+                result = {
+                    "verified": False,
+                    "status": "save_deferred_until_verification",
+                    "error": (
+                        "Do not save yet. Complete all requested work, then call "
+                        "verify_task_completion after the last workbook change before the one final save_workbook call."
+                    ),
+                }
+                task.log_step("Blocked an early save; final workbook verification is still required.")
+                task.structured_steps.append({
+                    "type": "action", "tool_name": tool_name, "execution_layer": "save_order_guard",
+                    "input": tool_input, "result": result, "status": "blocked",
+                })
+                providers.submit_tool_result(task, tool_call, result)
+                continue
+
             if not config.VISUAL_ONLY_MODE and tool_name not in VISUAL_TOOL_NAMES:
                 _show_target_in_excel(task, tool_name, tool_input)
 
             task.log_step(f"⏳ Running: {tool_name} {tool_input}")
 
             try:
-                from vision.ui_control import handle_blocking_dialogs, reset_to_neutral_state, _get_agent_excel_window
+                from vision.ui_control import handle_blocking_dialogs, _get_agent_excel_window
                 try:
                     win = _get_agent_excel_window()
+                    pre_check = {"status": "clean"}
                     if win and win.handle:
                         pre_check = handle_blocking_dialogs(win.handle)
-                        if pre_check.get("status") != "clean":
-                            task.log_step(f"🛡️ Pre-action interceptor: {pre_check.get('status')} — {pre_check.get('title', '')}")
-                            reset_to_neutral_state(win.handle)
+                        if pre_check.get("status") == "handled":
+                            task.log_step("Safely dismissed a classified stale Excel dialog before the next action.")
+                        elif pre_check.get("status") in {"popup_requires_workflow", "popup_requires_attention"}:
+                            task.log_step(
+                                "Excel popup identified before the next action: "
+                                + json.dumps(pre_check.get("popups", []), default=str)[:900]
+                            )
                 except Exception:
-                    pass
+                    pre_check = {"status": "clean"}
 
-                result, execution_layer, generated_code = dispatch_action(
-                    tool_name, tool_input, workbook_name=task.workbook_name
+                popup_actions = {"inspect_popup", "parse_screen", "click_popup_button", "click_popup_control", "set_popup_text", "save_workbook"}
+                is_table_completion = (
+                    tool_name in {"execute_excel_shortcut", "press_shortcut"}
+                    and str(tool_input.get("shortcut_name", "")).strip().lower() == "insert_table"
                 )
+                complete_delayed_table = _has_pending_create_table_completion(
+                    task, pre_check.get("popups", [])
+                )
+                if complete_delayed_table:
+                    from vision import ui_control
+                    task.log_step(
+                        "Completing the valid Create Table dialog that this task opened after Excel exposed it late."
+                    )
+                    result = ui_control.create_excel_table()
+                    execution_layer, generated_code = "visual_popup_recovery", None
+                elif (
+                    pre_check.get("status") in {"popup_requires_workflow", "popup_requires_attention"}
+                    and tool_name not in popup_actions
+                    and not is_table_completion
+                ):
+                    result = {
+                        "verified": False,
+                        "status": "popup_gate",
+                        "error": (
+                            "A classified Excel popup is open. Inspect it and use click_popup_button "
+                            "with one visible, policy-approved label before resuming worksheet input. "
+                            "If its title is Create Table, click its exact visible OK button; do not send Enter, "
+                            "Escape, or find_and_click."
+                        ),
+                        "popups": pre_check.get("popups", []),
+                    }
+                    execution_layer, generated_code = "popup_gate", None
+                else:
+                    result, execution_layer, generated_code = dispatch_action(
+                        tool_name, tool_input, workbook_name=task.workbook_name
+                    )
                 status = "success"
                 is_failure = isinstance(result, dict) and result.get("verified") is False
 
@@ -1435,10 +2117,11 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                         win = _get_agent_excel_window()
                         if win and win.handle:
                             post_check = handle_blocking_dialogs(win.handle)
-                            if post_check.get("status") in ("error_dismissed", "prompt_cancelled"):
-                                task.log_step(f"🛡️ Post-action interceptor dismissed: {post_check.get('title', '')}")
-                                reset_to_neutral_state(win.handle)
-                                result["interceptor_note"] = f"Dialog was blocking: {post_check.get('title', '')}"
+                            if post_check.get("status") == "handled":
+                                task.log_step("Safely dismissed a classified Excel error after the action.")
+                                result["interceptor_note"] = "A classified stale Excel dialog was dismissed after the action."
+                            elif post_check.get("status") in {"popup_requires_workflow", "popup_requires_attention"}:
+                                result["popup_note"] = post_check.get("popups", [])
                     except Exception:
                         pass
 
@@ -1455,10 +2138,38 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             )
 
             if is_failure:
+                result.setdefault(
+                    "recovery_options",
+                    recovery_options(tool_name, execution_layer, result),
+                )
                 task.log_step(f"⚠️ Not verified: {tool_name} -> {result.get('verification_note', result.get('error', 'no details'))}")
-                if _should_schedule_codegen_fallback(tool_name, result, execution_layer):
+                task.set_recovery_state(
+                    "inspecting_failure",
+                    "Recovering safely: Excel changes are paused while Xelora checks the failed action and selects a verified next step.",
+                    tool_name=tool_name,
+                    safe_to_continue=False,
+                )
+                visual_window_lost = config.VISUAL_ONLY_MODE and _is_lost_visual_excel_window(result)
+                if visual_window_lost:
+                    status = "failed"
+                    task.set_recovery_state(
+                        "needs_user_action",
+                        "Recovery stopped: the Excel window bound to this task is no longer available. Keep the intended workbook open, then start a new task.",
+                        tool_name=tool_name,
+                        safe_to_continue=False,
+                    )
+                    task.log_step(
+                        "Excel window lost. Stopping this task without sending recovery shortcuts or opening another workbook."
+                    )
+                elif _should_schedule_codegen_fallback(tool_name, result, execution_layer):
                     _schedule_codegen_fallback(task, tool_name, tool_input, result)
                     status = "fallback_pending"
+                    task.set_recovery_state(
+                        "fallback_pending",
+                        "Recovering safely: the original action was not verified. Xelora will try one focused alternative and verify the workbook before continuing.",
+                        tool_name=tool_name,
+                        safe_to_continue=False,
+                    )
                     task.log_step(
                         f"🧩 Skill '{tool_name}' could not verify the change; "
                         "escalating this same goal to code generation."
@@ -1469,9 +2180,21 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                     if retries_so_far < config.MAX_RETRIES_PER_ACTION:
                         task.retry_counts[retry_key] = retries_so_far + 1
                         status = "retried"
+                        task.set_recovery_state(
+                            "retry_pending",
+                            "Recovering safely: Xelora is reviewing the workbook result before deciding whether one compatible retry is safe.",
+                            tool_name=tool_name,
+                            safe_to_continue=False,
+                        )
                         task.log_step(f"🔁 Letting the AI decide whether to retry (attempt {retries_so_far + 1}).")
                     else:
                         status = "failed"
+                        task.set_recovery_state(
+                            "needs_user_action",
+                            "Recovery stopped: this action could not be verified after the allowed attempts. Xelora will not continue dependent Excel changes blindly.",
+                            tool_name=tool_name,
+                            safe_to_continue=False,
+                        )
                         task.log_step(f"❌ Giving up on {tool_name} after {config.MAX_RETRIES_PER_ACTION} attempts.")
             else:
                 task.log_step(f"✅ Done: {tool_name} ({execution_layer}) -> {result}")
@@ -1484,10 +2207,32 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             if status == "success" and isinstance(result, dict) and result.get("verified") is True:
                 if fallback_being_executed:
                     _mark_codegen_fallback_recovered(task, fallback_being_executed)
+                    task.clear_recovery_state(
+                        "A focused alternative completed and the workbook change was verified."
+                    )
+                elif task.recovery_state and task.recovery_state.get("phase") in {
+                    "inspecting_failure", "retry_pending"
+                } and tool_name in _OBSERVATION_TOOL_NAMES:
+                    task.recovery_guard_block_count = 0
+                    task.set_recovery_state(
+                        "alternative_selection",
+                        "Recovery check complete: Xelora has current workbook evidence and is selecting one compatible next step.",
+                        tool_name=task.recovery_state.get("tool_name"),
+                        safe_to_continue=False,
+                    )
+                elif task.recovery_state and task.recovery_state.get("phase") == "alternative_selection":
+                    task.clear_recovery_state(
+                        "The alternate action completed and its workbook result was verified."
+                    )
                 _mark_prior_action_recovered(task, tool_name, tool_input)
                 _adopt_workbook_from_result(task, result, db, db_task_id)
                 if tool_name not in _OBSERVATION_TOOL_NAMES:
                     task.successful_action_signatures.add(action_signature)
+                if tool_name not in _OBSERVATION_TOOL_NAMES | _VISUAL_SAVE_TOOL_NAMES:
+                    # Any verified edit invalidates an earlier completion
+                    # check. A later final response must obtain fresh proof.
+                    task.final_verification_requested = False
+                    task.final_save_requested = False
                 _keep_excel_visible(task)
                 _capture_visual_checkpoint(task, tool_name)
 
@@ -1498,6 +2243,16 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 _log_action_to_db(db, db_task_id, tool_name, tool_input, execution_layer, generated_code, result, status)
 
             providers.submit_tool_result(task, tool_call, result)
+
+            if is_failure and config.VISUAL_ONLY_MODE and _is_lost_visual_excel_window(result):
+                task.is_done = True
+                task.final_response = (
+                    "INCOMPLETE: The Excel window bound to this task was closed or became unavailable. "
+                    "Xelora stopped safely and did not send any recovery shortcuts or open a new workbook. "
+                    "Keep the intended workbook open, then start a new task."
+                )
+                task.chat_transcript.append({"role": "assistant", "text": task.final_response})
+                break
 
             # The fallback is a one-shot recovery attempt. A successful
             # attempt marks the original skill recovered above; a failed one
@@ -1543,8 +2298,8 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             task.log_step("🔍 Running post-task verification...")
             verification = verify_excel_task(task.instruction)
             
-            if verification.get("overall_status") == "completed":
-                task.log_step("✅ Verification passed - task completed successfully.")
+            if verification.get("overall_status") == "verified":
+                task.log_step("✅ Visible Excel end-state evidence collected.")
             else:
                 retry_suggestion = verification.get("retry_suggestion", "Unknown issue")
                 task.log_step(f"⚠️ Verification found issues: {retry_suggestion}")

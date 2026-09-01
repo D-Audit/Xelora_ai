@@ -1,7 +1,7 @@
 """
 codegen/executor.py
 The second execution layer: when no skill in the library covers what
-the user asked, the AI writes real xlwings/openpyxl Python instead of
+the user asked, the AI writes real xlwings Python instead of
 being limited to a fixed function list. This module is what makes that
 safe enough to actually run.
 
@@ -35,7 +35,11 @@ import textwrap
 from pathlib import Path
 
 
-ALLOWED_IMPORTS = {"xlwings", "openpyxl", "datetime", "math", "random", "re", "json", "statistics"}
+# Generated code controls the live Excel instance through xlwings.  openpyxl
+# intentionally is not allowed here: it operates on a separate file object,
+# which is how a model can accidentally verify one workbook while changing
+# another.  Skills may still use openpyxl utilities internally where needed.
+ALLOWED_IMPORTS = {"xlwings", "datetime", "math", "random", "re", "json", "statistics"}
 
 DISALLOWED_NAMES = {
     "eval", "exec", "compile", "__import__", "open", "input",
@@ -48,6 +52,19 @@ DISALLOWED_EXCEL_FORMULA_ATTRS = {"formula", "formula2"}
 
 class CodeRejected(Exception):
     """Raised when generated code fails the static safety check."""
+
+
+def _attribute_path(node) -> str | None:
+    """Return a dotted attribute path for simple names such as xw.books.active."""
+    parts = []
+    current = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if isinstance(current, ast.Name):
+        parts.append(current.id)
+        return ".".join(reversed(parts))
+    return None
 
 
 def _check_ast(code: str):
@@ -68,8 +85,23 @@ def _check_ast(code: str):
                 raise CodeRejected(f"Import from '{node.module}' is not in the allowed list {sorted(ALLOWED_IMPORTS)}.")
         elif isinstance(node, ast.Name) and node.id in DISALLOWED_NAMES:
             raise CodeRejected(f"Use of '{node.id}' is not allowed in generated code.")
+        elif isinstance(node, ast.Name) and node.id == "default_api":
+            raise CodeRejected(
+                "'default_api' is not available in generated code. Use get_task_workbook() "
+                "and the registered Excel skills instead."
+            )
         elif isinstance(node, ast.Attribute) and node.attr in DISALLOWED_NAMES:
             raise CodeRejected(f"Use of '.{node.attr}' is not allowed in generated code.")
+        elif _attribute_path(node) in {"xw.books.active", "xlwings.books.active", "xw.apps.active"}:
+            raise CodeRejected(
+                "Do not select an active xlwings workbook. Use get_task_workbook() "
+                "so generated code stays bound to this task's verified workbook."
+            )
+        elif _attribute_path(node) == "wb.sheetnames":
+            raise CodeRejected(
+                "get_task_workbook() returns an xlwings Book, not an openpyxl Workbook. "
+                "Use wb.sheet_names for names or wb.sheets for worksheets."
+            )
         elif (
             isinstance(node, ast.Attribute)
             and isinstance(node.ctx, ast.Store)
@@ -89,6 +121,11 @@ from skills.excel_shared import bind_workbook_context, get_active_workbook  # no
 WORKBOOK_NAME = {workbook_name}
 if WORKBOOK_NAME:
     bind_workbook_context(WORKBOOK_NAME)
+
+def get_task_workbook():
+    # Resolve the workbook pinned to this task, never Excel's global active book.
+    return get_active_workbook()
+
 result = None
 
 {user_code}
@@ -121,8 +158,8 @@ def run_generated_code(
     """
     Validates and runs AI-generated Excel automation code in a
     subprocess. The generated code is expected to:
-      - call get_active_workbook() to get the live workbook (already
-        imported into its namespace)
+      - call ``get_task_workbook()`` to get the live workbook pinned to this
+        task; never use ``xw.books.active`` or ``xw.apps.active``
       - assign a JSON-serializable dict to a variable named `result`, including
         `verified: true` only after it has checked the intended workbook effect
 

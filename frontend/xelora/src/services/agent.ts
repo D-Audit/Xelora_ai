@@ -29,6 +29,12 @@ export interface TaskProgressResponse {
   current_task?: string;
   completed_actions?: { tool_name: string }[];
   visual_checkpoints?: { after_tool: string; filename: string }[];
+  recovery?: {
+    phase: string;
+    message: string;
+    tool_name?: string | null;
+    safe_to_continue: boolean;
+  } | null;
   progress_log: string[];
   final_response: string | null;
 }

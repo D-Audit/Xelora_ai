@@ -506,7 +506,11 @@ export default function AgentPage() {
                           </ul>
                         )}
                         {msg.status === 'running' && msg.currentTask && (
-                          <p className="mt-2 flex items-center gap-2 text-xs text-xelora-text-muted">
+                          <p className={`mt-2 flex items-center gap-2 text-xs ${
+                            msg.currentTask.startsWith('Recovering safely:') || msg.currentTask.startsWith('Recovery stopped:')
+                              ? 'text-xelora-warning'
+                              : 'text-xelora-text-muted'
+                          }`}>
                             <Loader2 className="h-3 w-3 animate-spin" /> {msg.currentTask}
                           </p>
                         )}

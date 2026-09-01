@@ -211,7 +211,7 @@
   },
   "insert_formula": {
     "category": "write",
-    "sha256_impl": "cc38ca37fd909c7902b576a30a7688d885e81722ea15e506632b3b6f3d1f1137",
+    "sha256_impl": "c657b0679fdd1ad5d521c63f50338227d1d74095d5356718fe30a8700871faea",
     "sha256_skill_md": "7180f5599ff2fdab979bc8b4d207bb0bf2ae5871af6779e8a2a0d7c2d3644420"
   },
   "insert_picture": {
@@ -226,8 +226,8 @@
   },
   "inspect_workbook": {
     "category": "read",
-    "sha256_impl": "7cb72bb4df1492248e1fad855a08a999136666ac92db20b7fbca2fc0f265dc8a",
-    "sha256_skill_md": "0bdb94f8053ed840ac18da6acd5a8b51ad6327f9cdc31bcc0ff9050be2d3587e"
+    "sha256_impl": "fc504143ff373f1fae6009388e6f787388f20bdbbf70388825e0865be800803f",
+    "sha256_skill_md": "30e90d4ed40685f8c3366a42d7dfe4efee5be13406617be1d43c044d9b7ea58e"
   },
   "list_vba_macros": {
     "category": "vba",

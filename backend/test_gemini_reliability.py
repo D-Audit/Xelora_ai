@@ -13,6 +13,34 @@ class _Object:
 
 
 class GeminiReliabilityTests(unittest.TestCase):
+    def test_model_switch_after_tool_results_starts_a_clean_user_turn(self):
+        task = core.AgentTask("Create a report")
+        task.messages.extend([
+            {
+                "role": "assistant",
+                "content": {
+                    providers._GEMINI_MODEL_PARTS_KEY: [{
+                        "function_call": {"name": "create_sheet", "args": {"sheet_name": "Data"}},
+                    }],
+                },
+            },
+            {
+                "role": "user",
+                "content": {
+                    providers._GEMINI_FUNCTION_RESPONSES_KEY: [
+                        {"name": "create_sheet", "response": {"verified": True}},
+                    ],
+                },
+            },
+        ])
+
+        self.assertTrue(providers._starts_with_gemini_tool_response(task.messages[-1]["content"]))
+        continuation = providers._begin_clean_gemini_continuation_after_model_switch(task)
+
+        self.assertEqual(continuation, task.messages[-1]["content"])
+        self.assertIn("Do not repeat verified actions", continuation)
+        self.assertFalse(providers._starts_with_gemini_tool_response(continuation))
+
     def test_parallel_function_results_are_submitted_together(self):
         task = core.AgentTask("Create a report")
         first_call = _Object(name="create_sheet", args={"sheet_name": "Data"}, id="call-1")

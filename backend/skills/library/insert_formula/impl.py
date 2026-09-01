@@ -31,6 +31,25 @@ def _is_excel_error(value) -> bool:
     return isinstance(value, str) and value.strip().upper() in EXCEL_ERROR_VALUES
 
 
+def _first_excel_error_in_range(sheet, rng):
+    """Return the first displayed Excel error in a formula range, if any.
+
+    Checking only the first and last filled cells misses bad references in the
+    middle of a calculated column. A formula is not verified until every
+    displayed result in the target range is error-free.
+    """
+    values = normalize(rng.value)
+    start_row, start_column = rng.row, rng.column
+    for row_index, row in enumerate(values):
+        for column_index, value in enumerate(row):
+            if _is_excel_error(value):
+                return {
+                    "address": sheet.range((start_row + row_index, start_column + column_index)).address,
+                    "value": value.strip().upper(),
+                }
+    return None
+
+
 def _formula_may_spill(formula: str) -> bool:
     upper = formula.upper()
     return any(fn in upper for fn in _SPILLING_FUNCTIONS)
@@ -271,15 +290,19 @@ def run(sheet_name: str, cell: str, formula: str, fill_to: str | None = None):
     finally:
         set_calculation_mode(wb.app, "automatic")
 
-    if _is_excel_error(calculated_value) or _is_excel_error(fill_end_value):
+    checked_range = fill_range if fill_range is not None else rng
+    range_error = _first_excel_error_in_range(sheet, checked_range)
+    if range_error:
         return {
             "sheet": sheet_name, "cell": cell, "formula": formula, "fill_to": fill_to,
             "calculated_value": calculated_value, "fill_end_value": fill_end_value,
+            "formula_error_cell": range_error["address"],
+            "formula_error_value": range_error["value"],
             "status": "formula_error",
             "attempts": attempts, "verified": False,
             "verification_note": (
-                "Formula was stored but calculates to an Excel error at the starting or "
-                f"final filled cell ({calculated_value}, {fill_end_value}). Fix the formula itself."
+                "Formula was stored but calculates to an Excel error at "
+                f"{range_error['address']} ({range_error['value']}). Fix the formula itself."
             ),
         }
 

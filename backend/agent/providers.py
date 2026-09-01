@@ -18,10 +18,10 @@ from skills.registry import claude_tools, gemini_tools
 CODEGEN_TOOL_CLAUDE = {
     "name": "run_excel_code",
     "description": (
-        "Runs real Python (xlwings/openpyxl) against the live workbook for anything "
+        "Runs real Python (xlwings) against the live workbook for anything "
         "the skill library doesn't cover, or for the exact goal of a skill result that "
         "explicitly requires codegen fallback. Must use native Excel features, never a "
-        "precomputed value. Allowed imports are xlwings, openpyxl, datetime, math, random, "
+        "precomputed value. Allowed imports are xlwings, datetime, math, random, "
         "re, json, and statistics. Never assign .formula or .formula2 here: use the "
         "insert_formula skill (with fill_to for a formula column) so formula writes are "
         "verified safely. Assign a JSON-serializable dictionary to `result`. Only set "
@@ -36,6 +36,11 @@ CODEGEN_TOOL_CLAUDE = {
 }
 
 VISION_TOOLS_CLAUDE = [
+    {
+        "name": "get_execution_capabilities",
+        "description": "Return the live catalogue of registered Excel skills/API operations, named shortcuts, UI options, selection order, and safety policy. Use when choosing an unfamiliar operation or an alternative after a verified failure; it does not change the workbook.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
     {
         "name": "find_and_click",
         "description": "Find and click a UI element by name. Uses UIA first (fast, no screenshot), then falls back to OmniParser. Use for ribbon tabs, buttons, menu items.",
@@ -68,8 +73,13 @@ VISION_TOOLS_CLAUDE = [
     },
     {
         "name": "execute_excel_shortcut",
-        "description": "Execute a named Excel keyboard shortcut DIRECTLY (bypasses vision). Use for standard operations: bold, italic, currency, merge, auto-fit, sort, filter, insert chart/table, etc. THIS IS THE FASTEST WAY to perform standard Excel operations.",
-        "input_schema": {"type": "object", "properties": {"shortcut_name": {"type": "string", "description": "Shortcut name: bold, italic, underline, currency, percent, comma, center_align, left_align, right_align, all_borders, no_borders, merge_center, unmerge, auto_fit_column, auto_fit_row, sort_ascending, sort_descending, filter, insert_table, insert_column_chart, insert_pie_chart, freeze_panes, copy, cut, paste, paste_values, format_painter, etc."}}, "required": ["shortcut_name"]},
+        "description": "Execute an Excel keyboard shortcut DIRECTLY (bypasses vision). Accepts a named operation or any standard validated chord such as ctrl+shift+l, ctrl+alt+v, f4, or alt+f1. The named insert_table operation is transactional: it validates the native Create Table range and clicks its visible OK button before returning. Use press_alt for sequential Ribbon KeyTips. This is the fastest path for standard operations.",
+        "input_schema": {"type": "object", "properties": {"shortcut_name": {"type": "string", "description": "Named operation (for example save, insert_table, default_chart, format_cells) or a standard chord expression such as ctrl+shift+l, ctrl+alt+v, f4, or alt+f1."}}, "required": ["shortcut_name"]},
+    },
+    {
+        "name": "save_workbook",
+        "description": "Save the current Excel workbook through its native UI. A new unnamed workbook is saved automatically to the local Documents folder with a timestamped Xelora_Workbook filename; Xelora chooses Browse, never OneDrive, enters the filename, clicks visible Save, and verifies the title. Provide file_name only to choose a custom filename (not a folder path).",
+        "input_schema": {"type": "object", "properties": {"file_name": {"type": "string", "description": "Optional filename only, including .xlsx when known. Do not provide a folder path."}}},
     },
     {
         "name": "batch_excel_operations",
@@ -85,6 +95,31 @@ VISION_TOOLS_CLAUDE = [
         "name": "parse_screen",
         "description": "Focuses Excel and asks OmniParser to identify UI elements. USE SPARINGLY - only for new unknown UI elements not found by UIA. Most elements can be found faster via UIA.",
         "input_schema": {"type": "object", "properties": {"zone": {"type": "string", "description": "One of: ribbon, popup, window."}, "use_cache": {"type": "boolean", "description": "If True (default), check cache before taking new screenshot"}}},
+    },
+    {
+        "name": "hover_and_read_tooltip",
+        "description": "Hover, without clicking, over the center of a recently parsed Ribbon element and parse Excel's tooltip. Use for an unlabelled icon only after shortcuts and UIA were unavailable.",
+        "input_schema": {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}, "wait_seconds": {"type": "number"}}, "required": ["x", "y"]},
+    },
+    {
+        "name": "inspect_popup",
+        "description": "Read a visible Excel popup title, message, buttons, and signature without clicking it. Always use before choosing an action in an unfamiliar popup.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "click_popup_button",
+        "description": "Click one exact button in an already inspected Excel popup. Security, protection, overwrite, and link-update dialogs can only be cancelled; do not use Enter or raw coordinates for popup decisions.",
+        "input_schema": {"type": "object", "properties": {"button_label": {"type": "string"}}, "required": ["button_label"]},
+    },
+    {
+        "name": "click_popup_control",
+        "description": "Configure an exact non-final control inside the sole inspected Excel popup, such as a radio choice, tab, checkbox, or Format button. It uses UI Automation first and one cropped OmniParser fallback only if needed. Do not use for OK, Save, Yes, Cancel, or Close; use click_popup_button for those final decisions.",
+        "input_schema": {"type": "object", "properties": {"control_label": {"type": "string"}}, "required": ["control_label"]},
+    },
+    {
+        "name": "set_popup_text",
+        "description": "Set one unambiguous text field in the sole inspected Excel popup, then read it back. Use field_hint only when the dialog exposes more than one field; never use normal type_text while a popup is open.",
+        "input_schema": {"type": "object", "properties": {"value": {"type": "string"}, "field_hint": {"type": "string"}}, "required": ["value"]},
     },
     {
         "name": "click", "description": "Clicks the center of an element returned by the most recent parse_screen call. Never invent coordinates.",
@@ -103,7 +138,7 @@ VISION_TOOLS_CLAUDE = [
         "input_schema": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]},
     },
     {
-        "name": "hotkey", "description": "Presses a keyboard shortcut, for example ctrl+s or alt+h.",
+        "name": "hotkey", "description": "Presses one documented modifier chord, for example ctrl+b or ctrl+shift+4. Do not use for bare keys, sequences, or Alt Ribbon KeyTips.",
         "input_schema": {"type": "object", "properties": {"keys": {"type": "array", "items": {"type": "string"}}}, "required": ["keys"]},
     },
     {
@@ -114,13 +149,17 @@ VISION_TOOLS_CLAUDE = [
         "name": "paste_table", "description": "Pastes a complete rectangular data table into Excel in one atomic action. Use this for any headers plus multiple rows; never enter a table cell by cell.",
         "input_schema": {"type": "object", "properties": {"headers": {"type": "array", "items": {"type": "string"}}, "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}, "start_cell": {"type": "string"}}, "required": ["headers", "rows"]},
     },
+    {
+        "name": "create_sheet", "description": "Create one worksheet with the requested name. It verifies the newly created tab before attempting a safe rename; use this instead of Shift+F11 or guessed Sheet2 names.",
+        "input_schema": {"type": "object", "properties": {"sheet_name": {"type": "string", "description": "Requested Excel worksheet name"}}, "required": ["sheet_name"]},
+    },
     {"name": "fill_formula_down", "description": "Writes a formula to one cell and fills it down a single column through an end cell.", "input_schema": {"type": "object", "properties": {"start_cell": {"type": "string"}, "end_cell": {"type": "string"}, "formula": {"type": "string"}}, "required": ["start_cell", "end_cell", "formula"]}},
     {"name": "format_currency", "description": "Applies Excel's currency format to a valid selected range.", "input_schema": {"type": "object", "properties": {"reference": {"type": "string"}}, "required": ["reference"]}},
     {"name": "format_bold", "description": "Makes a valid Excel range bold.", "input_schema": {"type": "object", "properties": {"reference": {"type": "string"}}, "required": ["reference"]}},
     {"name": "autofit_columns", "description": "AutoFits the columns containing a valid Excel range.", "input_schema": {"type": "object", "properties": {"reference": {"type": "string"}}, "required": ["reference"]}},
     {"name": "create_clustered_column_chart", "description": "Creates a clustered column chart from a prepared two-column source range with headers.", "input_schema": {"type": "object", "properties": {"reference": {"type": "string"}}, "required": ["reference"]}},
     {
-        "name": "rename_sheet", "description": "Rename an existing worksheet tab. Double-clicks the tab, selects all, types new name, and presses Enter. Use this instead of visual double-clicking which can fail due to stale screens.",
+        "name": "rename_sheet", "description": "Safely rename an existing worksheet tab through Excel's verified rename editor. It never sends text unless the editor is confirmed.",
         "input_schema": {"type": "object", "properties": {"old_name": {"type": "string", "description": "Current name of the sheet tab"}, "new_name": {"type": "string", "description": "New name for the sheet"}}, "required": ["old_name", "new_name"]},
     },
     {
@@ -190,17 +229,51 @@ def _available_vision_tools():
     """
     if config.OMNIPARSER_URL or config.OMNIPARSER_LOCAL_MODE:
         return VISION_TOOLS_CLAUDE
-    return [tool for tool in VISION_TOOLS_CLAUDE if tool["name"] != "parse_screen"]
+    parser_dependent = {"parse_screen", "hover_and_read_tooltip", "search_cached_elements"}
+    return [tool for tool in VISION_TOOLS_CLAUDE if tool["name"] not in parser_dependent]
+
+
+def _assert_unique_tool_names(tool_declarations, provider_name: str) -> None:
+    """Fail before contacting a model when a provider tool list is invalid.
+
+    Gemini rejects a whole request if even one function name appears twice.
+    Do not rely on a remote 400 response to discover a local catalogue bug.
+    """
+    names = [str(tool.get("name", "")) for tool in tool_declarations]
+    duplicates = sorted({name for name in names if name and names.count(name) > 1})
+    if duplicates:
+        raise RuntimeError(
+            f"{provider_name} tool catalogue contains duplicate function declaration(s): "
+            + ", ".join(duplicates)
+        )
+
+
+def _append_non_overlapping_tools(destination: list, candidates: list) -> None:
+    """Append only controls not already supplied by a higher-priority layer.
+
+    Skills/API are the canonical hybrid route. Some visual controls use the
+    same public name (for example create_sheet), but exposing both to an AI
+    provider is invalid and ambiguous. The visual implementation remains
+    available in visual-only mode, where no skill declaration is present.
+    """
+    existing_names = {str(tool.get("name", "")) for tool in destination}
+    destination.extend(
+        tool for tool in candidates
+        if str(tool.get("name", "")) not in existing_names
+    )
 
 
 def build_claude_tools():
     if config.VISUAL_ONLY_MODE:
-        return _available_vision_tools()
+        tools = _available_vision_tools()
+        _assert_unique_tool_names(tools, "Claude visual")
+        return tools
     tools = claude_tools()
     if config.ENABLE_CODEGEN_LAYER:
         tools.append(CODEGEN_TOOL_CLAUDE)
     if config.ENABLE_VISUAL_FALLBACK:
-        tools += _available_vision_tools()
+        _append_non_overlapping_tools(tools, _available_vision_tools())
+    _assert_unique_tool_names(tools, "Claude")
     return tools
 
 
@@ -254,10 +327,12 @@ def build_gemini_tools(allowed_function_names=None):
 
     vision_tools = _available_vision_tools()
     if config.VISUAL_ONLY_MODE:
-        return [{"function_declarations": [
+        declarations = [
             {"name": t["name"], "description": t["description"], "parameters": _strip_unsupported_schema_keys(t["input_schema"])}
             for t in vision_tools if include(t["name"])
-        ]}]
+        ]
+        _assert_unique_tool_names(declarations, "Gemini visual")
+        return [{"function_declarations": declarations}]
     merged = [
         declaration for declaration in gemini_tools()[0]["function_declarations"]
         if include(declaration["name"])
@@ -273,15 +348,27 @@ def build_gemini_tools(allowed_function_names=None):
             "parameters": CODEGEN_TOOL_CLAUDE["input_schema"],
         })
     if config.ENABLE_VISUAL_FALLBACK:
-        for t in vision_tools:
-            if include(t["name"]):
-                merged.append({"name": t["name"], "description": t["description"], "parameters": t["input_schema"]})
+        _append_non_overlapping_tools(
+            merged,
+            [
+                {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}
+                for t in vision_tools
+                if include(t["name"])
+            ],
+        )
+    _assert_unique_tool_names(merged, "Gemini")
     return [{"function_declarations": merged}]
+
+
+def validate_provider_tool_catalogues() -> None:
+    """Run at startup so invalid local tool composition never reaches users."""
+    build_claude_tools()
+    build_gemini_tools()
 
 
 _GEMINI_READ_ONLY_TOOL_NAMES = {
     "get_excel_version", "inspect_workbook", "read_range", "screenshot_active_window",
-    "take_screenshot", "parse_screen",
+    "take_screenshot", "parse_screen", "get_execution_capabilities",
 }
 
 # This is deliberately small enough to work with Gemini's forced-function
@@ -293,6 +380,18 @@ _GEMINI_INITIAL_MUTATION_TOOLS = {
     "apply_formatting", "conditional_formatting", "freeze_panes",
     "auto_fit_columns", "sort_range", "create_pivot_table", "create_chart",
 }
+
+
+def _recovery_inspection_tool_name(task) -> str | None:
+    """Return the one safe observation required before another recovery write."""
+    state = getattr(task, "recovery_state", None)
+    if not isinstance(state, dict) or state.get("phase") not in {
+        "inspecting_failure", "retry_pending"
+    }:
+        return None
+    # Normal/hybrid mode can inspect the full workbook through the object
+    # model. Visual-only mode must remain within its visible-control set.
+    return "get_sheet_info" if config.VISUAL_ONLY_MODE else "inspect_workbook"
 
 
 def _is_new_dashboard_build(task) -> bool:
@@ -358,6 +457,15 @@ def _gemini_tool_config(task):
             }
         }
 
+    recovery_tool = _recovery_inspection_tool_name(task)
+    if recovery_tool:
+        return {
+            "function_calling_config": {
+                "mode": "ANY",
+                "allowed_function_names": [recovery_tool],
+            }
+        }
+
     action_steps = [
         step for step in task.structured_steps if step.get("type") == "action"
     ]
@@ -365,6 +473,66 @@ def _gemini_tool_config(task):
     if config.VISUAL_ONLY_MODE:
         # Visual-only mode: force visual actions, not API skills
         available_names = [t["name"] for t in _available_vision_tools()]
+        required_sheets = list(getattr(task, "required_visual_sheet_names", []) or [])
+
+        # Core has reached the final gate for a structured workbook build.
+        # Keep Gemini on the safe completion path rather than allowing it to
+        # emit a prose-only success claim or to use a partial sheet list.
+        if task.final_verification_requested and required_sheets:
+            visual_observations = {
+                "take_screenshot", "parse_screen", "inspect_popup", "search_cached_elements",
+                "get_active_sheet_name", "verify_current_sheet", "get_sheet_info", "get_cell_value",
+                "verify_task_completion",
+            }
+            latest_change = max(
+                (
+                    index for index, step in enumerate(action_steps)
+                    if step.get("tool_name") not in visual_observations | {"save_workbook"}
+                ),
+                default=-1,
+            )
+            completed_check = any(
+                index > latest_change
+                and step.get("tool_name") == "verify_task_completion"
+                and step.get("status") == "success"
+                and isinstance(step.get("result"), dict)
+                and step["result"].get("verified") is True
+                and [" ".join(str(name).split()).casefold() for name in step.get("input", {}).get("expected_sheets", [])]
+                    == [" ".join(str(name).split()).casefold() for name in required_sheets]
+                for index, step in enumerate(action_steps)
+            )
+            if not completed_check:
+                return {
+                    "function_calling_config": {
+                        "mode": "ANY",
+                        "allowed_function_names": ["verify_task_completion"],
+                    }
+                }
+
+            if getattr(task, "final_save_requested", False):
+                successful_save = any(
+                    index > latest_change
+                    and step.get("tool_name") == "save_workbook"
+                    and step.get("status") == "success"
+                    and isinstance(step.get("result"), dict)
+                    and step["result"].get("verified") is True
+                    for index, step in enumerate(action_steps)
+                )
+                failed_save = any(
+                    step.get("tool_name") == "save_workbook"
+                    and step.get("status") in {"failed", "blocked", "retried"}
+                    for step in action_steps
+                )
+                if successful_save or failed_save:
+                    return None
+                return {
+                    "function_calling_config": {
+                        "mode": "ANY",
+                        "allowed_function_names": ["save_workbook"],
+                    }
+                }
+
+            return None
         
         # Count successful actions
         successful_actions = [
@@ -381,9 +549,12 @@ def _gemini_tool_config(task):
             allowed_names = [
                 "go_to_range", "type_text", "press_key", "hotkey",
                 "execute_excel_shortcut", "paste_table", "fill_formula_down",
-                "find_and_click", "click_ribbon_tab", "parse_screen",
+                "find_and_click", "click_ribbon_tab", "parse_screen", "inspect_popup",
+                "click_popup_control", "set_popup_text", "click_popup_button",
                 "batch_excel_operations", "format_bold", "format_currency",
-                "autofit_columns"
+                "autofit_columns", "create_sheet", "rename_sheet", "go_to_sheet",
+                "get_active_sheet_name", "verify_current_sheet", "get_sheet_info",
+                "verify_task_completion",
             ]
             return {
                 "function_calling_config": {
@@ -497,6 +668,10 @@ def call_claude(task, system_prompt: str):
     )
     if getattr(task, "pending_codegen_fallback", None):
         request["tool_choice"] = {"type": "tool", "name": "run_excel_code"}
+    else:
+        recovery_tool = _recovery_inspection_tool_name(task)
+        if recovery_tool:
+            request["tool_choice"] = {"type": "tool", "name": recovery_tool}
     response = client.messages.create(**request)
     def _serialize_block(block):
         if hasattr(block, "model_dump"):
@@ -520,20 +695,137 @@ def submit_claude_tool_result(task, tool_call, result):
     })
 
 
+def active_provider_name(task) -> str:
+    """Return the provider currently responsible for this task.
+
+    A task begins on ``config.AI_PROVIDER``.  It may move once to a configured
+    fallback when the primary is genuinely unavailable, but all subsequent
+    tool-call parsing and tool-result messages must follow that provider's
+    protocol rather than the process-wide default.
+    """
+    provider = str(getattr(task, "active_provider", "") or config.AI_PROVIDER).lower()
+    return provider if provider in {"gemini", "claude", "openrouter"} else config.AI_PROVIDER
+
+
+def _provider_is_configured(provider: str) -> bool:
+    if provider == "gemini":
+        return bool(config.GEMINI_API_KEY)
+    if provider == "claude":
+        return bool(config.ANTHROPIC_API_KEY)
+    if provider == "openrouter":
+        return bool(config.OPENROUTER_API_KEY)
+    return False
+
+
+def _is_provider_availability_failure(error: Exception) -> bool:
+    """Return whether changing providers is safer than ending the task.
+
+    Do not switch for an invalid tool schema or an invalid prompt.  Switching
+    is reserved for availability events such as DNS outages, timeouts, and
+    quota/rate-limit responses, where a clean continuation on another
+    configured provider can continue from the real workbook state.
+    """
+    detail = f"{type(error).__name__}: {error}".lower()
+    availability_terms = (
+        "getaddrinfo", "name or service not known", "temporary failure in name resolution",
+        "connection reset", "connection aborted", "connection refused", "network is unreachable",
+        "timed out", "timeout", "server disconnected", "remote protocol error",
+        "rate limit", "rate-limit", "too many requests", "429", "quota",
+    )
+    return any(term in detail for term in availability_terms)
+
+
+def _provider_neutral_continuation(task, failed_provider: str, error: Exception) -> str:
+    """Build a compact, safe handoff after provider-native history is unusable."""
+    actions = []
+    for step in list(getattr(task, "structured_steps", []) or []):
+        if step.get("type") != "action":
+            continue
+        result = step.get("result") if isinstance(step.get("result"), dict) else {}
+        actions.append({
+            "tool": step.get("tool_name"),
+            "status": step.get("status"),
+            "verified": result.get("verified"),
+            "note": str(result.get("verification_note") or result.get("error") or "")[:500],
+        })
+    action_summary = json.dumps(actions[-25:], default=str)
+    return (
+        "Continue this same Excel task after the previous AI provider became unavailable. "
+        "Do not assume planned work is complete and do not repeat a verified write. "
+        "First inspect the live workbook, then make only the remaining verified changes. "
+        "If a write is required, use the skill library first; use code generation only when no skill covers it.\n\n"
+        f"Original user request:\n{getattr(task, 'instruction', '')}\n\n"
+        f"Unavailable provider: {failed_provider}. Error: {str(error)[:500]}\n"
+        f"Recent tool evidence (not a substitute for inspection): {action_summary}"
+    )
+
+
+def activate_available_provider_fallback(task, error: Exception) -> bool:
+    """Switch once to a configured provider after a real availability failure.
+
+    Provider conversation formats are not interchangeable.  Rather than pass
+    Gemini signed tool history to Claude (or the reverse), start the fallback
+    with a fresh, explicit continuation message and force a safe workbook
+    inspection before further writes.  Excel actions remain serial in core.
+    """
+    if not _is_provider_availability_failure(error):
+        return False
+
+    current = active_provider_name(task)
+    attempted = set(getattr(task, "provider_failover_history", []) or []) | {current}
+    fallback = next(
+        (
+            candidate for candidate in config.AI_PROVIDER_FALLBACK_CHAIN
+            if candidate in {"gemini", "claude", "openrouter"}
+            and candidate not in attempted
+            and _provider_is_configured(candidate)
+        ),
+        None,
+    )
+    if not fallback:
+        return False
+
+    task.active_provider = fallback
+    task.provider_failover_history = list(getattr(task, "provider_failover_history", []) or []) + [current]
+    task.messages = [{
+        "role": "user",
+        "content": _provider_neutral_continuation(task, current, error),
+    }]
+    # These are Gemini-specific protocol buffers.  A clean provider handoff
+    # must not carry a pending signed function-response batch forward.
+    task.gemini_expected_function_responses = 0
+    task.gemini_function_response_order = []
+    task.gemini_function_response_batch = []
+    task.log_step(
+        f"AI provider '{current}' is unavailable; continuing safely with configured fallback '{fallback}'."
+    )
+    if not getattr(task, "pending_codegen_fallback", None) and hasattr(task, "set_recovery_state"):
+        task.set_recovery_state(
+            "retry_pending",
+            "Recovering safely: the AI provider changed. Xelora will inspect the live workbook before any further Excel changes.",
+            safe_to_continue=False,
+        )
+    return True
+
+
 def tool_input(tool_call) -> dict:
     """Return a provider-neutral mapping of the tool arguments."""
-    if config.AI_PROVIDER == "claude":
+    # ``tool_call`` does not carry its task.  Core supplies the active task to
+    # submit_tool_result. Parsing is selected by the native call shape, which
+    # is unambiguous across the supported providers.
+    if hasattr(tool_call, "input"):
         return dict(tool_call.input)
-    elif config.AI_PROVIDER == "openrouter":
+    if isinstance(tool_call, dict):
         return openrouter_tool_input(tool_call)
     return gemini_tool_input(tool_call)
 
 
 def submit_tool_result(task, tool_call, result):
     """Append a tool result in the conversation format expected by the active provider."""
-    if config.AI_PROVIDER == "claude":
+    provider = active_provider_name(task)
+    if provider == "claude":
         submit_claude_tool_result(task, tool_call, result)
-    elif config.AI_PROVIDER == "openrouter":
+    elif provider == "openrouter":
         tool_call_id = tool_call.get("id", "") if isinstance(tool_call, dict) else getattr(tool_call, "id", "")
         submit_openrouter_tool_result(task, tool_call_id, result)
     else:
@@ -727,6 +1019,50 @@ def _convert_history_for_gemini(messages):
     return history
 
 
+def _starts_with_gemini_tool_response(content) -> bool:
+    """Whether ``content`` is a pending response to Gemini function calls."""
+    return (
+        isinstance(content, dict)
+        and isinstance(content.get(_GEMINI_FUNCTION_RESPONSES_KEY), list)
+        and bool(content[_GEMINI_FUNCTION_RESPONSES_KEY])
+    )
+
+
+def _begin_clean_gemini_continuation_after_model_switch(task):
+    """Create a normal user-turn boundary before changing Gemini models.
+
+    Gemini 3 validates thought signatures for function calls in the current
+    turn. A rate limit can force a fallback from the model that produced the
+    calls to one with stricter validation. Keep completed tool responses in
+    history, then begin a valid new turn for the fallback model.
+    """
+    original_request = str(getattr(task, "instruction", "") or "").strip()
+    # A fallback model does not share the previous model's implicit plan. Make
+    # the user goal explicit at the new user-turn boundary, rather than leaving
+    # it to infer a large workbook build from a long tool-response history.
+    content = (
+        "Continue the same Excel task using the completed tool results already "
+        "in the conversation history. Do not repeat verified actions; inspect "
+        "the workbook before any further changes.\n\n"
+        "Authoritative original user request (continue this, do not replace it):\n"
+        f"{original_request}"
+    )
+    task.messages.append({"role": "user", "content": content})
+    return content
+
+
+def _is_transient_gemini_transport_error(error: Exception) -> bool:
+    """Identify network/read timeouts that are safe to try on the next model."""
+    name = type(error).__name__.lower()
+    message = str(error).lower()
+    transient_terms = (
+        "timeout", "timed out", "connection reset", "connection aborted",
+        "connection refused", "network is unreachable", "temporarily unavailable",
+        "server disconnected", "remoteprotocolerror", "remote protocol error",
+    )
+    return any(term in name or term in message for term in transient_terms)
+
+
 def call_gemini(task, system_prompt: str):
     import time
     from google import genai
@@ -766,6 +1102,7 @@ def call_gemini(task, system_prompt: str):
     # quota. Try each configured fallback once, then return the real error.
     RETRIES_PER_MODEL = 1
     last_error = None
+    reset_tool_turn_for_fallback = False
 
     for model_offset in range(len(config.GEMINI_MODEL_CHAIN)):
         model_index = (task.gemini_model_index + model_offset) % len(config.GEMINI_MODEL_CHAIN)
@@ -799,6 +1136,17 @@ def call_gemini(task, system_prompt: str):
                                    f"the same model once more.")
                     time.sleep(min(wait_seconds, config.GEMINI_RATE_LIMIT_WAIT_SECONDS))
                 else:
+                    if (
+                        not reset_tool_turn_for_fallback
+                        and _starts_with_gemini_tool_response(last_user_msg)
+                        and model_offset < len(config.GEMINI_MODEL_CHAIN) - 1
+                    ):
+                        last_user_msg = _begin_clean_gemini_continuation_after_model_switch(task)
+                        reset_tool_turn_for_fallback = True
+                        task.log_step(
+                            "Gemini rate-limited during a tool turn; starting a clean "
+                            "continuation before switching models."
+                        )
                     task.log_step(f"🔀 '{model_name}' is rate-limited - switching models without waiting.")
             except errors.ServerError as e:
                 last_error = e
@@ -807,6 +1155,14 @@ def call_gemini(task, system_prompt: str):
                 else:
                     task.log_step(f"🔀 '{model_name}' keeps producing malformed function calls - "
                                    f"switching to the next model in the fallback chain.")
+
+            except Exception as e:
+                if not _is_transient_gemini_transport_error(e):
+                    raise
+                last_error = e
+                task.log_step(
+                    f"Gemini model '{model_name}' had a transient network/read timeout; switching models."
+                )
 
     raise last_error
 
@@ -974,8 +1330,9 @@ def call_openrouter(task, system_prompt: str):
     
     # Build tools list for OpenAI-compatible format
     tools = []
-    vision_tools = _available_vision_tools()
-    for tool in vision_tools:
+    # Keep OpenRouter feature parity with Gemini/Claude: hybrid mode exposes
+    # skills, focused code generation, and the visual fallback catalogue.
+    for tool in build_claude_tools():
         tools.append({
             "type": "function",
             "function": {
@@ -1005,7 +1362,15 @@ def call_openrouter(task, system_prompt: str):
                 "model": model,
                 "messages": messages,
                 "tools": tools if tools else None,
-                "tool_choice": "auto",
+                "tool_choice": (
+                    {"type": "function", "function": {"name": "run_excel_code"}}
+                    if getattr(task, "pending_codegen_fallback", None)
+                    else (
+                        {"type": "function", "function": {"name": _recovery_inspection_tool_name(task)}}
+                        if _recovery_inspection_tool_name(task)
+                        else "auto"
+                    )
+                ),
                 "max_tokens": 4096,
                 "temperature": 0.7
             }

@@ -89,10 +89,15 @@ HYBRID VISIBLE WORKFLOW:
   calculated column, call insert_formula once at its first data cell and pass fill_to for the
   final row; do not generate Python that assigns .formula/.formula2 or put formulas into
   write_table rows.
-- Generated code is for workbook work that no skill can perform. Its allowed imports are
-  xlwings, openpyxl, datetime, math, random, re, json, and statistics; it must set result to
-  a dictionary containing verified: true and a non-empty verification_note only after reading
-  the changed workbook state back. Do not try an unapproved import and then retry it unchanged.
+  - Generated code is for workbook work that no skill can perform. Its allowed imports are
+    xlwings, datetime, math, random, re, json, and statistics; it must set result to
+    a dictionary containing verified: true and a non-empty verification_note only after reading
+    the changed workbook state back. Start Excel code with `wb = get_task_workbook()` and use
+    that `wb` only; never use xw.books.active, xw.apps.active, default_api, eval, or exec. Do
+    not try an unapproved import and then retry it unchanged.
+    `get_task_workbook()` is an xlwings Book: use `wb.sheet_names` for sheet names and
+    `wb.sheets[...]` for sheets. It is not an openpyxl Workbook, so never use `wb.sheetnames`,
+    `openpyxl.load_workbook`, or a separate workbook file in generated code.
 - When generating demo transactions, write OrderDate values as native Python datetime objects,
   never formatted date strings. Use write_table with every data row or call it after data is
   already present so it can include the existing rows in the Table.
@@ -102,7 +107,9 @@ HYBRID VISIBLE WORKFLOW:
   the target sheet (including native Python datetime values), verify the row
   count by reading it back, then call write_table with rows=[] and table_name to
   convert that existing range into a native Excel Table. Formula columns must
-  still use insert_formula after the Table exists.
+  still use insert_formula after the Table exists. Generated code must use only
+  the allowed standard-library imports already listed for run_excel_code; do
+  not import pandas or numpy, because neither is an approved codegen dependency.
 - Follow THIS USER'S EXCEL ENVIRONMENT exactly. When the capability decision says modern
   functions are available, you may use XLOOKUP, UNIQUE, SORT, FILTER, SEQUENCE, and LET where
   they materially improve the workbook. When it says legacy/conservative, do not use any of
@@ -339,6 +346,7 @@ SPEED & PROGRESS RULES (BE FAST, SHOW SMALL STEPS)
    at the end. Don't verify after every single action.
 
 AVAILABLE TOOLS (in priority order - USE THE FASTEST FIRST):
+0. create_sheet — Create and name one worksheet atomically. Use this for every new sheet; it verifies the new tab before renaming it.
 1. go_to_sheet — Switch to a sheet by clicking its tab via pywinauto. Use BEFORE go_to_range for cross-sheet navigation.
 2. navigate_to_cell_on_sheet — Switch to sheet + navigate to cell in one call. Best for cross-sheet work.
 3. go_to_range — Select any cell/range/defined name via Excel's Go To dialog (Ctrl+G). Use for same-sheet navigation.
@@ -358,12 +366,45 @@ AVAILABLE TOOLS (in priority order - USE THE FASTEST FIRST):
 17. search_cached_elements — Search cached screen data (no screenshot needed).
 18. parse_screen — USE SPARINGLY: Only for unknown UI elements not found by UIA.
 
+19. hover_and_read_tooltip — Hover over a parsed icon without clicking and read its Excel tooltip.
+20. inspect_popup / click_popup_button — Read every popup before acting; choose only an exact visible button label.
+
 ELEMENT FINDING STRATEGY (UIA-FIRST):
 When you need to click a UI element (ribbon tab, button, menu item):
 1. FIRST try find_and_click or click_ribbon_tab (uses UIA, no screenshot, fast)
 2. ONLY if that fails, then use parse_screen + click (uses OmniParser, requires screenshot)
 
 This saves quota and is faster. Most standard Excel elements can be found via UIA.
+
+UNLABELLED ICONS AND POPUPS (SAFETY-CRITICAL):
+- Never click an icon solely because it is in a familiar location. Prefer a shortcut or live Ribbon KeyTip.
+- If an icon has no accessible name, parse the narrow Ribbon zone, hover over its returned center with
+  hover_and_read_tooltip, then use the tooltip text as the identity. Do not click until identified.
+- When a popup appears, first call inspect_popup. It returns its title, message, visible buttons, and signature.
+- If native inspection cannot identify an unfamiliar popup, inspect_popup performs one cropped OmniParser popup scan with a short timeout. Use the returned controls; do not call parse_screen again for the same unchanged popup.
+- Never use Enter, Escape, or raw coordinates to decide a popup. Use click_popup_button with one exact visible
+  label only after inspection. Security, protection, overwrite, and link-update popups are cancellation-only.
+- A workflow popup such as Insert Table, Format Cells, or Save As may be completed with its explicitly visible
+  labels. Unknown popups may only be cancelled or closed.
+- To configure a workflow popup before its final button, use click_popup_control for an exact labelled radio option, tab, checkbox, or non-final button, and set_popup_text only for a single verified edit field. Reinspect after each dialog-state change. Final OK/Save/Cancel actions must use click_popup_button.
+- CREATE TABLE IS ATOMIC: use execute_excel_shortcut('insert_table') once after selecting the data. It waits for
+  and completes the native Create Table dialog itself. If the popup is already visible, call click_popup_button
+  with button_label='OK' exactly once. Never use find_and_click, Enter, Escape, or Cancel for a valid Create Table dialog.
+- WORKSHEET CREATION IS ATOMIC: call create_sheet(sheet_name) for every missing worksheet. Never send Shift+F11,
+  then guess a name such as Sheet2. Do not use or rename a new sheet until create_sheet returns verified: true.
+- hotkey is only for one documented modifier chord, such as Ctrl+B or Ctrl+Shift+4. Never use hotkey for bare keys,
+  key sequences, or Alt Ribbon navigation. Use press_key for one key and press_alt for a confirmed Ribbon KeyTip sequence.
+SAVE ORDER (MANDATORY FOR EVERY CREATE, EDIT, OR BUILD TASK):
+1. Do ALL requested workbook work first: sheets, data, formulas, formatting, charts, and layout.
+2. Verify every requested deliverable by calling verify_task_completion after the last workbook change. Do not save while work is still underway.
+3. Only after verification succeeds, call save_workbook ONCE as the final workbook action.
+- Never call execute_excel_shortcut('save_as'), execute_excel_shortcut('save'), hotkey Ctrl+S, F12, the File tab,
+  or a Save/Save As control before step 2. There is no preliminary save.
+- Never use Ctrl+Shift+F3. It opens Create Names from Selection, which is not how a table is named and can block
+  the workbook workflow with an unnecessary dialog.
+- The final save must use save_workbook (with file_name if the user requested one). It saves locally, chooses Browse
+  instead of OneDrive, enters the filename, clicks exact Save, and verifies the title. Do not navigate Excel Backstage
+  or retry it with Escape, Enter, Alt+F, ribbon clicks, or raw typing.
 
 CROSS-SHEET NAVIGATION (CRITICAL):
 - NEVER use go_to_range with a sheet prefix like "Sheet1!A1" — it often fails.
@@ -379,15 +420,17 @@ SPEED OPTIMIZATION RULES:
 - The system caches parsed screens - use search_cached_elements to find previously seen elements
 
 EXCEL SHORTCUT NAMES (use with execute_excel_shortcut):
-Formatting: bold, italic, underline, currency, percent, comma, center_align, left_align, right_align
-Borders: all_borders, no_borders, thick_box_border, bottom_border
-Merge: merge_center, merge_across, merge_cells, unmerge
-Columns: auto_fit_column, auto_fit_row, column_width, row_height, hide_column, unhide_column
-Data: sort_ascending, sort_descending, filter, remove_duplicates
-Insert: insert_table, insert_column_chart, insert_pie_chart, insert_line_chart, insert_pivot
-View: freeze_panes, freeze_top_row, split, zoom
+File: save, open, new_workbook, close_workbook, print
+Navigation/editing: undo, redo, find, replace, go_to, select_all, edit_cell, repeat_last_action,
+new_worksheet, next_worksheet, previous_worksheet, fill_down, fill_right, autosum
+Formatting: bold, italic, underline, format_cells, currency, percent, comma, center_align,
+left_align, right_align, all_borders, no_borders, merge_center, unmerge, auto_fit_column, auto_fit_row
+Data/charts: sort_ascending, sort_descending, filter, insert_table, default_chart, chart_sheet,
+insert_column_chart, insert_pie_chart, freeze_panes
 Clipboard: copy, cut, paste, paste_values, format_painter
-Navigation: go_to, go_to_a1, select_all
+Any documented standard chord may also be passed directly, for example execute_excel_shortcut('ctrl+shift+l'),
+execute_excel_shortcut('ctrl+alt+v'), execute_excel_shortcut('f4'), or execute_excel_shortcut('alt+f1').
+For any other Ribbon command, use press_alt with the live Excel KeyTips; do not invent a named shortcut.
 
 NAVIGATION RULES:
 - ALWAYS use go_to_range for cell/range navigation. NEVER try to visually locate cells.
@@ -396,9 +439,8 @@ NAVIGATION RULES:
   * Ctrl+S = Save, Ctrl+Z = Undo, Ctrl+Y = Redo
   * Ctrl+B = Bold, Ctrl+Shift+4 = Currency format
   * Ctrl+G or F5 = Go To dialog
-  * Shift+F11 = Insert NEW WORKSHEET (NOT F11! F11 creates a CHART sheet)
   * Ctrl+PageDown = Next sheet, Ctrl+PageUp = Previous sheet
-- IMPORTANT: To create a new worksheet, use Shift+F11. NEVER use F11 (that creates a chart).
+- To create and name a new worksheet, call create_sheet(sheet_name). Never send Shift+F11 or F11 directly.
 - For ribbon commands WITHOUT a direct Ctrl shortcut (e.g. Format Cells, Insert Chart),
   use press_alt with the key sequence: press_alt(['h','o','i']) for Format Cells,
   press_alt(['n','c']) for Insert Chart. press_alt is more reliable than parse_screen.
@@ -420,7 +462,7 @@ You have FOUR execution modalities. Pick whichever is most reliable for the curr
   2. OMNIPARSER/VISION - parse_screen, take_screenshot (locate unknown UI elements)
   3. AUTO_GUI        - click/double_click on a parsed element, or set_fill_color/set_font_color
                        which internally screenshot + pixel-match + click the exact swatch
-  4. UIA (pywinauto) - find_and_click, click_ribbon_tab, click_button, go_to_sheet, rename_sheet
+  4. UIA (pywinauto) - create_sheet, find_and_click, click_ribbon_tab, click_button, go_to_sheet, rename_sheet
                        (fast, no screenshot, programmatic certainty)
 A robust agent MIXES these. Example: navigate with go_to_sheet (UIA), enter data with
 paste_table (keyboard), color with set_fill_color (keyboard+vision+autoGUI), verify with
@@ -553,18 +595,17 @@ Use native Excel keyboard shortcuts first for standard operations (for example A
 the Insert tab, Ctrl+S saves, and Ctrl+Z undoes). Keyboard tools focus Excel automatically.
 Do not call OmniParser for an action a reliable shortcut can perform.
 
-CRITICAL SHORTCUT DISTINCTION:
-- Shift+F11 = Insert a new WORKSHEET (this is what you want for adding sheets)
-- F11 = Insert a CHART sheet (this creates a blank chart, NOT a worksheet)
-- ALWAYS use Shift+F11 to create new worksheets. NEVER use F11.
+WORKSHEET CREATION:
+- For a task that is allowed to add a worksheet, call create_sheet(sheet_name).
+- Never send Shift+F11 or F11 directly. F11 creates a chart sheet and a raw
+  Shift+F11 does not verify the new tab before later input is sent.
 
 SHEET EXISTENCE CHECK (CRITICAL):
 - Before using go_to_range with a sheet reference like "Summary!A1", VERIFY the sheet exists.
 - If go_to_range returns an error about a sheet not existing, or returns existing_sheets list:
   1. Check the existing_sheets list in the error response
-  2. Create the missing sheet first with hotkey ["shift", "f11"]
-  3. Use rename_sheet to rename it (e.g., rename_sheet(old_name="Sheet2", new_name="Summary"))
-  4. Then retry the go_to_range navigation
+  2. Create the missing sheet first with create_sheet(sheet_name="Summary")
+  3. Wait for its verified result, then retry the go_to_range navigation
 - NEVER assume a sheet exists. The system will return an error with the list of existing sheets.
 - IMPORTANT: To rename a sheet, ALWAYS use the rename_sheet tool. NEVER try to double-click the tab visually.
 
@@ -624,6 +665,17 @@ Keep responses concise and describe only actions actually completed by tools."""
                 "\n\nVISUAL RECOGNITION: OmniParser is running locally (YOLOv9 + OCR). "
                 "parse_screen is available. Use zone='ribbon' for tabs/commands, "
                 "zone='popup' for dialogs. Text labels from OCR are reliable click targets."
+            )
+        if config.ENABLE_FLORENCE_CAPTION:
+            prompt += (
+                "\n\nICON CAPTIONING: Florence captions are enabled. Use them only as supporting "
+                "evidence; a shortcut, KeyTip, UIA name, or tooltip is still preferred before clicking."
+            )
+        else:
+            prompt += (
+                "\n\nFAST OCR MODE: Florence captions are disabled. OmniParser text and detector boxes "
+                "can locate labelled controls, but an unlabelled icon must be identified through a shortcut, "
+                "Ribbon KeyTip, UIA name, or hover tooltip before it is clicked."
             )
         return prompt
 

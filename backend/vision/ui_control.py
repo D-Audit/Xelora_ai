@@ -10,17 +10,22 @@ in a headless Linux server/container - that's expected; this layer is
 meant to run on the same machine as the FastAPI backend, on the user's
 actual desktop, not in the cloud.
 
-This module provides the primitives (screenshot, click, type, find-
-window). The actual "which button do I click" decision is made by the
-AI: it's given the screenshot, plans in text where to click, and this
-module just executes that plan. Wiring that loop into agent/core.py is
-Phase 2 (see README "What's scaffolded vs implemented").
+This module provides the primitives (screenshot, click, type, find-window)
+and the safety checks around them.  The agent prefers Excel shortcuts and
+Windows UI Automation; OmniParser is used only to identify an unfamiliar,
+visible control.  Parsed coordinates are never invented and popup decisions
+must use their visible title, message, and button labels.
 """
 
 import ctypes
+from datetime import datetime
+import logging
+import os
 import re
 import subprocess
 import time
+
+import config
 
 try:
     import winreg
@@ -40,6 +45,7 @@ from vision.excel_shortcuts import (
     EXCEL_SHORTCUTS,
     OPERATION_MODULES,
     get_shortcut_for_operation,
+    resolve_shortcut,
 )
 
 try:
@@ -47,6 +53,12 @@ try:
     _HAS_PYAUTOGUI = True
 except Exception:
     _HAS_PYAUTOGUI = False
+
+try:
+    from PIL import ImageGrab
+    _HAS_HWND_IMAGE_CAPTURE = True
+except Exception:
+    _HAS_HWND_IMAGE_CAPTURE = False
 
 try:
     from pywinauto import Desktop
@@ -86,6 +98,10 @@ _last_elements: list[dict] = []
 _last_parse_at: float | None = None
 _last_parse_window_handle: int | None = None
 _agent_excel_handle: int | None = None
+# The handle is the primary safety boundary.  The process ID lets us recover
+# that handle after an Office repaint without "discovering" and taking over a
+# completely unrelated Excel workbook.
+_agent_excel_pid: int | None = None
 _use_existing_workbook = False
 _bound_excel_pid: int | None = None
 _bound_workbook_name: str | None = None
@@ -97,6 +113,8 @@ _SHEET_PREFIX = r"(?:(?:'(?:[^']|'')+'|[A-Za-z0-9_]+)!)?"
 _A1_CELL = r"\$?[A-Za-z]{1,3}\$?\d+"
 _A1_REFERENCE = rf"{_SHEET_PREFIX}(?:{_A1_CELL}(?::{_A1_CELL})?|\$?[A-Za-z]{{1,3}}:\$?[A-Za-z]{{1,3}}|\$?\d+:\$?\d+)"
 _DEFINED_NAME = r"[A-Za-z_][A-Za-z0-9_.]*"
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _is_valid_go_to_reference(reference: str) -> bool:
@@ -117,131 +135,485 @@ except ImportError:
     pass
 
 
+def _window_process_id_from_handle(hwnd: int) -> int | None:
+    """Return a Win32 window's process ID without requiring another package."""
+    try:
+        process_id = ctypes.c_ulong(0)
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+        return int(process_id.value) or None
+    except Exception:
+        return None
+
+
+def _is_process_running(process_id: int | None) -> bool:
+    """Conservatively determine whether a known Windows process still exists."""
+    if not process_id:
+        return False
+    try:
+        process_handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(process_id))
+        if not process_handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not ctypes.windll.kernel32.GetExitCodeProcess(process_handle, ctypes.byref(exit_code)):
+                # Do not replace ownership when Windows cannot report a state.
+                return True
+            return exit_code.value == 259  # STILL_ACTIVE
+        finally:
+            ctypes.windll.kernel32.CloseHandle(process_handle)
+    except Exception:
+        # A platform/API limitation must preserve the current binding rather
+        # than risk starting an additional workbook.
+        return True
+
+
 def _enum_excel_popups(excel_hwnd: int) -> list[int]:
-    """Enumerate ALL popup dialogs owned by Excel, not just the last active one."""
+    """Enumerate visible dialogs owned by, or running inside, this Excel app.
+
+    Office's Create Table dialog is sometimes not reported with the workbook
+    window as its direct owner.  It is still a ``#32770`` window in the same
+    Excel process, and must block raw input just like a Save As dialog.
+    """
     if not _HAS_WIN32GUI or not excel_hwnd:
         return []
     popups = []
     try:
-        def enum_proc(hwnd, _):
-            if win32gui.GetParent(hwnd) == excel_hwnd and win32gui.IsWindowVisible(hwnd):
-                cls = win32gui.GetClassName(hwnd) or ""
-                if cls == "#32770" or win32gui.GetWindowText(hwnd):
+        excel_process_id = _window_process_id_from_handle(excel_hwnd)
+
+        def add_if_dialog(hwnd) -> None:
+            try:
+                if hwnd == excel_hwnd or not win32gui.IsWindowVisible(hwnd):
+                    return
+                if (win32gui.GetClassName(hwnd) or "") == "#32770" and hwnd not in popups:
                     popups.append(hwnd)
+            except Exception:
+                pass
+
+        def enum_proc(hwnd, _):
+            if hwnd == excel_hwnd or not win32gui.IsWindowVisible(hwnd):
+                return True
+            cls = win32gui.GetClassName(hwnd) or ""
+            owner = win32gui.GetWindow(hwnd, win32con.GW_OWNER)
+            parent = win32gui.GetParent(hwnd)
+            same_excel_process = (
+                excel_process_id is not None
+                and _window_process_id_from_handle(hwnd) == excel_process_id
+            )
+            if cls == "#32770" and (owner == excel_hwnd or parent == excel_hwnd or same_excel_process):
+                add_if_dialog(hwnd)
             return True
-        win32gui.EnumChildWindows(excel_hwnd, enum_proc, None)
+
+        def child_enum_proc(hwnd, _):
+            # Excel's Create Table dialog can be an in-process child rather
+            # than a top-level owned window, so EnumWindows alone misses it.
+            add_if_dialog(hwnd)
+            return True
+
+        win32gui.EnumWindows(enum_proc, None)
+        win32gui.EnumChildWindows(excel_hwnd, child_enum_proc, None)
     except Exception:
         pass
     return popups
 
 
-def handle_all_dialogs_smart(excel_hwnd: int) -> dict:
-    """Comprehensive dialog detection + SMART response based on dialog content.
+def _read_popup(popup_hwnd: int) -> dict:
+    """Read a popup's title, visible message, and actionable button labels."""
+    title = " ".join((win32gui.GetWindowText(popup_hwnd) or "").split())
+    buttons: list[dict] = []
+    text_parts: list[str] = []
+    edit_values: list[str] = []
 
-    Reads dialog title + button text, then decides:
-    - ERROR dialogs ("Reference isn't valid", "circular reference", etc.) -> Enter (OK)
-    - SECURITY/MACRO prompts ("Enable content", "Macros disabled") -> Allow/Enable
-    - FILE PROTECTION ("File is read-only", "Protected view") -> Enable Editing
-    - SAVE/CONFIRM ("Save changes?", "Replace existing?") -> Cancel/Don't Save (agent shouldn't overwrite user files silently)
-    - PRINT/PAGE SETUP/FORMAT CELLS -> Escape (cancel, agent uses shortcuts)
-    - UPDATE LINKS ("Update values?") -> Don't Update (keep local data)
-    - GENERIC unknown -> Escape (safe default)
-    """
-    if not _HAS_WIN32GUI or not excel_hwnd:
-        return {"status": "clean", "handled": []}
-    
-    handled = []
-    for popup in _enum_excel_popups(excel_hwnd):
+    def enum_children(hwnd, _):
         try:
-            title = win32gui.GetWindowText(popup) or ""
-            # Get child buttons to read their captions
-            btn_texts = []
-            def enum_buttons(hwnd, _):
-                if win32gui.GetClassName(hwnd) == "Button":
-                    txt = win32gui.GetWindowText(hwnd) or ""
-                    if txt:
-                        btn_texts.append(txt.lower())
-                return True
-            win32gui.EnumChildWindows(popup, enum_buttons, None)
-            btn_text = " | ".join(btn_texts)
-            low = (title + " " + btn_text).lower()
-            
-            # 1. SECURITY/MACRO - ALLOW
-            if any(kw in low for kw in ["enable content", "macro", "security warning", "trust center", "protected view", "enable editing"]):
-                # Click "Enable Content" or "Yes" or "OK"
-                for btn in [win32con.BN_CLICKED]:
-                    win32gui.SendMessage(popup, win32con.WM_COMMAND, win32con.IDOK, 0)
-                time.sleep(0.4)
-                handled.append(f"security_allow:{title}")
-                continue
-            
-            # 2. ERROR dialogs - OK/Dismiss
-            if any(kw in low for kw in ["reference isn't valid", "reference is not valid", 
-                "name isn't valid", "name is not valid", "circular reference",
-                "cell contents must be text", "we couldn't find", "application-defined",
-                "object-defined error", "name already exists", "microsoft excel",
-                "cannot be used", "invalid", "error"]):
-                win32gui.SendMessage(popup, win32con.WM_COMMAND, win32con.IDOK, 0)
-                time.sleep(0.3)
-                handled.append(f"error_dismiss:{title}")
-                continue
-            
-            # 3. UPDATE LINKS - Don't Update
-            if "update" in low and ("link" in low or "value" in low):
-                win32gui.SendMessage(popup, win32con.WM_COMMAND, win32con.IDCANCEL, 0)
-                time.sleep(0.3)
-                handled.append(f"update_links_cancel:{title}")
-                continue
-            
-            # 4. SAVE/CONFIRM/REPLACE - Cancel/Don't Save (agent shouldn't auto-save user files)
-            if any(kw in low for kw in ["save", "replace", "overwrite", "confirm save"]):
-                win32gui.SendMessage(popup, win32con.WM_COMMAND, win32con.IDCANCEL, 0)
-                time.sleep(0.3)
-                handled.append(f"save_cancel:{title}")
-                continue
-            
-            # 5. FILE PROTECTION / READ-ONLY - Enable Editing if possible, else OK
-            if any(kw in low for kw in ["read-only", "protected view", "enable editing"]):
-                # Try to find "Enable Editing" button
-                win32gui.SendMessage(popup, win32con.WM_COMMAND, win32con.IDOK, 0)
-                time.sleep(0.3)
-                handled.append(f"protection_ok:{title}")
-                continue
-            
-            # 6. PRINT/PAGE SETUP/FORMAT CELLS/INSERT dialogs - Cancel (agent uses shortcuts)
-            if any(kw in low for kw in ["print", "page setup", "format cells", "insert", "find", "replace", "go to", "define name", "data validation", "conditional formatting", "sort", "filter"]):
-                win32gui.SendMessage(popup, win32con.WM_COMMAND, win32con.IDCANCEL, 0)
-                time.sleep(0.3)
-                handled.append(f"dialog_cancel:{title}")
-                continue
-            
-            # 7. GENERIC - Check buttons for "Allow", "Yes", "No", "Retry", "Cancel"
-            btn_actions = []
-            for btn in ["allow", "yes", "enable", "ok", "continue"]:
-                if btn in btn_text:
-                    btn_actions.append(("allow", win32con.IDOK))
-            for btn in ["no", "cancel", "don't", "dont", "close"]:
-                if btn in btn_text:
-                    btn_actions.append(("deny", win32con.IDCANCEL))
-            for btn in ["retry", "try again"]:
-                if btn in btn_text:
-                    btn_actions.append(("retry", win32con.IDRETRY))
-            
-            if btn_actions:
-                # Prefer allow/yes, then deny/cancel, then retry
-                action, cmd = sorted(btn_actions, key=lambda x: {"allow":0, "deny":1, "retry":2}[x[0]])[0]
-                win32gui.SendMessage(popup, win32con.WM_COMMAND, cmd, 0)
-                time.sleep(0.3)
-                handled.append(f"{action}:{title}")
-            else:
-                # Unknown - safe default: Escape
-                win32gui.SendMessage(popup, win32con.WM_KEYDOWN, win32con.VK_ESCAPE, 0)
-                win32gui.SendMessage(popup, win32con.WM_KEYUP, win32con.VK_ESCAPE, 0)
-                time.sleep(0.2)
-                handled.append(f"escape:{title}")
+            label = " ".join((win32gui.GetWindowText(hwnd) or "").split())
+            class_name = win32gui.GetClassName(hwnd) or ""
+            if class_name == "Button" and label:
+                buttons.append({"label": label, "handle": hwnd})
+            elif label and class_name in {"Static", "Edit", "RichEdit20W", "RichEditD2DPT"}:
+                text_parts.append(label)
+                if class_name in {"Edit", "RichEdit20W", "RichEditD2DPT"}:
+                    edit_values.append(label)
         except Exception:
             pass
-    return {"status": "clean" if not handled else "handled", "handled": handled}
+        return True
+
+    win32gui.EnumChildWindows(popup_hwnd, enum_children, None)
+    body = " ".join(dict.fromkeys(text_parts))
+    button_labels = [button["label"] for button in buttons]
+    normalized = " ".join((title, body, *button_labels)).lower()
+    return {
+        "handle": popup_hwnd,
+        "title": title,
+        "message": body,
+        "buttons": button_labels,
+        "_buttons": buttons,
+        "_edit_values": edit_values,
+        "signature": " | ".join((title, body, *button_labels)),
+        "normalized": normalized,
+    }
+
+
+def _read_uia_popup(control) -> dict | None:
+    """Read an in-process Office dialog that is not a Win32 ``#32770`` window."""
+    try:
+        title = " ".join(control.window_text().split())
+        if not title:
+            return None
+        buttons: list[dict] = []
+        text_parts: list[str] = []
+        edit_values: list[str] = []
+        for child in control.descendants():
+            try:
+                label = " ".join(child.window_text().split())
+                control_type = str(child.element_info.control_type or "").lower()
+                if control_type == "button" and label:
+                    buttons.append({"label": label, "uia_control": child})
+                elif control_type in {"text", "edit", "combobox"}:
+                    # UIA Edit controls can expose their current value through
+                    # ValuePattern rather than window_text(). Excel's Create
+                    # Table range is one of those controls on some builds.
+                    value = label
+                    if control_type in {"edit", "combobox"}:
+                        try:
+                            value = " ".join(str(child.iface_value.CurrentValue or value).split())
+                        except Exception:
+                            pass
+                    if value:
+                        text_parts.append(value)
+                        if control_type in {"edit", "combobox"}:
+                            edit_values.append(value)
+            except Exception:
+                continue
+        if not buttons:
+            return None
+        handle = getattr(control, "handle", None)
+        body = " ".join(dict.fromkeys(text_parts))
+        button_labels = [button["label"] for button in buttons]
+        normalized = " ".join((title, body, *button_labels)).lower()
+        return {
+            "handle": handle,
+            "title": title,
+            "message": body,
+            "buttons": button_labels,
+            "_buttons": buttons,
+            "_edit_values": edit_values,
+            "uia_control": control,
+            "signature": " | ".join((title, body, *button_labels)),
+            "normalized": normalized,
+        }
+    except Exception:
+        return None
+
+
+def _is_excel_workbook_frame_title(title: str) -> bool:
+    """Return whether a UIA title belongs to Excel's normal workbook frame.
+
+    The workbook frame exposes Ribbon buttons (Save, File Tab, Undo, etc.)
+    through UI Automation.  It is *not* a modal dialog.  Office can expose a
+    second UIA wrapper for that frame with a handle that differs from the
+    handle used to bind the task, so the handle-only exclusion in
+    ``_uia_excel_popups`` is not sufficient.
+    """
+    normalised = " ".join(str(title or "").split())
+    return bool(re.fullmatch(
+        r".+?\s+-\s+excel(?:\s+\([^)]*\))?",
+        normalised,
+        flags=re.IGNORECASE,
+    ))
+
+
+_EXCEL_WORKFLOW_DIALOG_TITLES = frozenset({
+    "create table", "save as", "format cells", "insert chart", "pivot table",
+    "sort", "filter", "conditional formatting", "data validation",
+    "new formatting rule", "find and replace", "go to", "page setup", "open", "print",
+})
+
+
+def _normalise_excel_dialog_title(title: str) -> str:
+    """Normalise a window title without mistaking a field caption for a dialog."""
+    return " ".join(str(title or "").split()).rstrip(":").casefold()
+
+
+def _is_known_excel_workflow_dialog_title(title: str) -> bool:
+    """Recognise only an exact Excel dialog title, not a nested control caption."""
+    return _normalise_excel_dialog_title(title) in _EXCEL_WORKFLOW_DIALOG_TITLES
+
+
+def _is_embedded_excel_dialog_control(title: str) -> bool:
+    """Identify field labels that Office exposes as nested UIA Windows."""
+    return _normalise_excel_dialog_title(title) in {
+        "save as type", "file name", "file type",
+    }
+
+
+def _normalise_excel_button_label(label: str) -> str:
+    """Compare Office button labels independent of mnemonic ampersands."""
+    text = str(label or "").replace("&&", "&").replace("&", "")
+    return " ".join(text.replace("…", "").replace("...", "").split()).casefold()
+
+
+def _uia_excel_popups(excel_hwnd: int) -> list[dict]:
+    """Find Office dialogs through UI Automation when Win32 enumeration misses them."""
+    if not _HAS_PYWINAUTO or not excel_hwnd:
+        return []
+    excel_pid = _window_process_id_from_handle(excel_hwnd)
+    seen_handles: set[int] = set()
+    popups: list[dict] = []
+    try:
+        desktop = Desktop(backend="uia")
+        excel_window = desktop.window(handle=excel_hwnd)
+        desktop_windows = list(desktop.windows())
+        desktop_handles = {
+            handle for handle in (getattr(window, "handle", None) for window in desktop_windows)
+            if handle
+        }
+        candidates = list(desktop_windows)
+        # Excel can host Create Table as an in-process child. It may not be a
+        # desktop top-level window, but UIA still exposes it under XLMAIN.
+        candidates.extend(excel_window.descendants())
+    except Exception:
+        return []
+
+    for control in candidates:
+        try:
+            handle = getattr(control, "handle", None)
+            if handle == excel_hwnd or (handle and handle in seen_handles):
+                continue
+            info = control.element_info
+            control_type = str(info.control_type or "").lower()
+            title = " ".join(control.window_text().split())
+            control_pid = getattr(info, "process_id", None)
+            if excel_pid is not None and control_pid not in {None, excel_pid}:
+                continue
+            # The normal workbook window is a UIA ``Window`` and contains
+            # buttons such as File Tab and Save.  Treating it as a popup gates
+            # every workbook action even though no dialog is visible.
+            if _is_excel_workbook_frame_title(title):
+                continue
+            # Office occasionally publishes a field such as "Save as type:"
+            # as a nested UIA Window. It belongs to the real Save As dialog,
+            # not a second dialog that should block popup-button actions.
+            if _is_embedded_excel_dialog_control(title):
+                continue
+            # Restrict in-process descendants to actual dialog-like controls.
+            # Otherwise Ribbon panes also have buttons and would be mistaken for
+            # a popup.  A generic UIA ``Window`` is only dialog-like when it
+            # came from the desktop's top-level window list; nested Office
+            # controls must identify themselves as a Dialog or a known Excel
+            # workflow surface. Some Office builds report Create Table as a
+            # Pane, so known workflow titles remain allowed.
+            is_dialog_like = (
+                control_type == "dialog"
+                or _is_known_excel_workflow_dialog_title(title)
+                or (handle in desktop_handles and control_type == "window")
+            )
+            if not title or not is_dialog_like:
+                continue
+            popup = _read_uia_popup(control)
+            if popup is None:
+                continue
+            # A popup has a dialog title plus an actionable button. This keeps
+            # normal worksheet panes and Ribbon groups out of the popup gate.
+            if not popup["buttons"]:
+                continue
+            if handle:
+                seen_handles.add(handle)
+            popups.append(popup)
+        except Exception:
+            continue
+    return popups
+
+
+def _read_excel_popups(excel_hwnd: int) -> list[dict]:
+    """Return the complete popup set from Win32 first, then UI Automation."""
+    popups = [_read_popup(hwnd) for hwnd in _enum_excel_popups(excel_hwnd)]
+    seen_handles = {popup.get("handle") for popup in popups if popup.get("handle")}
+    for popup in _uia_excel_popups(excel_hwnd):
+        handle = popup.get("handle")
+        signature = popup.get("signature")
+        if handle and handle in seen_handles:
+            continue
+        if any(signature == existing.get("signature") for existing in popups):
+            continue
+        popups.append(popup)
+    return popups
+
+
+def inspect_excel_popups(excel_hwnd: int) -> dict:
+    """Return structured popup evidence without clicking or dismissing anything."""
+    if (not _HAS_WIN32GUI and not _HAS_PYWINAUTO) or not excel_hwnd:
+        return {"status": "clean", "popups": [], "verified": True}
+    popups = _read_excel_popups(excel_hwnd)
+    public_popups = [
+        {key: value for key, value in popup.items() if key not in {"_buttons", "_edit_values", "normalized"}}
+        for popup in popups
+    ]
+    return {
+        "status": "popup_detected" if public_popups else "clean",
+        "popups": public_popups,
+        "verified": True,
+    }
+
+
+def _public_popup(popup: dict) -> dict:
+    """Remove native control references before returning popup evidence."""
+    return {
+        key: value for key, value in popup.items()
+        if key not in {"_buttons", "_edit_values", "normalized", "uia_control"}
+    }
+
+
+def _popup_needs_visual_inspection(popup: dict) -> bool:
+    """Use OmniParser only when native dialog evidence is incomplete or unknown."""
+    return (
+        _popup_kind(popup) == "unknown"
+        or not str(popup.get("message", "")).strip()
+        or not popup.get("buttons")
+    )
+
+
+def _require_no_open_popup(excel_hwnd: int) -> None:
+    """Prevent raw keyboard/mouse input from leaking into an Excel dialog."""
+    popup_state = inspect_excel_popups(excel_hwnd)
+    if popup_state.get("status") != "clean":
+        labels = []
+        for popup in popup_state.get("popups", []):
+            title = str(popup.get("title", "dialog")).strip() or "dialog"
+            labels.append(title)
+        raise RuntimeError(
+            "A visible Excel dialog is blocking worksheet input ("
+            + ", ".join(labels or ["unknown dialog"])
+            + "). Inspect it and use an exact popup action; do not send typing, Enter, or Alt keys."
+        )
+
+
+def _popup_kind(popup: dict) -> str:
+    text = popup["normalized"]
+    if any(token in text for token in (
+        "enable content", "macro", "security warning", "trust center",
+        "protected view", "enable editing", "read-only",
+    )):
+        return "security_or_protection"
+    if any(token in text for token in (
+        "save changes", "overwrite", "replace existing", "confirm save",
+        "update links", "update values",
+    )):
+        return "unsafe_confirmation"
+    if any(token in text for token in (
+        "reference isn't valid", "reference is not valid", "name isn't valid",
+        "name is not valid", "circular reference", "application-defined",
+        "object-defined error", "cannot be used", "invalid formula", "error occurred",
+    )):
+        return "recoverable_error"
+    if any(token in text for token in (
+        "format cells", "insert chart", "insert table", "create table", "pivot table", "sort",
+        "filter", "conditional formatting", "data validation", "find and replace",
+        "go to", "save as", "open", "print", "page setup",
+    )):
+        return "workflow_dialog"
+    return "unknown"
+
+
+def _click_popup_button(popup: dict, candidates: tuple[str, ...]) -> str | None:
+    """Click an exact, pre-approved button label and return it as evidence."""
+    normalized_candidates = {_normalise_excel_button_label(candidate) for candidate in candidates}
+    for button in popup.get("_buttons", []):
+        label = _normalise_excel_button_label(button["label"])
+        if label in normalized_candidates:
+            try:
+                uia_control = button.get("uia_control")
+                if uia_control is not None:
+                    _foreground_window_evidence(popup.get("handle"), "before_popup_uia_click")
+                    uia_control.click_input()
+                    _foreground_window_evidence(popup.get("handle"), "after_popup_uia_click")
+                else:
+                    button_handle = button.get("handle")
+                    if not button_handle:
+                        return None
+                    _foreground_window_evidence(popup.get("handle"), "before_popup_bm_click")
+                    win32gui.SendMessage(button_handle, win32con.BM_CLICK, 0, 0)
+                    _foreground_window_evidence(popup.get("handle"), "after_popup_bm_click")
+                    # Some Office builds expose Create Table as a child dialog
+                    # that ignores BM_CLICK until its owner is foreground. The
+                    # fallback still uses the inspected button's rectangle;
+                    # it never guesses a screen coordinate.
+                    popup_handle = popup.get("handle")
+                    if (
+                        _HAS_WIN32GUI
+                        and popup_handle
+                        and win32gui.IsWindow(popup_handle)
+                        and win32gui.IsWindowVisible(popup_handle)
+                    ):
+                        try:
+                            win32gui.BringWindowToTop(popup_handle)
+                            win32gui.SetForegroundWindow(popup_handle)
+                            left, top, right, bottom = win32gui.GetWindowRect(button_handle)
+                            _foreground_window_evidence(popup_handle, "before_popup_coordinate_click")
+                            pyautogui.click((left + right) // 2, (top + bottom) // 2)
+                            _foreground_window_evidence(popup_handle, "after_popup_coordinate_click")
+                        except Exception:
+                            pass
+                time.sleep(0.2)
+                return button["label"]
+            except Exception:
+                return None
+    return None
+
+
+def _same_excel_popup(expected: dict, observed: dict) -> bool:
+    """Identify one popup across a post-click reread without guessing by title."""
+    expected_handle = expected.get("handle")
+    observed_handle = observed.get("handle")
+    if expected_handle and observed_handle:
+        return expected_handle == observed_handle
+    expected_signature = str(expected.get("signature") or "").strip()
+    observed_signature = str(observed.get("signature") or "").strip()
+    return bool(expected_signature and expected_signature == observed_signature)
+
+
+def handle_all_dialogs_smart(excel_hwnd: int) -> dict:
+    """Safely recover from stale dialogs without guessing at their meaning.
+
+    Only explicit Excel errors are dismissed with ``OK``.  Save/overwrite/link
+    confirmations are cancelled, and security/protection dialogs are never
+    accepted automatically.  Workflow and unknown dialogs stay visible with
+    their full signature so the agent can select a known button deliberately.
+    """
+    if (not _HAS_WIN32GUI and not _HAS_PYWINAUTO) or not excel_hwnd:
+        return {"status": "clean", "handled": [], "popups": []}
+
+    handled: list[dict] = []
+    pending: list[dict] = []
+    for popup in _read_excel_popups(excel_hwnd):
+        kind = _popup_kind(popup)
+        action = None
+        if kind == "recoverable_error":
+            action = _click_popup_button(popup, ("OK",))
+        elif kind == "unsafe_confirmation":
+            action = _click_popup_button(popup, ("Cancel", "No", "Don't Save", "Don't Update"))
+        elif kind == "security_or_protection":
+            action = _click_popup_button(popup, ("Cancel", "No", "Close"))
+
+        public = {key: value for key, value in popup.items() if key not in {"_buttons", "_edit_values", "normalized"}}
+        public["kind"] = kind
+        if action:
+            handled.append({**public, "action": action})
+        else:
+            pending.append(public)
+
+    if pending:
+        return {
+            "status": "popup_requires_workflow" if any(p["kind"] == "workflow_dialog" for p in pending) else "popup_requires_attention",
+            "handled": handled,
+            "popups": pending,
+            "verified": False,
+        }
+    return {
+        "status": "handled" if handled else "clean",
+        "handled": handled,
+        "popups": [],
+        "verified": True,
+    }
 
 
 def handle_blocking_dialogs(excel_hwnd: int) -> dict:
@@ -272,6 +644,181 @@ def reset_to_neutral_state(excel_hwnd: int) -> dict:
     return {"status": "reset_complete"}
 
 
+_NON_SHEET_TAB_TITLES = {
+    "", "ready", "normal", "page layout", "page break preview",
+    "home", "insert", "draw", "formulas", "data", "review", "view",
+    "developer", "help", "wps pdf", "share", "comments", "autosave",
+}
+
+
+def _normalise_sheet_tab_name(title: str) -> str:
+    """Remove Excel UIA's optional ``Sheet `` accessibility prefix."""
+    name = " ".join(str(title or "").split())
+    if name.lower().startswith("sheet "):
+        name = name[6:].strip()
+    return name
+
+
+def _sheet_tab_name_from_control(control) -> str | None:
+    """Return a real worksheet name from a UIA control, otherwise ``None``."""
+    try:
+        if str(control.element_info.control_type or "") != "TabItem":
+            return None
+        name = _normalise_sheet_tab_name(control.window_text())
+        return name if name.lower() not in _NON_SHEET_TAB_TITLES else None
+    except Exception:
+        return None
+
+
+def _sheet_tab_uia_snapshot(window, reason: str) -> dict:
+    """Record the raw UIA TabItem evidence when sheet handling cannot verify.
+
+    This is deliberately failure-only diagnostics. It does not click, focus, or
+    otherwise alter Excel; it lets us distinguish an absent tab from a UIA
+    tree that exposed a tab with an unexpected name or control type.
+    """
+    snapshot = {
+        "reason": reason,
+        "bound_window_handle": _agent_excel_handle,
+        "bound_excel_pid": _agent_excel_pid,
+        "window_handle": getattr(window, "handle", None),
+        "window_title": "",
+        "tab_items": [],
+        "descendant_count": 0,
+        "enumeration_error": None,
+    }
+    try:
+        snapshot["window_title"] = " ".join((window.window_text() or "").split())
+    except Exception as exc:
+        snapshot["window_title_error"] = repr(exc)
+    try:
+        descendants = list(window.descendants())
+        snapshot["descendant_count"] = len(descendants)
+        for desc in descendants:
+            try:
+                control_type = str(desc.element_info.control_type or "")
+                if control_type != "TabItem":
+                    continue
+                try:
+                    raw_text = desc.window_text() or ""
+                except Exception as exc:
+                    raw_text = ""
+                    text_error = repr(exc)
+                else:
+                    text_error = None
+                item = {
+                    "control_type": control_type,
+                    "window_text": raw_text,
+                    "normalised_sheet_name": _normalise_sheet_tab_name(raw_text),
+                }
+                if text_error:
+                    item["window_text_error"] = text_error
+                snapshot["tab_items"].append(item)
+            except Exception as exc:
+                snapshot.setdefault("tab_item_errors", []).append(repr(exc))
+    except Exception as exc:
+        snapshot["enumeration_error"] = repr(exc)
+    _LOGGER.warning("Excel sheet-tab UIA snapshot: %s", snapshot)
+    return snapshot
+
+
+def _sheet_tab_is_selected(control) -> bool:
+    """Return True only when UIA positively identifies the active sheet tab."""
+    try:
+        selection_item = getattr(control, "iface_selection_item", None)
+        if selection_item is not None:
+            return bool(selection_item.CurrentIsSelected)
+    except Exception:
+        pass
+    try:
+        return bool(control.is_selected())
+    except Exception:
+        pass
+    try:
+        return bool(control.get_toggle_state())
+    except Exception:
+        return False
+
+
+def _process_executable_path(process_id: int | None) -> str | None:
+    """Return a process image path using Win32, without a psutil dependency."""
+    if not process_id or os.name != "nt":
+        return None
+    process_handle = None
+    try:
+        # PROCESS_QUERY_LIMITED_INFORMATION is sufficient on supported Windows
+        # versions and does not give Xelora any ability to modify the process.
+        process_handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(process_id))
+        if not process_handle:
+            return None
+        capacity = ctypes.c_ulong(32768)
+        buffer = ctypes.create_unicode_buffer(capacity.value)
+        succeeded = ctypes.windll.kernel32.QueryFullProcessImageNameW(
+            process_handle, 0, buffer, ctypes.byref(capacity)
+        )
+        return buffer.value if succeeded and buffer.value else None
+    except Exception:
+        return None
+    finally:
+        if process_handle:
+            try:
+                ctypes.windll.kernel32.CloseHandle(process_handle)
+            except Exception:
+                pass
+
+
+def _file_product_name(executable_path: str | None) -> str | None:
+    """Read the optional Windows ProductName resource for diagnostic evidence."""
+    if not executable_path:
+        return None
+    try:
+        import win32api
+
+        translations = win32api.GetFileVersionInfo(executable_path, r"\VarFileInfo\Translation")
+        if not translations:
+            return None
+        language, codepage = translations[0]
+        return win32api.GetFileVersionInfo(
+            executable_path,
+            rf"\StringFileInfo\{language:04X}{codepage:04X}\ProductName",
+        ) or None
+    except Exception:
+        return None
+
+
+def _spreadsheet_application_identity(window) -> dict:
+    """Return evidence of the exact process backing a bound spreadsheet window."""
+    process_id = _window_process_id(window)
+    executable_path = _process_executable_path(process_id)
+    executable_name = os.path.basename(executable_path).lower() if executable_path else None
+    product_name = _file_product_name(executable_path)
+    is_microsoft_excel = executable_name == "excel.exe"
+    return {
+        "process_id": process_id,
+        "window_handle": getattr(window, "handle", None),
+        "window_title": " ".join((window.window_text() or "").split()),
+        "executable_path": executable_path,
+        "executable_name": executable_name,
+        "product_name": product_name,
+        "is_microsoft_excel": is_microsoft_excel,
+    }
+
+
+def _require_microsoft_excel(window) -> dict:
+    """Reject look-alike spreadsheet applications before any task input is sent."""
+    identity = _spreadsheet_application_identity(window)
+    _LOGGER.info("Bound spreadsheet application: %s", identity)
+    if identity["is_microsoft_excel"]:
+        return identity
+    executable = identity.get("executable_path") or "unknown executable"
+    product = identity.get("product_name") or identity.get("executable_name") or "unknown application"
+    raise RuntimeError(
+        "Xelora currently supports desktop Microsoft Excel only. "
+        f"The bound window belongs to {product} ({executable}), not EXCEL.EXE. "
+        "Close WPS Office, open the workbook in Microsoft Excel, and start a new task."
+    )
+
+
 def get_existing_sheet_names() -> list[str]:
     """Get the names of all existing sheet tabs in the active workbook.
     
@@ -291,9 +838,8 @@ def get_existing_sheet_names() -> list[str]:
         # Search all descendants for TabItem controls (sheet tabs are nested deep)
         for desc in window.descendants():
             try:
-                ctrl_type = desc.element_info.control_type if hasattr(desc.element_info, 'control_type') else ''
-                title = desc.window_text() or ""
-                if ctrl_type == 'TabItem' and title and title not in ("", " ", "Ready", "Normal", "Page Layout", "Page Break Preview", "Home", "Insert", "Draw", "Page Layout", "Formulas", "Data", "Review", "View", "Developer", "Help"):
+                title = _sheet_tab_name_from_control(desc)
+                if title and title.lower() not in {sheet.lower() for sheet in sheets}:
                     sheets.append(title)
             except Exception:
                 continue
@@ -309,55 +855,291 @@ def sheet_exists(sheet_name: str) -> bool:
     return any(s.lower() == sheet_name.lower() for s in sheets)
 
 
-def rename_sheet(old_name: str, new_name: str) -> dict:
-    """Rename an existing sheet tab using pywinauto.
-    
-    Double-clicks the sheet tab to enter rename mode, types the new name,
-    and presses Enter. This is more reliable than visual double-clicking
-    which can fail due to stale screen captures.
+def _wait_for_sheet_name(sheet_name: str, timeout_seconds: float = 3.0) -> str | None:
+    """Wait for Excel to publish a sheet-tab name after a deliberate UI edit."""
+    wanted = " ".join(str(sheet_name or "").split()).casefold()
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        for observed_name in get_existing_sheet_names():
+            if " ".join(str(observed_name).split()).casefold() == wanted:
+                return observed_name
+        time.sleep(0.15)
+    return None
+
+
+def create_sheet(sheet_name: str) -> dict:
+    """Create and verify one worksheet before attempting to rename or use it.
+
+    This is deliberately atomic.  A raw ``Shift+F11`` followed by a guessed
+    ``Sheet2`` is unsafe because a workbook can have a different sheet order or
+    UIA can take a moment to publish its new tab.  No rename or cell input is
+    sent unless the newly created tab is observed first.
     """
+    requested_name = " ".join(str(sheet_name or "").split())
+    if not requested_name:
+        return {
+            "verified": False,
+            "status": "invalid_sheet_name",
+            "error": "sheet_name must not be blank.",
+        }
+    if len(requested_name) > 31 or re.search(r"[\\/:?*\[\]]", requested_name):
+        return {
+            "verified": False,
+            "status": "invalid_sheet_name",
+            "error": "Excel sheet names must be 1-31 characters and cannot contain \\ / : ? * [ or ].",
+        }
+
+    window = _get_agent_excel_window()
+    if window is None:
+        raise RuntimeError("Excel window not found")
+    _require_no_open_popup(window.handle)
+
+    before = get_existing_sheet_names()
+    if any(name.lower() == requested_name.lower() for name in before):
+        return {
+            "verified": True,
+            "status": "sheet_already_exists",
+            "sheet_name": next(name for name in before if name.lower() == requested_name.lower()),
+            "verification_note": f"Worksheet '{requested_name}' already exists.",
+        }
+
+    _focus_excel_for_keyboard(expected_window_handle=window.handle)
+    if _activate_excel_window(window):
+        pyautogui.hotkey("shift", "f11")
+    else:
+        window.type_keys("+{F11}", set_foreground=False)
+
+    created_name = None
+    deadline = time.monotonic() + 4.0
+    while time.monotonic() < deadline:
+        after = get_existing_sheet_names()
+        new_names = [name for name in after if name.lower() not in {old.lower() for old in before}]
+        if len(new_names) == 1:
+            created_name = new_names[0]
+            break
+        # Excel can publish the newly selected tab before it refreshes the
+        # full UIA tab collection.  The active tab is a safe identity source:
+        # it was selected by Shift+F11 and must still be absent from the
+        # pre-action collection before it can be renamed.
+        active_name = _get_active_sheet_name_value()
+        if active_name and all(active_name.casefold() != old.casefold() for old in before):
+            created_name = active_name
+            break
+        time.sleep(0.15)
+
+    if created_name is None:
+        return {
+            "verified": False,
+            "status": "new_sheet_not_verified",
+            "existing_sheets": get_existing_sheet_names(),
+            "uia_tab_debug": _sheet_tab_uia_snapshot(window, "new_sheet_not_verified"),
+            "error": "Excel did not expose one newly created worksheet tab. No rename or cell input was sent.",
+        }
+
+    if created_name.lower() == requested_name.lower():
+        return {
+            "verified": True,
+            "status": "sheet_created",
+            "sheet_name": created_name,
+            "verification_note": f"Created worksheet '{created_name}'.",
+        }
+
+    renamed = rename_sheet(created_name, requested_name)
+    if renamed.get("verified") is not True:
+        return {
+            "verified": False,
+            "status": "new_sheet_rename_not_verified",
+            "created_sheet": created_name,
+            "rename_result": renamed,
+            "error": "Excel created the worksheet, but its requested name could not be verified.",
+        }
+    return {
+        "verified": True,
+        "status": "sheet_created",
+        "sheet_name": requested_name,
+        "verification_note": f"Created and named worksheet '{requested_name}'.",
+    }
+
+
+def _uia_control_value(control) -> str:
+    """Return an editable UIA control's current value without sending keys."""
+    try:
+        value = str(control.iface_value.CurrentValue or "")
+        if value.strip():
+            return " ".join(value.split())
+    except Exception:
+        pass
+    try:
+        return " ".join((control.window_text() or "").split())
+    except Exception:
+        return ""
+
+
+def _find_inline_sheet_rename_editor(window, old_name: str):
+    """Find the inline Edit control Excel exposes while a tab is being renamed."""
+    wanted = " ".join(old_name.split()).lower()
+    try:
+        for control in window.descendants():
+            try:
+                control_type = str(control.element_info.control_type or "").lower()
+                if control_type not in {"edit", "combobox"}:
+                    continue
+                if _uia_control_value(control).lower() == wanted:
+                    return control
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def _find_visible_uia_menu_item(window, item_name: str):
+    """Find one exact context-menu item without falling back to coordinates."""
+    wanted = " ".join(item_name.split()).lower()
+    excel_pid = _window_process_id_from_handle(getattr(window, "handle", 0))
+    controls = []
+    try:
+        controls.extend(window.descendants())
+    except Exception:
+        pass
+    if _HAS_PYWINAUTO:
+        try:
+            desktop = Desktop(backend="uia")
+            for top_level in desktop.windows():
+                controls.extend(top_level.descendants())
+        except Exception:
+            pass
+    seen_handles: set[int] = set()
+    for control in controls:
+        try:
+            handle = getattr(control, "handle", None)
+            if handle and handle in seen_handles:
+                continue
+            if handle:
+                seen_handles.add(handle)
+            info = control.element_info
+            control_pid = getattr(info, "process_id", None)
+            if excel_pid is not None and control_pid not in {None, excel_pid}:
+                continue
+            control_type = str(info.control_type or "").lower()
+            label = " ".join((control.window_text() or "").split()).lower()
+            if control_type == "menuitem" and label == wanted:
+                return control
+        except Exception:
+            continue
+    return None
+
+
+def _open_sheet_rename_editor(window, target_tab, old_name: str):
+    """Open Excel's tab-rename editor without typing into the worksheet.
+
+    A UIA context-menu click is preferred. If Office does not expose that menu
+    item, use the stable Home > Format > Rename Sheet KeyTip sequence, but do
+    not type until an inline Edit control verifies that rename mode is active.
+    """
+    try:
+        target_tab.right_click_input()
+        time.sleep(0.2)
+        rename_item = _find_visible_uia_menu_item(window, "Rename")
+        if rename_item is not None:
+            rename_item.click_input()
+            time.sleep(0.2)
+            editor = _find_inline_sheet_rename_editor(window, old_name)
+            if editor is not None:
+                return editor
+    except Exception:
+        pass
+
+    # Ribbon sequence: Alt, H, O, R = Home > Format > Rename Sheet.
+    _focus_excel_for_keyboard(expected_window_handle=window.handle)
+    pyautogui.press("alt")
+    time.sleep(0.2)
+    for key in ("h", "o", "r"):
+        pyautogui.press(key)
+        time.sleep(0.12)
+    time.sleep(0.2)
+    return _find_inline_sheet_rename_editor(window, old_name)
+
+
+def rename_sheet(old_name: str, new_name: str) -> dict:
+    """Rename an existing sheet tab without allowing clipboard data into cells."""
     if not _HAS_PYWINAUTO:
-        return {"success": False, "error": "pywinauto not available"}
-    
+        return {"success": False, "verified": False, "error": "pywinauto not available"}
+
+    old_name = " ".join(str(old_name or "").split())
+    new_name = " ".join(str(new_name or "").split())
+    if not old_name or not new_name:
+        return {"success": False, "verified": False, "error": "Both old_name and new_name are required."}
+
     try:
         window = _get_agent_excel_window()
         if not window:
-            return {"success": False, "error": "Excel window not found"}
-        
+            return {"success": False, "verified": False, "error": "Excel window not found"}
+
+        _require_no_open_popup(window.handle)
         # Find the sheet tab by searching all descendants (tabs are nested deep)
         target_tab = None
         for desc in window.descendants():
             try:
-                ctrl_type = desc.element_info.control_type if hasattr(desc.element_info, 'control_type') else ''
-                title = desc.window_text() or ""
-                if ctrl_type == 'TabItem' and title.lower() == old_name.lower():
+                title = _sheet_tab_name_from_control(desc)
+                if title and title.lower() == old_name.lower():
                     target_tab = desc
                     break
             except Exception:
                 continue
         
         if not target_tab:
-            return {"success": False, "error": f"Sheet tab '{old_name}' not found"}
-        
-        # Double-click to enter rename mode
-        target_tab.double_click_input()
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"Sheet tab '{old_name}' not found",
+                "existing_sheets": get_existing_sheet_names(),
+                "uia_tab_debug": _sheet_tab_uia_snapshot(window, "rename_target_tab_not_found"),
+            }
+
+        # Select the tab explicitly, then invoke Excel's Rename Sheet command.
+        # Never send Ctrl+A/Ctrl+V after an unverified double-click: Excel can
+        # leave the worksheet selected, turning a sheet name into a paste over
+        # the entire sheet.
+        target_tab.click_input()
         time.sleep(0.3)
-        
-        # Select all text in the tab (Ctrl+A) and type new name
-        import pyperclip
-        pyperclip.copy(new_name)
-        hotkey(["ctrl", "a"])
-        time.sleep(0.1)
-        hotkey(["ctrl", "v"])
-        time.sleep(0.2)
-        
-        # Press Enter to confirm
-        press_key("enter")
-        time.sleep(0.3)
-        
-        return {"success": True, "old_name": old_name, "new_name": new_name}
+        editor = _open_sheet_rename_editor(window, target_tab, old_name)
+        if editor is None:
+            return {
+                "success": False,
+                "verified": False,
+                "status": "sheet_rename_editor_not_found",
+                "uia_tab_debug": _sheet_tab_uia_snapshot(window, "rename_editor_not_found"),
+                "error": (
+                    "Excel did not expose a sheet-tab rename editor. No text was sent, "
+                    "so worksheet cells were left unchanged."
+                ),
+            }
+        try:
+            editor.set_edit_text(new_name)
+            editor.type_keys("{ENTER}", set_foreground=False)
+        except Exception as exc:
+            return {
+                "success": False,
+                "verified": False,
+                "status": "sheet_rename_entry_failed",
+                "error": f"Excel opened the rename editor but the new name could not be entered safely: {exc}",
+            }
+        observed_name = _wait_for_sheet_name(new_name)
+        renamed = observed_name is not None
+        return {
+            "success": renamed,
+            "verified": renamed,
+            "old_name": old_name,
+            "new_name": observed_name or new_name,
+            "verification_note": (
+                f"Renamed sheet '{old_name}' to '{observed_name}' and confirmed its tab."
+                if renamed else
+                f"Excel accepted the rename input but the '{new_name}' sheet tab was not found afterward."
+            ),
+        }
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "verified": False, "error": str(e)}
 
 
 def go_to_sheet(sheet_name: str) -> dict:
@@ -367,20 +1149,19 @@ def go_to_sheet(sheet_name: str) -> dict:
     (e.g., "Sheet1!A1") which often fails with cross-sheet references.
     """
     if not _HAS_PYWINAUTO:
-        return {"success": False, "error": "pywinauto not available"}
+        return {"success": False, "verified": False, "error": "pywinauto not available"}
     
     try:
         window = _get_agent_excel_window()
         if not window:
-            return {"success": False, "error": "Excel window not found"}
+            return {"success": False, "verified": False, "error": "Excel window not found"}
         
         # Find the sheet tab by searching all descendants (tabs are nested deep)
         target_tab = None
         for desc in window.descendants():
             try:
-                ctrl_type = desc.element_info.control_type if hasattr(desc.element_info, 'control_type') else ''
-                title = desc.window_text() or ""
-                if ctrl_type == 'TabItem' and title.lower() == sheet_name.lower():
+                title = _sheet_tab_name_from_control(desc)
+                if title and title.lower() == sheet_name.lower():
                     target_tab = desc
                     break
             except Exception:
@@ -392,6 +1173,7 @@ def go_to_sheet(sheet_name: str) -> dict:
                 "success": False,
                 "error": f"Sheet tab '{sheet_name}' not found",
                 "existing_sheets": existing,
+                "uia_tab_debug": _sheet_tab_uia_snapshot(window, "go_to_sheet_target_tab_not_found"),
             }
         
         # Click the sheet tab to switch to it
@@ -405,7 +1187,7 @@ def go_to_sheet(sheet_name: str) -> dict:
             "verification_note": f"Switched to sheet '{sheet_name}'",
         }
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "verified": False, "error": str(e)}
 
 
 def navigate_to_cell_on_sheet(sheet_name: str, cell: str = "A1") -> dict:
@@ -432,8 +1214,8 @@ def navigate_to_cell_on_sheet(sheet_name: str, cell: str = "A1") -> dict:
     }
 
 
-def get_active_sheet_name() -> str | None:
-    """Get the name of the currently active sheet tab.
+def _get_active_sheet_name_value() -> str | None:
+    """Read the currently active worksheet name for internal helpers.
     
     Uses pywinauto to find which sheet tab is selected.
     Filters out view mode tabs (Normal, Page Layout, Page Break Preview).
@@ -453,34 +1235,38 @@ def get_active_sheet_name() -> str | None:
         sheet_tabs = []
         for desc in window.descendants():
             try:
-                ctrl_type = desc.element_info.control_type if hasattr(desc.element_info, 'control_type') else ''
-                title = desc.window_text() or ""
-                if ctrl_type == 'TabItem' and title and title not in view_mode_tabs:
+                title = _sheet_tab_name_from_control(desc)
+                if title and title not in view_mode_tabs:
                     sheet_tabs.append((title, desc))
             except Exception:
                 continue
         
-        # If we found sheet tabs, check which one is selected
+        # Return a worksheet only when UIA identifies it as selected.  A
+        # fallback to the first TabItem can misread the Ribbon's Share tab as
+        # the active worksheet and send later actions to the wrong context.
         for title, desc in sheet_tabs:
-            try:
-                if hasattr(desc, 'is_selected') and desc.is_selected():
-                    return title
-                if hasattr(desc, 'get_toggle_state'):
-                    try:
-                        if desc.get_toggle_state():
-                            return title
-                    except Exception:
-                        pass
-            except Exception:
-                continue
-        
-        # Fallback: return the first sheet tab we found (likely active)
-        if sheet_tabs:
-            return sheet_tabs[0][0]
-        
+            if _sheet_tab_is_selected(desc):
+                return title
+
         return None
     except Exception:
         return None
+
+
+def get_active_sheet_name() -> dict:
+    """Return active-sheet evidence using the common visual-tool result shape."""
+    sheet_name = _get_active_sheet_name_value()
+    if sheet_name is None:
+        return {
+            "verified": False,
+            "sheet_name": None,
+            "error": "Could not determine the active worksheet tab.",
+        }
+    return {
+        "verified": True,
+        "sheet_name": sheet_name,
+        "verification_note": f"The active worksheet tab is '{sheet_name}'.",
+    }
 
 
 def verify_current_sheet(expected_sheet: str) -> dict:
@@ -489,7 +1275,7 @@ def verify_current_sheet(expected_sheet: str) -> dict:
     This is critical for ensuring data is pasted on the correct sheet.
     Call this AFTER go_to_sheet and BEFORE paste_table.
     """
-    active = get_active_sheet_name()
+    active = _get_active_sheet_name_value()
     if active is None:
         # If we can't determine the active sheet, check if the expected sheet exists
         # and assume we're on it if go_to_sheet succeeded
@@ -539,19 +1325,23 @@ def get_sheet_info(sheet_name: str = None) -> dict:
         if sheet_name:
             window = _get_agent_excel_window()
             if not window:
-                return {"error": "Excel window not found"}
+                return {"verified": False, "error": "Excel window not found"}
             
             # Switch to the sheet first
             sheet_result = go_to_sheet(sheet_name)
-            if not sheet_result.get("success"):
-                return {"error": f"Sheet '{sheet_name}' not found"}
+            if sheet_result.get("verified") is not True:
+                return {"verified": False, "error": f"Sheet '{sheet_name}' not found"}
         
         # Navigate to A1 to start reading
-        go_to_range("A1")
+        navigation = go_to_range("A1")
+        if navigation.get("verified") is not True:
+            return {"verified": False, "error": "Could not select A1 before reading the sheet."}
         time.sleep(0.2)
         
         # Use Ctrl+Shift+End to find the extent of data
-        hotkey(["ctrl", "shift", "end"])
+        extent = hotkey(["ctrl", "shift", "end"])
+        if extent.get("verified") is not True:
+            return {"verified": False, "error": "Could not select the used range before reading the sheet."}
         time.sleep(0.3)
         
         # Get the active cell address (should be the last used cell)
@@ -563,13 +1353,19 @@ def get_sheet_info(sheet_name: str = None) -> dict:
         # Select the entire used range explicitly: A1 -> Ctrl+Shift+End extends
         # to the last used cell. This is far more reliable than Ctrl+A (which
         # toggles between current region and whole sheet and often lands wrong).
-        go_to_range("A1")
+        navigation = go_to_range("A1")
+        if navigation.get("verified") is not True:
+            return {"verified": False, "error": "Could not reset the sheet selection to A1."}
         time.sleep(0.2)
-        hotkey(["ctrl", "shift", "end"])
+        extent = hotkey(["ctrl", "shift", "end"])
+        if extent.get("verified") is not True:
+            return {"verified": False, "error": "Could not select the used range for clipboard reading."}
         time.sleep(0.3)
         
         # Copy to clipboard to read values
-        hotkey(["ctrl", "c"])
+        copied = hotkey(["ctrl", "c"])
+        if copied.get("verified") is not True:
+            return {"verified": False, "error": "Could not copy the selected sheet range."}
         time.sleep(0.25)
         
         data = _get_clipboard_text()
@@ -580,6 +1376,7 @@ def get_sheet_info(sheet_name: str = None) -> dict:
         
         if not data:
             return {
+                "verified": True,
                 "sheet_name": sheet_name or "active",
                 "headers": [],
                 "row_count": 0,
@@ -590,7 +1387,7 @@ def get_sheet_info(sheet_name: str = None) -> dict:
         # Parse TSV data
         lines = data.strip().split("\r\n")
         if not lines:
-            return {"sheet_name": sheet_name or "active", "headers": [], "row_count": 0, "column_count": 0, "sample_data": []}
+            return {"verified": True, "sheet_name": sheet_name or "active", "headers": [], "row_count": 0, "column_count": 0, "sample_data": []}
         
         headers = lines[0].split("\t") if lines[0] else []
         data_rows = []
@@ -599,6 +1396,7 @@ def get_sheet_info(sheet_name: str = None) -> dict:
                 data_rows.append(line.split("\t"))
         
         return {
+            "verified": True,
             "sheet_name": sheet_name or "active",
             "headers": headers,
             "row_count": max(0, len(lines) - 1),
@@ -607,7 +1405,7 @@ def get_sheet_info(sheet_name: str = None) -> dict:
             "has_data": len(lines) > 1,
         }
     except Exception as e:
-        return {"error": str(e)}
+        return {"verified": False, "error": str(e)}
 
 
 def get_cell_value(cell: str, sheet_name: str = None) -> dict:
@@ -659,6 +1457,7 @@ def get_cell_value(cell: str, sheet_name: str = None) -> dict:
         is_formula = formula.startswith("=") if formula else False
         
         return {
+            "verified": True,
             "cell": cell,
             "sheet_name": sheet_name or "active",
             "value": value,
@@ -666,7 +1465,7 @@ def get_cell_value(cell: str, sheet_name: str = None) -> dict:
             "is_formula": is_formula,
         }
     except Exception as e:
-        return {"error": str(e)}
+        return {"verified": False, "error": str(e)}
 
 
 def _hex_to_rgb(value: str):
@@ -1135,6 +1934,31 @@ def adaptive_go_to_range(reference: str) -> dict:
     return result
 
 
+def _foreground_window_evidence(target_handle: int | None, stage: str) -> dict:
+    """Capture foreground-window evidence around a synthetic input attempt."""
+    foreground_handle = None
+    foreground_title = None
+    foreground_class = None
+    try:
+        if _HAS_WIN32GUI:
+            foreground_handle = win32gui.GetForegroundWindow()
+            if foreground_handle:
+                foreground_title = win32gui.GetWindowText(foreground_handle)
+                foreground_class = win32gui.GetClassName(foreground_handle)
+    except Exception:
+        pass
+    evidence = {
+        "stage": stage,
+        "target_handle": target_handle,
+        "foreground_handle": foreground_handle,
+        "foreground_matches_target": bool(target_handle and foreground_handle == target_handle),
+        "foreground_title": foreground_title,
+        "foreground_class": foreground_class,
+    }
+    _LOGGER.info("Excel input foreground evidence: %s", evidence)
+    return evidence
+
+
 def _activate_excel_window(window) -> bool:
     """Ask Windows to foreground the agent's known Excel window.
 
@@ -1151,6 +1975,7 @@ def _activate_excel_window(window) -> bool:
             return True
 
         hwnd = window.handle
+        _foreground_window_evidence(hwnd, "before_activate_excel")
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
         foreground = user32.GetForegroundWindow()
@@ -1171,8 +1996,11 @@ def _activate_excel_window(window) -> bool:
             for thread_id in reversed(attached):
                 user32.AttachThreadInput(current_thread, thread_id, False)
         time.sleep(0.25)
-        return win32gui.GetForegroundWindow() == hwnd
-    except Exception:
+        foreground_ok = win32gui.GetForegroundWindow() == hwnd
+        _foreground_window_evidence(hwnd, "after_activate_excel")
+        return foreground_ok
+    except Exception as exc:
+        _LOGGER.warning("Could not activate Excel window for input: %s", exc)
         return False
 
 
@@ -1243,15 +2071,54 @@ def _window_by_handle(handle: int | None):
     return None
 
 
-def ensure_single_agent_excel(existing_window=None) -> dict:
-    """ENFORCE EXACTLY ONE EXCEL INSTANCE for the agent.
+def _window_process_id(window) -> int | None:
+    """Read a UIA window's PID without letting a transient UIA error escape."""
+    try:
+        process_id = getattr(window.element_info, "process_id", None)
+        if process_id is None:
+            process_id = window.process_id()
+        return int(process_id) if process_id is not None else None
+    except Exception:
+        return None
 
-    - If the agent already has a bound window (by handle), close ALL other Excel windows.
-    - If no agent window yet, but an Excel is open, bind to it and close others.
-    - If multiple Excels exist, keep the most recently used (likely agent's) and close the rest.
-    - Returns the agent's window handle and status.
-    
-    Pass existing_window to avoid recursive _get_agent_excel_window calls.
+
+def _find_excel_window_for_pid(process_id: int | None):
+    """Find a visible Excel top-level window in one known process only."""
+    if not _HAS_PYWINAUTO or process_id is None:
+        return None
+    candidates = []
+    for window in Desktop(backend="uia").windows():
+        try:
+            title = window.window_text()
+            class_name = window.element_info.class_name or ""
+            if not ("excel" in title.lower() or class_name.upper() == "XLMAIN"):
+                continue
+            if window.is_visible() and _window_process_id(window) == process_id:
+                candidates.append(window)
+        except Exception:
+            continue
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda window: (
+            " - excel" in (window.window_text() or "").lower(),
+            (window.rectangle().right - window.rectangle().left)
+            * (window.rectangle().bottom - window.rectangle().top),
+        ),
+    )
+
+
+def ensure_single_agent_excel(existing_window=None) -> dict:
+    """Resolve the one Excel window this task is allowed to control.
+
+    Excel users frequently have several workbooks open.  Earlier versions of
+    this function closed every other Excel window, which could discard work in
+    an unrelated workbook.  The visual agent must *bind* to one target window,
+    never close or otherwise alter another window merely to simplify routing.
+
+    Pass ``existing_window`` to avoid recursive ``_get_agent_excel_window``
+    calls.
     """
     if not _HAS_PYWINAUTO:
         return {"status": "skipped", "reason": "pywinauto unavailable"}
@@ -1260,7 +2127,7 @@ def ensure_single_agent_excel(existing_window=None) -> dict:
     agent_window = existing_window
     if agent_window is None:
         # Direct window finding logic (same as _get_agent_excel_window but no enforce call)
-        global _agent_excel_handle, _use_existing_workbook, _bound_excel_pid, _bound_workbook_name
+        global _agent_excel_handle, _agent_excel_pid, _use_existing_workbook, _bound_excel_pid, _bound_workbook_name
         if _use_existing_workbook:
             agent_window = _find_excel_window()
             if agent_window is None:
@@ -1269,31 +2136,27 @@ def ensure_single_agent_excel(existing_window=None) -> dict:
                 return {"status": "error", "error": "No existing workbook open"}
         else:
             agent_window = _window_by_handle(_agent_excel_handle)
+            if agent_window is None and _agent_excel_pid is not None:
+                agent_window = _find_excel_window_for_pid(_agent_excel_pid)
+                if agent_window is not None:
+                    _agent_excel_handle = agent_window.handle
             if agent_window is None:
-                if _HAS_PYWINAUTO:
-                    for candidate in Desktop(backend="uia").windows():
-                        try:
-                            title = candidate.window_text()
-                            class_name = candidate.element_info.class_name or ""
-                            if ("excel" in title.lower() or class_name.upper() == "XLMAIN") and candidate.is_visible():
-                                if re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
-                                    _agent_excel_handle = candidate.handle
-                                    _maximize_excel_window(candidate)
-                                    agent_window = candidate
-                                    break
-                        except Exception:
-                            continue
-                if agent_window is None:
-                    return {"status": "error", "error": "No Excel window found"}
+                if _agent_excel_pid is not None:
+                    return {
+                        "status": "error",
+                        "error": "The Xelora-owned Excel window is no longer visible; refusing to launch another workbook automatically.",
+                    }
+                return {"status": "error", "error": "No Xelora-owned Excel window found"}
     
     if agent_window is None:
         return {"status": "no_window", "error": "No Excel window found for agent"}
     
     agent_handle = agent_window.handle
     agent_pid = getattr(agent_window.element_info, "process_id", None)
-    closed = []
-    
-    # Find ALL Excel windows and close any that aren't the agent's
+    other_windows = []
+
+    # Record other visible Excel windows for diagnostics, but never close
+    # them.  The bound handle below is the safety boundary for every action.
     for window in Desktop(backend="uia").windows():
         try:
             title = window.window_text() or ""
@@ -1305,18 +2168,7 @@ def ensure_single_agent_excel(existing_window=None) -> dict:
             pid = getattr(window.element_info, "process_id", None)
             if window.handle == agent_handle:
                 continue
-            # Close this extra Excel window
-            try:
-                window.close()
-                time.sleep(0.5)
-                closed.append({"title": title, "pid": pid, "handle": window.handle})
-            except Exception:
-                try:
-                    win32gui.PostMessage(window.handle, win32con.WM_CLOSE, 0, 0)
-                    time.sleep(0.3)
-                    closed.append({"title": title, "pid": pid, "handle": window.handle})
-                except Exception:
-                    pass
+            other_windows.append({"title": title, "pid": pid, "handle": window.handle})
         except Exception:
             continue
     
@@ -1329,8 +2181,8 @@ def ensure_single_agent_excel(existing_window=None) -> dict:
         "status": "enforced",
         "agent_handle": agent_handle,
         "agent_pid": agent_pid,
-        "closed_count": len(closed),
-        "closed": closed,
+        "other_excel_window_count": len(other_windows),
+        "other_excel_windows": other_windows,
     }
 
 
@@ -1339,7 +2191,7 @@ def verify_agent_context() -> dict:
 
     Checks:
     1. Agent's Excel window is foreground and responsive
-    2. No blocking dialogs
+    2. Any popup is classified without blindly accepting it
     3. Active workbook matches expectation (if bound)
     4. Active sheet is known
     
@@ -1361,7 +2213,8 @@ def verify_agent_context() -> dict:
     _activate_excel_window(window)
     time.sleep(0.2)
     
-    # 3. Handle ALL dialogs smartly
+    # 3. Recover only from safe, classified stale dialogs.  A workflow dialog
+    # remains visible for the action loop to handle deliberately.
     dialog_result = handle_all_dialogs_smart(window.handle)
     
     # 3. Verify workbook if bound
@@ -1375,15 +2228,17 @@ def verify_agent_context() -> dict:
             workbook_ok = False
     
     # 4. Get active sheet
-    active_sheet = get_active_sheet_name()
+    active_sheet = _get_active_sheet_name_value()
     
     return {
-        "verified": True,
+        "verified": dialog_result.get("status") in {"clean", "handled"},
         "window_handle": window.handle,
         "window_title": window.window_text(),
         "workbook_ok": workbook_ok,
         "active_sheet": active_sheet,
+        "popup_status": dialog_result.get("status"),
         "dialogs_handled": dialog_result.get("handled", []),
+        "popups": dialog_result.get("popups", []),
         "enforce": enforce_result,
     }
     """Launch desktop Excel and wait for its initial blank workbook window.
@@ -1436,13 +2291,6 @@ def verify_agent_context() -> dict:
                     break
             except OSError:
                 continue
-    existing_handles = set()
-    if _HAS_PYWINAUTO:
-        for existing_window in Desktop(backend="uia").windows():
-            try:
-                existing_handles.add(existing_window.handle)
-            except Exception:
-                continue
     try:
         subprocess.Popen([excel_command, "/x"])
     except OSError as exc:
@@ -1475,36 +2323,18 @@ def verify_agent_context() -> dict:
 
 def _start_on_fresh_blank_workbook(window):
     """Dismiss Excel's Backstage start screen and ensure a blank workbook is open.
-    
-    Uses multiple modalities in order of reliability:
-    1. xlwings COM (with timeout) - creates workbook programmatically, bypasses Backstage
-    2. UIA click on "Blank workbook" template - direct visual interaction
-    3. Keyboard: Escape to exit Backstage, then Ctrl+N
+
+    This method acts only on the Excel window already owned by the task.  It
+    must never use ``xw.App()`` here: that would create a second, unbound Excel
+    process and could make the actual task window disappear when its COM
+    worker exits.
     """
     title = " ".join(window.window_text().split())
     # Already have a workbook?
     if re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
         return
     
-    # 1. xlwings COM with timeout - most reliable, bypasses Backstage entirely
-    try:
-        import xlwings as xw
-        import concurrent.futures
-        def com_create():
-            app = xw.App(visible=True)
-            wb = app.books.add()
-            return wb
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(com_create)
-            future.result(timeout=10)  # 10s timeout
-        time.sleep(1.5)
-        title = " ".join(window.window_text().split())
-        if re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
-            return
-    except Exception:
-        pass
-    
-    # 2. UIA: click "Blank workbook" on the start screen - works on Backstage UI
+    # 1. UIA: click "Blank workbook" on the start screen - works on Backstage UI
     if _HAS_PYWINAUTO:
         try:
             # The start screen has a list of templates; "Blank workbook" is usually first
@@ -1522,7 +2352,7 @@ def _start_on_fresh_blank_workbook(window):
         except Exception:
             pass
     
-    # 3. Keyboard fallback: Escape to exit Backstage, then Ctrl+N
+    # 2. Keyboard fallback: Escape to exit Backstage, then Ctrl+N
     try:
         _activate_excel_window(window)
         pyautogui.press("escape")
@@ -1549,41 +2379,39 @@ def _start_on_fresh_blank_workbook(window):
 def _open_blank_excel_window():
     """Launch desktop Excel and wait for its initial blank workbook window.
 
-    Strategy: Use xlwings COM to launch Excel with a new blank workbook.
-    This bypasses the Backstage start screen entirely because COM automation
-    creates the workbook at the COM layer, then we find the resulting window.
+    A visual task owns exactly one Excel process.  We retain its PID and only
+    ever rediscover a window from that process.  This avoids the old failure
+    mode where a transient UIA lookup failure created another blank workbook
+    on every subsequent action.  Do not create this app through a temporary
+    COM worker: Excel can auto-exit when that worker releases its final COM
+    reference, leaving a task with a vanished bound window.
     """
-    global _agent_excel_handle
-    # Try xlwings COM approach first (most reliable) - with timeout
-    try:
-        import xlwings as xw
-        import concurrent.futures
-        def com_create():
-            app = xw.App(visible=True)
-            wb = app.books.add()
-            return wb
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(com_create)
-            future.result(timeout=15)  # 15s timeout
-        time.sleep(2.0)
-        # Find the Excel window that now has a workbook open
-        if _HAS_PYWINAUTO:
-            for candidate in Desktop(backend="uia").windows():
-                try:
-                    title = candidate.window_text()
-                    class_name = candidate.element_info.class_name or ""
-                    if ("excel" in title.lower() or class_name.upper() == "XLMAIN") and candidate.is_visible():
-                        if re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
-                            _agent_excel_handle = candidate.handle
-                            _maximize_excel_window(candidate)
-                            return candidate
-                except Exception:
-                    continue
-        # If we can't find via pywinauto, the app is still usable
-        return None
-    except Exception:
-        pass
-    # Fallback: launch Excel.exe directly
+    global _agent_excel_handle, _agent_excel_pid
+
+    existing = _window_by_handle(_agent_excel_handle)
+    if existing is not None:
+        _require_microsoft_excel(existing)
+        return existing
+    if _agent_excel_pid is not None:
+        existing = _find_excel_window_for_pid(_agent_excel_pid)
+        if existing is not None:
+            _agent_excel_handle = existing.handle
+            _maximize_excel_window(existing)
+            _require_microsoft_excel(existing)
+            return existing
+        raise RuntimeError(
+            "Xelora's Excel process is no longer visible. It will not open another blank workbook automatically. "
+            "Start a new task after closing the stale Excel window."
+        )
+
+    if not _HAS_PYWINAUTO:
+        raise RuntimeError(
+            "Windows UI Automation (pywinauto) is required to bind the Excel window. "
+            "Xelora refused to launch an untracked workbook."
+        )
+
+    # Launch Excel.exe directly with /x so this task owns a stable, separate
+    # process.  Its lifetime is then independent of Python COM worker threads.
     excel_command = "excel.exe"
     if winreg is not None:
         registry_paths = (
@@ -1605,7 +2433,8 @@ def _open_blank_excel_window():
             except Exception:
                 continue
     try:
-        subprocess.Popen([excel_command, "/x"])
+        process = subprocess.Popen([excel_command, "/x"])
+        _agent_excel_pid = process.pid
     except OSError as exc:
         raise RuntimeError(
             "Excel could not be launched. Confirm that desktop Microsoft Excel is installed."
@@ -1614,34 +2443,20 @@ def _open_blank_excel_window():
     deadline = time.monotonic() + _EXCEL_START_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         window = None
-        if _HAS_PYWINAUTO:
-            for candidate in Desktop(backend="uia").windows():
-                try:
-                    if candidate.handle not in existing_handles and candidate.is_visible():
-                        title = candidate.window_text()
-                        class_name = candidate.element_info.class_name or ""
-                        if "excel" in title.lower() or class_name.upper() == "XLMAIN":
-                            window = candidate
-                            break
-                except Exception:
-                    continue
+        window = _find_excel_window_for_pid(_agent_excel_pid)
         if window is not None:
             _agent_excel_handle = window.handle
             _start_on_fresh_blank_workbook(window)
             _maximize_excel_window(window)
+            _require_microsoft_excel(window)
             return window
         time.sleep(0.25)
     raise RuntimeError("Excel did not open within 15 seconds.")
 
 
 def _get_agent_excel_window():
-    """Return the Excel window for this agent session.
-    
-    ENFORCES SINGLE EXCEL INSTANCE:
-    - If agent already has a window, verifies it and closes any other Excel windows
-    - If no agent window yet, binds to existing or creates new, then enforces single instance
-    """
-    global _agent_excel_handle
+    """Return the Excel window bound to this task, without adopting others."""
+    global _agent_excel_handle, _agent_excel_pid
     
     # FIRST: Enforce single Excel instance (closes any extra Excel windows)
     enforce_result = ensure_single_agent_excel()
@@ -1649,6 +2464,7 @@ def _get_agent_excel_window():
         # The enforce function already returned the correct agent window
         window = _window_by_handle(enforce_result["agent_handle"])
         if window:
+            _require_microsoft_excel(window)
             return window
     
     # Fallback to original logic if enforcement didn't return a window
@@ -1662,34 +2478,40 @@ def _get_agent_excel_window():
                 )
             raise RuntimeError("The request asked to use an existing workbook, but no visible Excel workbook is open.")
         _maximize_excel_window(window)
+        _require_microsoft_excel(window)
         return window
     window = _window_by_handle(_agent_excel_handle)
     if window is not None:
         _maximize_excel_window(window)
+        _require_microsoft_excel(window)
         return window
     # Handle is stale — try to find any visible Excel window before spawning a new one
-    if _HAS_PYWINAUTO:
-        for candidate in Desktop(backend="uia").windows():
-            try:
-                title = candidate.window_text()
-                class_name = candidate.element_info.class_name or ""
-                if ("excel" in title.lower() or class_name.upper() == "XLMAIN") and candidate.is_visible():
-                    if re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
-                        _agent_excel_handle = candidate.handle
-                        _maximize_excel_window(candidate)
-                        return candidate
-            except Exception:
-                continue
+    if _agent_excel_pid is not None:
+        window = _find_excel_window_for_pid(_agent_excel_pid)
+        if window is not None:
+            _agent_excel_handle = window.handle
+            _maximize_excel_window(window)
+            _require_microsoft_excel(window)
+            return window
+        raise RuntimeError(
+            "The Xelora-owned Excel window is no longer visible. Refusing to create an additional blank workbook."
+        )
     return _open_blank_excel_window()
 
 
 def set_workbook_mode(use_existing: bool) -> None:
     """Choose between the user's open workbook and the agent-owned blank one."""
-    global _use_existing_workbook, _bound_excel_pid, _bound_workbook_name
+    global _agent_excel_handle, _agent_excel_pid, _use_existing_workbook, _bound_excel_pid, _bound_workbook_name
     _use_existing_workbook = use_existing
     if not use_existing:
         _bound_excel_pid = None
         _bound_workbook_name = None
+        # A new task may follow a task whose Excel process was closed.  Clear
+        # only a confirmed dead PID here, before any new workbook is launched;
+        # a running but temporarily hidden window remains protected.
+        if _agent_excel_pid is not None and not _is_process_running(_agent_excel_pid):
+            _agent_excel_handle = None
+            _agent_excel_pid = None
 
 
 def bind_existing_excel_workbook(process_id: int | None, workbook_name: str | None = None) -> None:
@@ -1709,19 +2531,38 @@ def bind_existing_excel_workbook(process_id: int | None, workbook_name: str | No
 def prepare_agent_workbook() -> dict:
     """Open and prepare Xelora's blank workbook before task planning."""
     window = _get_agent_excel_window()
+    application = _require_microsoft_excel(window)
     if not _use_existing_workbook:
         _ensure_agent_workbook(window)
-        # A prior interrupted task may have left a temporary dialog open.
-        # Target Excel directly instead of requiring the user to click it.
-        try:
-            window.type_keys("{ESC}", set_foreground=False)
-        except Exception:
-            pass
+    # Never send Escape here.  A task can resume while Save As, Insert Table,
+    # or another deliberate workflow dialog is open; blindly pressing Escape
+    # silently cancels the user's requested operation.
+    dialog_state = handle_all_dialogs_smart(window.handle)
+    if dialog_state.get("status") in {"popup_requires_workflow", "popup_requires_attention"}:
+        raise RuntimeError(
+            "Excel has a pending workflow dialog. Resolve it through the matching visual tool before starting a new task."
+        )
     return {
         "window_title": window.window_text(),
+        "application": application,
         "mode": "existing_workbook" if _use_existing_workbook else "agent_blank_workbook",
+        "dialog_state": dialog_state.get("status", "clean"),
         "verified": True,
     }
+
+
+def _capture_bound_excel_window(window):
+    """Capture Excel by HWND so another app cannot appear in OmniParser input."""
+    if _HAS_HWND_IMAGE_CAPTURE:
+        try:
+            image = ImageGrab.grab(window=window.handle)
+            if image is not None and image.width > 1 and image.height > 1:
+                return image, "hwnd"
+        except Exception:
+            pass
+    # Compatibility fallback for older Pillow/Windows builds. The caller still
+    # records this fact, so a visual result never pretends the capture was pure.
+    return window.capture_as_image(), "uia_fallback"
 
 
 def _capture_excel_window():
@@ -1730,8 +2571,9 @@ def _capture_excel_window():
     OmniParser returns coordinates relative to this image.  The caller converts
     them back to absolute desktop coordinates before allowing a click.
     
-    Before capturing, ensures single Excel instance and clears ALL dialogs smartly.
-    After capturing, verifies the image doesn't still show a dialog.
+    Before capturing, ensures the task-bound Excel window is foreground. The
+    capture uses its HWND rather than the desktop rectangle so Xelora's own UI
+    or another application cannot be passed to OmniParser as if it were Excel.
     """
     window = _get_agent_excel_window()
     if window is None:
@@ -1742,28 +2584,14 @@ def _capture_excel_window():
     foreground_verified = _activate_excel_window(window)
     time.sleep(0.15)
     rect = window.rectangle()
-    image = window.capture_as_image()
-    
-    if image is not None:
-        try:
-            from vision.local_omniparser import parse_screen
-            parsed = parse_screen(image)
-            if parsed and parsed.get("elements"):
-                element_texts = [e.get("text", "").lower() for e in parsed["elements"]]
-                dialog_check_words = {"cancel", "system32", "open", "save", "file name", "update values", "enable", "security", "macro", "protected", "readonly"}
-                if any(w in t for t in element_texts for w in dialog_check_words):
-                    verify_agent_context()  # Handles dialogs smartly
-                    time.sleep(0.5)
-                    # Recapture
-                    image = window.capture_as_image()
-        except Exception:
-            pass
+    image, capture_method = _capture_bound_excel_window(window)
     
     return image, (rect.left, rect.top), {
         "title": window.window_text(),
         "handle": window.handle,
         "rect": [rect.left, rect.top, rect.right, rect.bottom],
         "foreground_verified": foreground_verified,
+        "capture_method": capture_method,
     }
 
 
@@ -1851,8 +2679,11 @@ def _focus_excel_for_keyboard(expected_window_handle: int | None = None):
     if window is None:
         raise RuntimeError("The Excel window captured for this action is no longer available. Re-run screen parsing first.")
     try:
-        # Ensure single Excel and handle all dialogs smartly
-        verify_agent_context()
+        # Ensure one bound Excel window, then refuse to send raw worksheet
+        # input while a workflow dialog (Create Table, Save As, etc.) is open.
+        context = verify_agent_context()
+        if context.get("popup_status") in {"popup_requires_workflow", "popup_requires_attention"}:
+            _require_no_open_popup(window.handle)
         # Also verify we're on a worksheet, not the start screen
         title = " ".join(window.window_text().split())
         if not re.search(r"\s-\sExcel\s*$", title, flags=re.IGNORECASE):
@@ -1880,18 +2711,8 @@ def _ensure_agent_workbook(window) -> None:
     """Leave the Start/Recent screen before attempting ribbon operations."""
     if _use_existing_workbook or _agent_workbook_is_open(window):
         return
-    # Use xlwings COM automation (most reliable for Backstage screen)
-    try:
-        import xlwings as xw
-        app = xw.apps.active
-        if app is not None:
-            app.books.add()
-            time.sleep(1.0)
-            if _agent_workbook_is_open(window):
-                return
-    except Exception:
-        pass
-    # Fallback: try keyboard-based approach
+    # Use only the already-bound window; ``xw.apps.active`` can refer to a
+    # user's unrelated Excel instance when more than one is open.
     try:
         _activate_excel_window(window)
         pyautogui.hotkey("ctrl", "n")
@@ -1943,6 +2764,54 @@ def take_screenshot() -> dict:
     return {"screen_size": list(img.size), "verified": True, "capture_method": "fullscreen_fallback"}
 
 
+def get_visual_excel_context() -> dict:
+    """Read non-invasive Excel identity evidence for visual-only mode.
+
+    The visual driver must not pretend that OCR alone can prove formula
+    compatibility.  This collects the live window title and the Windows
+    Office installation version when available, while keeping formula
+    capabilities conservative until a visible formula can be verified.
+    """
+    _require_display()
+    window = _get_agent_excel_window()
+    if not window:
+        raise RuntimeError("Excel window not found")
+    version = None
+    product_ids = None
+    if winreg is not None:
+        registry_locations = (
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Office\ClickToRun\Configuration"),
+            (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Office\ClickToRun\Configuration"),
+        )
+        for hive, path in registry_locations:
+            try:
+                with winreg.OpenKey(hive, path) as key:
+                    version = winreg.QueryValueEx(key, "VersionToReport")[0]
+                    try:
+                        product_ids = winreg.QueryValueEx(key, "ProductReleaseIds")[0]
+                    except OSError:
+                        product_ids = None
+                    break
+            except OSError:
+                continue
+    title = " ".join((window.window_text() or "Microsoft Excel").split())
+    return {
+        "verified": True,
+        "label": "visual Excel session",
+        "window_title": title,
+        "office_version": version,
+        "office_product_ids": product_ids,
+        # Office 16.x covers both perpetual and Microsoft 365 editions, so
+        # do not infer XLOOKUP/dynamic-array support from a registry number.
+        "supports_dynamic_arrays": False,
+        "detection_method": "visible_window_and_windows_registry",
+        "verification_note": (
+            "Excel window identity was read without workbook APIs. Dynamic-array support remains "
+            "conservative until a visible formula is verified in this workbook."
+        ),
+    }
+
+
 def screenshot_active_window(output_path: str) -> dict:
     """Capture only the verified Excel window for the legacy visual skill.
 
@@ -1972,6 +2841,7 @@ def click_at(x: int, y: int, double: bool = False, expected_window_handle: int |
     # Use window safety module if available
     if _HAS_WINDOW_SAFETY:
         try:
+            _foreground_window_evidence(expected_window_handle, "before_safe_click")
             return safe_click(x, y, expected_window_handle, double)
         except WindowSafetyError as e:
             # Fall back to old method with warning
@@ -1979,12 +2849,24 @@ def click_at(x: int, y: int, double: bool = False, expected_window_handle: int |
     
     # Legacy method with focus check
     _focus_excel_for_keyboard(expected_window_handle)
+    target_handle = expected_window_handle
+    if target_handle is None:
+        window = _get_agent_excel_window()
+        target_handle = window.handle if window is not None else None
+    before_click = _foreground_window_evidence(target_handle, "before_coordinate_click")
     if double:
         pyautogui.doubleClick(x, y)
     else:
         pyautogui.click(x, y)
+    after_click = _foreground_window_evidence(target_handle, "after_coordinate_click")
     time.sleep(0.2)
-    return {"clicked_at": [x, y], "double": double, "verified": True}
+    return {
+        "clicked_at": [x, y],
+        "double": double,
+        "foreground_before": before_click,
+        "foreground_after": after_click,
+        "verified": True,
+    }
 
 
 def parse_screen(zone: str = "window", use_cache: bool = True) -> dict:
@@ -1999,34 +2881,6 @@ def parse_screen(zone: str = "window", use_cache: bool = True) -> dict:
     if zone not in {"ribbon", "popup", "window"}:
         raise ValueError("zone must be one of: ribbon, popup, window.")
     
-    # Try to use cache if enabled
-    if use_cache:
-        # Take a quick screenshot to check cache
-        img = pyautogui.screenshot()
-        import io
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        image_bytes = buf.getvalue()
-        
-        cached_data = load_from_cache(image_bytes, zone)
-        if cached_data:
-            # Cache hit - use cached elements
-            _last_elements = cached_data.get("elements", [])
-            _last_parse_at = time.monotonic()
-            # Try to find Excel window handle
-            window = _get_agent_excel_window()
-            if window:
-                _last_parse_window_handle = window.handle
-            return {
-                **cached_data,
-                "verified": True,
-                "capture_target": "excel_window",
-                "from_cache": True,
-                "cache_zone": zone,
-            }
-    
-    # Always clear cache before a fresh parse to avoid stale results
-    _clear_parse_cache_safe()
     capture = _capture_excel_window()
     if capture is None:
         raise RuntimeError(
@@ -2040,19 +2894,71 @@ def parse_screen(zone: str = "window", use_cache: bool = True) -> dict:
         image = image.crop((0, 0, image.width, crop_bottom))
         window_info["zone"] = "ribbon"
     elif zone == "popup":
-        left = round(image.width * 0.2)
-        top = round(image.height * 0.2)
-        right = round(image.width * 0.8)
-        bottom = round(image.height * 0.8)
+        # A real popup rectangle is both faster to parse and more reliable
+        # than guessing that every dialog sits in the middle 60% of Excel.
+        popup_rect = None
+        if _HAS_WIN32GUI:
+            popups = _enum_excel_popups(window_info.get("handle"))
+            if len(popups) == 1:
+                try:
+                    popup_rect = win32gui.GetWindowRect(popups[0])
+                    window_info["popup_handle"] = popups[0]
+                    window_info["popup_title"] = win32gui.GetWindowText(popups[0]) or ""
+                except Exception:
+                    popup_rect = None
+        if popup_rect:
+            left = max(0, popup_rect[0] - offset_x)
+            top = max(0, popup_rect[1] - offset_y)
+            right = min(image.width, popup_rect[2] - offset_x)
+            bottom = min(image.height, popup_rect[3] - offset_y)
+            if right <= left or bottom <= top:
+                popup_rect = None
+        if not popup_rect:
+            left = round(image.width * 0.2)
+            top = round(image.height * 0.2)
+            right = round(image.width * 0.8)
+            bottom = round(image.height * 0.8)
         image = image.crop((left, top, right, bottom))
         offset_x += left
         offset_y += top
         window_info["zone"] = "popup"
     else:
         window_info["zone"] = "window"
+
+    # Cache the exact same cropped Excel image that will be parsed.  The old
+    # implementation looked up a full-desktop image but saved an Excel-window
+    # image, which made cache hits virtually impossible.
+    import io
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    image_bytes = buffer.getvalue()
+    if use_cache:
+        cached_data = load_from_cache(image_bytes, zone)
+        if cached_data:
+            _last_elements = cached_data.get("elements", [])
+            _last_parse_at = time.monotonic()
+            cached_window = cached_data.get("window") or window_info
+            _last_parse_window_handle = cached_window.get("handle")
+            return {
+                **cached_data,
+                "verified": True,
+                "capture_target": "excel_window",
+                "window": cached_window,
+                "from_cache": True,
+                "cache_zone": zone,
+            }
+
+    # A fresh parser request is only made after the fast local image check did
+    # not find a matching visible Excel state.
+    _clear_parse_cache_safe()
     
     try:
-        parsed = parse_image(image)
+        # A popup is a small, transient blocker. One cropped recognition pass
+        # is enough to decide whether its controls are readable; retrying a
+        # failing parser here made a nominal 8-second timeout last roughly
+        # 30 seconds. Ribbon/window parsing can still use the normal retry
+        # policy because those surfaces are not blocking workbook input.
+        parsed = parse_image(image, retries=1 if zone == "popup" else 3)
     except Exception as exc:
         # Catching OmniParser: never let a parser failure crash the task loop.
         # Return a structured, non-fatal error so the agent can fall back to UIA/shortcuts.
@@ -2066,22 +2972,19 @@ def parse_screen(zone: str = "window", use_cache: bool = True) -> dict:
             "zone": window_info.get("zone", "window"),
         }
     
-    # Filter out dialog elements - only keep Excel worksheet elements
-    _filter_dialog_elements(parsed["elements"], window_info)
+    # A popup parse must keep its buttons and message text.  For Ribbon and
+    # worksheet parses, remove stale file-dialog controls that are outside the
+    # requested task surface.
+    _filter_dialog_elements(parsed["elements"], window_info, zone)
     
     for element in parsed["elements"]:
         x1, y1, x2, y2 = element["bbox"]
         element["bbox"] = [x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y]
         element["center"] = [element["center"][0] + offset_x, element["center"][1] + offset_y]
     
-    # Save to cache
-    import io
-    buf = io.BytesIO()
-    # Re-capture for caching (original image before cropping)
-    original_img = _capture_excel_window()
-    if original_img:
-        original_img[0].save(buf, format="PNG")
-        save_to_cache(buf.getvalue(), parsed, zone)
+    parsed["window"] = window_info
+    parsed["zone"] = zone
+    save_to_cache(image_bytes, parsed, zone)
     
     _last_elements = parsed["elements"]
     _last_parse_at = time.monotonic()
@@ -2095,7 +2998,7 @@ def parse_screen(zone: str = "window", use_cache: bool = True) -> dict:
     }
 
 
-def _filter_dialog_elements(elements: list, window_info: dict):
+def _filter_dialog_elements(elements: list, window_info: dict, zone: str):
     """Filter out elements that are from dialogs, not the Excel worksheet.
     
     Dialogs like Save As, Open, Print have specific UI elements:
@@ -2106,6 +3009,9 @@ def _filter_dialog_elements(elements: list, window_info: dict):
     These should be removed from the element list to prevent the agent
     from clicking on dialog buttons instead of Excel cells.
     """
+    if zone == "popup":
+        return
+
     dialog_indicators = {
         "File name", "Save as type", "Browse", "Cancel", "Open", "Save",
         "Organize", "New folder", "This PC", "Desktop", "Documents",
@@ -2308,9 +3214,15 @@ def click_element_by_name(name: str, control_type: str = None, double: bool = Fa
     try:
         parsed = parse_screen(zone="ribbon")
         
-        # Search for the element in parsed results
+        # ``omniparser_client`` normalizes OCR/caption output into
+        # ``description``.  Accept the common aliases as well so an otherwise
+        # valid parser result is not discarded merely because the server uses
+        # a different field name.
         for element in parsed.get("elements", []):
-            element_text = element.get("text", "").lower()
+            element_text = " ".join(
+                str(element.get(field, ""))
+                for field in ("description", "text", "label", "name")
+            ).lower()
             if name.lower() in element_text:
                 # Found it - click it
                 x, y = element["center"]
@@ -2408,8 +3320,812 @@ def double_click(x: int, y: int) -> dict:
         _last_parse_window_handle = None
 
 
+def hover_and_read_tooltip(x: int, y: int, wait_seconds: float = 0.7) -> dict:
+    """Hover a recently parsed control and read its Excel tooltip.
+
+    This is the safe fallback for an icon-only Ribbon command when Florence
+    captions are disabled.  It never clicks the icon; it requires coordinates
+    from the newest parser result, waits briefly for Excel's native tooltip,
+    then parses only the Ribbon area again.
+    """
+    _require_display()
+    element = _validated_target(x, y)
+    _focus_excel_for_keyboard(expected_window_handle=_last_parse_window_handle)
+    pyautogui.moveTo(x, y, duration=0.1)
+    time.sleep(max(0.3, min(float(wait_seconds), 2.0)))
+    tooltip_screen = parse_screen(zone="ribbon", use_cache=False)
+    return {
+        "hovered_element": element,
+        "tooltip_screen": tooltip_screen,
+        "verified": tooltip_screen.get("verified") is True,
+        "verification_note": (
+            "Hovered without clicking and parsed the Ribbon for Excel's tooltip. "
+            "Use a labelled tooltip result before choosing a click."
+        ),
+    }
+
+
+def inspect_popup() -> dict:
+    """Inspect a visible Excel dialog without accepting, cancelling, or clicking it."""
+    _require_display()
+    window = _get_agent_excel_window()
+    if not window:
+        raise RuntimeError("Excel window not found")
+    native = inspect_excel_popups(window.handle)
+    popups = _read_excel_popups(window.handle)
+    if len(popups) != 1 or not _popup_needs_visual_inspection(popups[0]):
+        return native
+
+    # Native UI Automation is fast and preferred. OmniParser is the narrow,
+    # one-attempt fallback when that native evidence cannot identify an
+    # unfamiliar dialog. It observes only the popup crop and never clicks.
+    visual = parse_screen(zone="popup", use_cache=False)
+    popup = _public_popup(popups[0])
+    popup["visual_inspection"] = {
+        "attempted": True,
+        "verified": visual.get("verified") is True,
+        "elements": visual.get("elements", []),
+        "error": visual.get("error"),
+    }
+    return {
+        "status": "popup_detected",
+        "popups": [popup],
+        "verified": True,
+        "inspection_source": "native_plus_omniparser_popup_crop",
+    }
+
+
+def click_popup_button(button_label: str) -> dict:
+    """Click one exact, inspected Excel-popup button under a safety policy.
+
+    Security and overwrite confirmations can only be cancelled from this
+    method.  A normal workflow dialog (for example Insert Table or Save As)
+    may use one of its visible, exact labels after the agent has inspected it.
+    """
+    _require_display()
+    requested = " ".join(str(button_label).split())
+    if not requested:
+        raise ValueError("button_label must be a visible popup button label.")
+    window = _get_agent_excel_window()
+    if not window:
+        raise RuntimeError("Excel window not found")
+    popups = _read_excel_popups(window.handle)
+    if len(popups) != 1:
+        raise RuntimeError(
+            "Exactly one Excel popup must be visible before choosing a button; "
+            f"found {len(popups)}. Use inspect_popup first."
+        )
+    popup = popups[0]
+    kind = _popup_kind(popup)
+    requested_normalized = _normalise_excel_button_label(requested)
+    if kind in {"security_or_protection", "unsafe_confirmation"} and requested_normalized not in {
+        "cancel", "no", "close", "don't save", "dont save", "don't update", "dont update",
+    }:
+        return {
+            "verified": False,
+            "status": "popup_action_blocked",
+            "popup": {key: value for key, value in popup.items() if key not in {"_buttons", "_edit_values", "normalized"}},
+            "error": "Xelora will not accept a security, protection, overwrite, or link-update popup automatically.",
+        }
+    if kind == "recoverable_error" and requested_normalized not in {"ok", "cancel", "close"}:
+        return {
+            "verified": False,
+            "status": "popup_action_blocked",
+            "popup": {key: value for key, value in popup.items() if key not in {"_buttons", "_edit_values", "normalized"}},
+            "error": "A formula/error popup may only be dismissed with its visible OK, Cancel, or Close button.",
+        }
+    if kind == "unknown" and requested_normalized not in {"cancel", "close", "no"}:
+        return {
+            "verified": False,
+            "status": "popup_action_blocked",
+            "popup": {key: value for key, value in popup.items() if key not in {"_buttons", "_edit_values", "normalized"}},
+            "error": "Unknown popup actions are limited to Cancel, Close, or No; inspect and use an alternate Excel route.",
+        }
+    clicked = _click_popup_button(popup, (requested,))
+    if not clicked:
+        return {
+            "verified": False,
+            "status": "popup_button_not_found",
+            "popup": {key: value for key, value in popup.items() if key not in {"_buttons", "_edit_values", "normalized"}},
+            "error": f"The visible popup has no exact '{requested}' button.",
+        }
+    # A UIA/Win32 click call only means Windows accepted an input request; it
+    # is not proof that Excel acted on it.  Reread the popup set before
+    # reporting success.  This specifically prevents a stuck Create Table
+    # dialog from being logged as 'OK clicked' while it still blocks all later
+    # worksheet input.
+    time.sleep(0.35)
+    remaining = _read_excel_popups(window.handle)
+    if any(_same_excel_popup(popup, candidate) for candidate in remaining):
+        return {
+            "verified": False,
+            "status": "popup_click_not_confirmed",
+            "popup": {key: value for key, value in popup.items() if key not in {"_buttons", "_edit_values", "normalized"}},
+            "error": (
+                f"Excel still shows the '{popup.get('title', 'dialog')}' popup after Xelora clicked "
+                f"'{clicked}'. The dialog was left open and no worksheet input was sent."
+            ),
+        }
+    return {
+        "verified": True,
+        "popup_kind": kind,
+        "clicked_button": clicked,
+        "verification_note": f"Clicked the inspected '{clicked}' button in the classified Excel popup.",
+    }
+
+
+_POPUP_FINAL_DECISION_LABELS = {
+    "ok", "yes", "no", "cancel", "close", "save", "open", "dont save",
+    "don't save", "dont update", "don't update", "enable", "enable content",
+}
+
+
+def _single_visible_popup() -> tuple[object, dict] | tuple[None, None]:
+    """Return the bound Excel window and its sole visible popup, if unambiguous."""
+    window = _get_agent_excel_window()
+    if not window:
+        raise RuntimeError("Excel window not found")
+    popups = _read_excel_popups(window.handle)
+    if len(popups) != 1:
+        return None, None
+    return window, popups[0]
+
+
+def _popup_uia_descendants(popup: dict) -> list:
+    """Read controls inside one inspected dialog without scanning the workbook UI."""
+    root = popup.get("uia_control")
+    if root is None and _HAS_PYWINAUTO and popup.get("handle"):
+        try:
+            root = Desktop(backend="uia").window(handle=popup["handle"])
+        except Exception:
+            root = None
+    if root is None:
+        return []
+    try:
+        return list(root.descendants())
+    except Exception:
+        return []
+
+
+def _popup_control_label(control) -> str:
+    try:
+        return " ".join((control.window_text() or "").split())
+    except Exception:
+        return ""
+
+
+def click_popup_control(control_label: str) -> dict:
+    """Click a non-final, exact control inside an inspected Excel popup.
+
+    This is for configuring a workflow dialog such as New Formatting Rule.
+    Final decisions (OK, Save, Cancel, and similar) must still go through
+    ``click_popup_button`` so closure of the dialog is verified.
+    """
+    _require_display()
+    requested = " ".join(str(control_label or "").split())
+    if not requested:
+        raise ValueError("control_label must be the exact visible label in the popup.")
+    normalized_requested = _normalise_excel_button_label(requested)
+    if normalized_requested in _POPUP_FINAL_DECISION_LABELS:
+        return {
+            "verified": False,
+            "status": "popup_final_button_requires_confirmation",
+            "error": "Use click_popup_button for a final popup decision so Xelora can verify the dialog closed.",
+        }
+
+    window, popup = _single_visible_popup()
+    if popup is None:
+        return {
+            "verified": False,
+            "status": "popup_not_unambiguous",
+            "error": "Exactly one Excel popup must be visible before configuring a dialog control.",
+        }
+    if _popup_kind(popup) in {"security_or_protection", "unsafe_confirmation"}:
+        return {
+            "verified": False,
+            "status": "popup_control_blocked",
+            "popup": _public_popup(popup),
+            "error": "Security, protection, overwrite, and link-update popups cannot be configured. Use click_popup_button only to cancel or close them.",
+        }
+
+    for control in _popup_uia_descendants(popup):
+        try:
+            label = _popup_control_label(control)
+            control_type = str(control.element_info.control_type or "").lower()
+            if (
+                _normalise_excel_button_label(label) == normalized_requested
+                and control_type in {"button", "radiobutton", "listitem", "tabitem", "checkbox", "combobox"}
+            ):
+                control.click_input()
+                time.sleep(0.2)
+                return {
+                    "verified": True,
+                    "status": "popup_control_clicked",
+                    "popup_title": popup.get("title"),
+                    "clicked_control": label,
+                    "found_by": "uia",
+                    "verification_note": "Clicked the exact popup configuration control. Reinspect the popup before the next dialog step.",
+                }
+        except Exception:
+            continue
+
+    # Win32 exposes some Office radio choices as Button controls without a
+    # useful UIA tree. The exact inspected child button remains safe here;
+    # final buttons were rejected above.
+    clicked = _click_popup_button(popup, (requested,))
+    if clicked:
+        return {
+            "verified": True,
+            "status": "popup_control_clicked",
+            "popup_title": popup.get("title"),
+            "clicked_control": clicked,
+            "found_by": "native_button",
+            "verification_note": "Clicked the exact popup configuration control. Reinspect the popup before the next dialog step.",
+        }
+
+    # Native control discovery failed. Use one narrow OmniParser popup crop,
+    # never a full-sheet screenshot, then require an exact OCR label match.
+    visual = parse_screen(zone="popup", use_cache=False)
+    if visual.get("verified") is not True:
+        return {
+            "verified": False,
+            "status": "popup_control_not_found",
+            "popup": _public_popup(popup),
+            "error": visual.get("error", "OmniParser could not inspect the popup."),
+        }
+    for element in visual.get("elements", []):
+        label = " ".join(str(element.get("description", "")).split())
+        if _normalise_excel_button_label(label) != normalized_requested:
+            continue
+        x, y = element.get("center", (None, None))
+        if not isinstance(x, int) or not isinstance(y, int):
+            continue
+        click_result = click(x, y)
+        return {
+            **click_result,
+            "status": "popup_control_clicked",
+            "popup_title": popup.get("title"),
+            "clicked_control": label,
+            "found_by": "omniparser_popup_crop",
+            "verification_note": "Clicked the exact OCR-labelled popup control. Reinspect the popup before the next dialog step.",
+        }
+    return {
+        "verified": False,
+        "status": "popup_control_not_found",
+        "popup": _public_popup(popup),
+        "error": f"The inspected popup has no exact '{requested}' configuration control.",
+    }
+
+
+def set_popup_text(value: str, field_hint: str | None = None) -> dict:
+    """Set one unambiguous text field inside the sole visible Excel popup.
+
+    A dialog must expose exactly one suitable edit field, unless ``field_hint``
+    identifies one by its accessible name or automation id. This avoids
+    guessing which of several inputs (for example a range and a filename) the
+    model intended to overwrite.
+    """
+    _require_display()
+    text = str(value)
+    hint = " ".join(str(field_hint or "").split()).lower()
+    window, popup = _single_visible_popup()
+    if popup is None:
+        return {
+            "verified": False,
+            "status": "popup_not_unambiguous",
+            "error": "Exactly one Excel popup must be visible before entering popup text.",
+        }
+
+    candidates = []
+    for control in _popup_uia_descendants(popup):
+        try:
+            info = control.element_info
+            control_type = str(info.control_type or "").lower()
+            if control_type not in {"edit", "combobox"}:
+                continue
+            label = _popup_control_label(control)
+            automation_id = str(getattr(info, "automation_id", "") or "")
+            searchable = f"{label} {automation_id}".lower()
+            score = 10 if hint and hint in searchable else 0
+            if control_type == "edit":
+                score += 1
+            candidates.append((score, label, control))
+        except Exception:
+            continue
+
+    if candidates:
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        top_score, _, field = candidates[0]
+        tied = len(candidates) > 1 and candidates[1][0] == top_score
+        if hint and top_score < 10:
+            tied = True
+        if not tied:
+            try:
+                field.set_edit_text(text)
+            except Exception:
+                try:
+                    field.click_input()
+                    pyautogui.hotkey("ctrl", "a")
+                    pyautogui.write(text, interval=0.01)
+                except Exception:
+                    return {
+                        "verified": False,
+                        "status": "popup_text_not_entered",
+                        "popup": _public_popup(popup),
+                        "error": "The inspected popup field rejected text entry.",
+                    }
+            actual = _popup_control_label(field)
+            try:
+                actual = " ".join(str(field.iface_value.CurrentValue or actual).split())
+            except Exception:
+                pass
+            return {
+                "verified": actual == text,
+                "status": "popup_text_entered" if actual == text else "popup_text_not_confirmed",
+                "popup_title": popup.get("title"),
+                "field_hint": field_hint,
+                "verification_note": "Confirmed the inspected popup field contains the requested text."
+                if actual == text else "Excel did not expose the requested popup field value after entry.",
+            }
+
+    # Native Excel dialogs without UIA expose Edit children directly. Only
+    # write when there is one unambiguous native edit field.
+    native_edits = []
+    if _HAS_WIN32GUI and popup.get("handle"):
+        def collect_edit(hwnd, _):
+            try:
+                if (win32gui.GetClassName(hwnd) or "").lower() == "edit":
+                    native_edits.append(hwnd)
+            except Exception:
+                pass
+            return True
+        try:
+            win32gui.EnumChildWindows(popup["handle"], collect_edit, None)
+        except Exception:
+            native_edits = []
+    if len(native_edits) == 1:
+        try:
+            win32gui.SendMessage(native_edits[0], win32con.WM_SETTEXT, 0, text)
+            actual = " ".join((win32gui.GetWindowText(native_edits[0]) or "").split())
+            return {
+                "verified": actual == text,
+                "status": "popup_text_entered" if actual == text else "popup_text_not_confirmed",
+                "popup_title": popup.get("title"),
+                "field_hint": field_hint,
+                "verification_note": "Confirmed the native popup edit field contains the requested text."
+                if actual == text else "Excel did not expose the requested popup field value after entry.",
+            }
+        except Exception:
+            pass
+    return {
+        "verified": False,
+        "status": "popup_text_field_not_unambiguous",
+        "popup": _public_popup(popup),
+        "error": "The popup does not expose one unambiguous editable field. Inspect it and choose a labelled control first.",
+    }
+
+
+def _normalise_save_filename(file_name: str) -> str:
+    """Accept one safe filename for a Save As dialog, not an arbitrary path."""
+    name = " ".join(str(file_name or "").split())
+    if not name:
+        raise ValueError("file_name is required to save a new workbook.")
+    if any(separator in name for separator in ("\\", "/")):
+        raise ValueError("file_name must be a filename only, not a folder path.")
+    if any(character in name for character in '<>:"|?*') or name in {".", ".."}:
+        raise ValueError("file_name contains characters Windows cannot save.")
+    if not name.lower().endswith((".xlsx", ".xlsm", ".xlsb", ".xls")):
+        name += ".xlsx"
+    return name
+
+
+def _default_local_save_filename() -> str:
+    """Return a collision-resistant local filename for a new blank workbook."""
+    return f"Xelora_Workbook_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.xlsx"
+
+
+def _is_unnamed_excel_workbook(window) -> bool:
+    """Recognise Excel's unsaved Book1/Book2 title without confusing Book1.xlsx."""
+    try:
+        title = " ".join((window.window_text() or "").split())
+    except Exception:
+        return False
+    return bool(re.fullmatch(r"book\d+\s*-\s*excel", title, flags=re.IGNORECASE))
+
+
+def _find_save_as_popup(excel_hwnd: int) -> dict | None:
+    """Return the one visible Save As dialog owned by the bound Excel window."""
+    matches = [
+        popup for popup in _read_excel_popups(excel_hwnd)
+        if "save as" in popup.get("normalized", "")
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _is_excel_backstage_save_as(popup: dict | None) -> bool:
+    """Whether Excel is showing its Save As landing page rather than a file dialog."""
+    if not isinstance(popup, dict):
+        return False
+    buttons = {_normalise_excel_button_label(label) for label in popup.get("buttons", [])}
+    title = _normalise_excel_dialog_title(popup.get("title", ""))
+    return title == "save as" and "browse" in buttons and "save" not in buttons
+
+
+def _is_native_save_dialog(popup: dict | None) -> bool:
+    """Whether a Save As popup can accept a file name and exact Save click."""
+    if not isinstance(popup, dict):
+        return False
+    buttons = {_normalise_excel_button_label(label) for label in popup.get("buttons", [])}
+    return "save" in buttons and bool(popup.get("handle"))
+
+
+def _wait_for_save_as_popup(excel_hwnd: int, predicate, timeout_seconds: float = 6.0) -> dict | None:
+    """Wait only for a specific visible Save As stage; never continue blindly."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        # Backstage may remain in the UIA tree behind the native file dialog.
+        # Look for the requested stage among every inspected Save As surface
+        # instead of treating two visible layers as an ambiguous failure.
+        for popup in _read_excel_popups(excel_hwnd):
+            if "save as" in popup.get("normalized", "") and predicate(popup):
+                return popup
+        time.sleep(0.15)
+    return None
+
+
+def _open_local_save_dialog(excel_hwnd: int, backstage_popup: dict) -> dict | None:
+    """Choose Excel's visible Browse action and wait for the local file dialog.
+
+    Browse is intentionally the only automatic storage choice. It stays on the
+    user's computer; this method never selects OneDrive or another cloud tile.
+    """
+    if _click_popup_button(backstage_popup, ("Browse",)) != "Browse":
+        return None
+    return _wait_for_save_as_popup(excel_hwnd, _is_native_save_dialog)
+
+
+def _local_documents_folder() -> str:
+    """Return the conventional local Documents folder without using OneDrive."""
+    profile = os.environ.get("USERPROFILE")
+    if not profile:
+        raise RuntimeError("Windows USERPROFILE is unavailable, so Xelora cannot choose a local Documents folder.")
+    return os.path.join(profile, "Documents")
+
+
+def _select_local_documents_folder(popup: dict) -> bool:
+    """Navigate an inspected native Save dialog to the local Documents folder."""
+    popup_handle = popup.get("handle")
+    if not popup_handle:
+        return False
+    documents = _local_documents_folder()
+    try:
+        if _HAS_WIN32GUI:
+            win32gui.BringWindowToTop(popup_handle)
+            win32gui.SetForegroundWindow(popup_handle)
+        # Alt+D focuses the address bar in Windows common file dialogs. The
+        # dialog was inspected immediately before this input, so it cannot
+        # leak into a worksheet or cloud-save landing page.
+        pyautogui.hotkey("alt", "d")
+        time.sleep(0.15)
+        pyautogui.write(documents, interval=0.01)
+        pyautogui.press("enter")
+        time.sleep(0.35)
+        return True
+    except Exception:
+        return False
+
+
+def _find_create_table_popup(excel_hwnd: int) -> dict | None:
+    """Return the single native Create Table dialog for the bound workbook."""
+    matches = [
+        popup for popup in _read_excel_popups(excel_hwnd)
+        if "create table" in popup.get("normalized", "")
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _create_table_reference_is_valid(popup: dict) -> bool:
+    """Confirm that the native dialog contains one valid A1-style table range.
+
+    The dialog is deliberately left open when its range is missing or malformed.
+    Clicking OK in that state is worse than a failed action: Excel either rejects
+    it or creates a table over the wrong cells.
+    """
+    edit_values = popup.get("_edit_values", [])
+    if edit_values:
+        # Excel prefixes the range in this dialog with an equals sign, e.g.
+        # ``=$A$2:$I$42``. It is a valid table range, not a formula. Validate
+        # the A1 reference after stripping exactly that presentation prefix.
+        return any(
+            _is_valid_go_to_reference(str(value).strip().removeprefix("=").strip())
+            for value in edit_values
+        )
+
+    # A lightweight test double may provide only the combined message. Bound
+    # the expression so a valid-looking prefix of corrupted text (for example
+    # "$1:$1048576A1orProduct Master") is never treated as a valid range.
+    message = str(popup.get("message", ""))
+    pattern = rf"(?<![A-Za-z0-9_$]){_A1_REFERENCE}(?![A-Za-z0-9_$])"
+    return re.search(pattern, message) is not None
+
+
+def create_excel_table() -> dict:
+    """Create a table from the already selected range as one safe UI transaction.
+
+    Ctrl+T opens a modal Create Table dialog. Previously the shortcut was
+    reported as successful immediately and the agent could type the next command
+    into that dialog's range field. This helper opens the dialog, validates its
+    pre-filled A1 range, and clicks its exact visible OK button before control
+    returns to the planning loop.
+    """
+    _require_display()
+    window = _get_agent_excel_window()
+    if window is None:
+        raise RuntimeError("Excel window not found")
+
+    # A prior Create Table popup is the unfinished second half of this same
+    # atomic operation. Complete that exact inspected dialog instead of
+    # pressing Ctrl+T again or making the model try unrelated keyboard input.
+    popup = _find_create_table_popup(window.handle)
+    if popup is None:
+        # Any other dialog must be resolved deliberately; never type over its
+        # range field, because that can target the wrong worksheet.
+        _require_no_open_popup(window.handle)
+        _focus_excel_for_keyboard(expected_window_handle=window.handle)
+        if not execute_shortcut("insert_table"):
+            return {
+                "verified": False,
+                "status": "table_shortcut_failed",
+                "error": "Excel did not accept the Insert Table shortcut.",
+            }
+
+        # Excel may take several seconds to expose this Office dialog while a
+        # large clipboard paste is still settling. Keep this wait local and do
+        # not release control to the planner until the dialog is found.
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            popup = _find_create_table_popup(window.handle)
+            if popup is not None:
+                break
+            time.sleep(0.1)
+    if popup is None:
+        return {
+            "verified": False,
+            "status": "create_table_dialog_not_found",
+            "error": "Excel did not expose a Create Table dialog after the selected range was submitted.",
+        }
+    if not _create_table_reference_is_valid(popup):
+        return {
+            "verified": False,
+            "status": "invalid_create_table_reference",
+            "popup": {key: value for key, value in popup.items() if key not in {"_buttons", "_edit_values", "normalized"}},
+            "error": "The Create Table dialog does not contain a valid selected range. It was left open unchanged.",
+        }
+
+    clicked = _click_popup_button(popup, ("OK",))
+    if not clicked:
+        return {
+            "verified": False,
+            "status": "create_table_ok_not_found",
+            "popup": {key: value for key, value in popup.items() if key not in {"_buttons", "_edit_values", "normalized"}},
+            "error": "The inspected Create Table dialog did not expose an exact OK button.",
+        }
+
+    time.sleep(0.35)
+    remaining = inspect_excel_popups(window.handle)
+    if remaining.get("status") != "clean":
+        return {
+            "verified": False,
+            "status": "create_table_requires_attention",
+            "popups": remaining.get("popups", []),
+            "error": "Excel displayed a follow-up dialog after creating the table; it was left untouched.",
+        }
+    return {
+        "verified": True,
+        "status": "table_created",
+        "clicked_button": clicked,
+        "verification_note": "Created an Excel table from the selected range and safely completed the native Create Table dialog.",
+    }
+
+
+def _set_save_as_filename(popup: dict, file_name: str) -> bool:
+    """Set the native Save As filename field through UIA, with a keyboard fallback."""
+    popup_handle = popup.get("handle")
+    if not popup_handle:
+        return False
+    if _HAS_PYWINAUTO:
+        try:
+            dialog = Desktop(backend="uia").window(handle=popup_handle)
+            candidates = []
+            for control in dialog.descendants():
+                try:
+                    control_type = str(control.element_info.control_type or "").lower()
+                    if control_type not in {"edit", "combobox"}:
+                        continue
+                    text = " ".join(control.window_text().split()).lower()
+                    auto_id = str(getattr(control.element_info, "automation_id", "") or "").lower()
+                    score = 0
+                    if "file name" in text or "filename" in auto_id:
+                        score += 10
+                    if control_type == "edit":
+                        score += 1
+                    candidates.append((score, control))
+                except Exception:
+                    continue
+            for _, control in sorted(candidates, key=lambda item: item[0], reverse=True):
+                try:
+                    control.set_edit_text(file_name)
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    # Windows' common Save As dialog exposes Alt+N for its File name control.
+    # This fallback still targets the inspected dialog and then clicks its
+    # visible Save button below; it never confirms with a blind Enter press.
+    try:
+        if _HAS_WIN32GUI:
+            win32gui.BringWindowToTop(popup_handle)
+            win32gui.SetForegroundWindow(popup_handle)
+        pyautogui.hotkey("alt", "n")
+        time.sleep(0.15)
+        pyautogui.hotkey("ctrl", "a")
+        pyautogui.write(file_name, interval=0.01)
+        return True
+    except Exception:
+        return False
+
+
+def save_workbook(file_name: str | None = None) -> dict:
+    """Save the current visual workbook, including the native Save As workflow.
+
+    A supplied ``file_name`` is deliberately limited to a filename. For a new
+    blank workbook without one, Xelora generates a timestamped name and saves
+    under the user's local Documents folder through Excel's visible Browse
+    workflow. It never chooses OneDrive automatically. A named workbook with
+    no supplied filename still uses a normal Ctrl+S.
+    """
+    _require_display()
+    window = _get_agent_excel_window()
+    if window is None:
+        raise RuntimeError("Excel window not found")
+    is_new_workbook = _is_unnamed_excel_workbook(window)
+    generated_name = file_name is None and is_new_workbook
+    requested_name = (
+        _normalise_save_filename(file_name)
+        if file_name
+        else (_default_local_save_filename() if generated_name else None)
+    )
+
+    existing_popup = _find_save_as_popup(window.handle)
+    if existing_popup is None:
+        _activate_excel_window(window)
+        if requested_name:
+            pyautogui.press("f12")
+        else:
+            pyautogui.hotkey("ctrl", "s")
+        existing_popup = _wait_for_save_as_popup(window.handle, lambda popup: popup is not None)
+
+    if existing_popup is None:
+        if requested_name:
+            return {
+                "verified": False,
+                "status": "save_as_dialog_not_found",
+                "error": "Excel did not open a visible Save As dialog for the requested filename.",
+            }
+        return {
+            "verified": True,
+            "status": "saved",
+            "verification_note": "Sent Ctrl+S to the currently named workbook; no Save As dialog remains open.",
+        }
+
+    public_popup = {
+        key: value for key, value in existing_popup.items()
+        if key not in {"_buttons", "_edit_values", "normalized"}
+    }
+    if not requested_name:
+        return {
+            "verified": False,
+            "status": "save_requires_filename",
+            "popup": public_popup,
+            "error": "Excel opened Save As for a workbook whose filename could not be determined safely.",
+        }
+
+    # F12 on modern Excel first opens Backstage Save As. Choosing Browse here
+    # is an explicit local-storage choice, not a blind key press or cloud save.
+    if _is_excel_backstage_save_as(existing_popup):
+        existing_popup = _open_local_save_dialog(window.handle, existing_popup)
+        if existing_popup is None:
+            return {
+                "verified": False,
+                "status": "local_save_dialog_not_found",
+                "popup": public_popup,
+                "error": "Excel did not open the native local Save As dialog after Xelora clicked Browse.",
+            }
+        public_popup = {
+            key: value for key, value in existing_popup.items()
+            if key not in {"_buttons", "_edit_values", "normalized"}
+        }
+
+    if not _is_native_save_dialog(existing_popup):
+        return {
+            "verified": False,
+            "status": "native_save_dialog_not_ready",
+            "popup": public_popup,
+            "error": "The visible Save As screen does not expose a local filename field and Save button.",
+        }
+    if not _select_local_documents_folder(existing_popup):
+        return {
+            "verified": False,
+            "status": "local_documents_not_selected",
+            "popup": public_popup,
+            "error": "Xelora could not select the local Documents folder in the inspected Save As dialog.",
+        }
+    if not _set_save_as_filename(existing_popup, requested_name):
+        return {
+            "verified": False,
+            "status": "save_filename_not_entered",
+            "popup": public_popup,
+            "error": "Xelora could not set the visible Save As filename field.",
+        }
+    clicked = _click_popup_button(existing_popup, ("Save",))
+    if not clicked:
+        return {
+            "verified": False,
+            "status": "save_button_not_found",
+            "popup": public_popup,
+            "error": "The visible Save As dialog did not expose an exact Save button.",
+        }
+
+    time.sleep(0.75)
+    remaining = _read_excel_popups(window.handle)
+    if remaining:
+        pending = [
+            {key: value for key, value in popup.items() if key not in {"_buttons", "_edit_values", "normalized"}}
+            for popup in remaining
+        ]
+        return {
+            "verified": False,
+            "status": "save_requires_attention",
+            "popups": pending,
+            "error": "Excel displayed a follow-up dialog (for example overwrite confirmation); it was left untouched.",
+        }
+    try:
+        saved_title = " ".join((_get_agent_excel_window().window_text() or "").split())
+    except Exception:
+        saved_title = ""
+    title_verified = requested_name.lower() in saved_title.lower()
+    if not title_verified:
+        return {
+            "verified": False,
+            "status": "save_title_not_verified",
+            "file_name": requested_name,
+            "folder": _local_documents_folder(),
+            "error": "Excel closed Save As, but the workbook title did not confirm the requested filename.",
+        }
+    global _bound_workbook_name
+    _bound_workbook_name = requested_name
+    return {
+        "verified": True,
+        "status": "saved",
+        "file_name": requested_name,
+        "folder": _local_documents_folder(),
+        "generated_file_name": generated_name,
+        "clicked_button": clicked,
+        "verification_note": (
+            f"Saved locally as '{requested_name}' in Documents through Excel's Browse workflow "
+            "and verified the workbook title changed."
+        ),
+    }
+
+
 def type_text(text: str, interval: float = 0.02) -> dict:
     _require_display()
+    window = _get_agent_excel_window()
+    if not window:
+        raise RuntimeError("Excel window not found")
+    _require_no_open_popup(window.handle)
     
     # Use window safety module if available
     if _HAS_WINDOW_SAFETY:
@@ -2420,9 +4136,6 @@ def type_text(text: str, interval: float = 0.02) -> dict:
             print(f"[WindowSafety] {e}, falling back to legacy method")
     
     # Legacy method
-    window = _get_agent_excel_window()
-    if not window:
-        raise RuntimeError("Excel window not found")
     if _activate_excel_window(window):
         pyautogui.typewrite(text, interval=interval)
     else:
@@ -2432,6 +4145,16 @@ def type_text(text: str, interval: float = 0.02) -> dict:
 
 def press_key(key: str) -> dict:
     _require_display()
+    if str(key).strip().lower() == "f12":
+        return {
+            "verified": False,
+            "status": "save_shortcut_blocked",
+            "error": "F12 opens Save As. Use save_workbook only as the final workbook action after verification.",
+        }
+    window = _get_agent_excel_window()
+    if not window:
+        raise RuntimeError("Excel window not found")
+    _require_no_open_popup(window.handle)
     
     # Use window safety module if available
     if _HAS_WINDOW_SAFETY:
@@ -2442,9 +4165,6 @@ def press_key(key: str) -> dict:
             print(f"[WindowSafety] {e}, falling back to legacy method")
     
     # Legacy method
-    window = _get_agent_excel_window()
-    if not window:
-        raise RuntimeError("Excel window not found")
     if _activate_excel_window(window):
         pyautogui.press(key)
     else:
@@ -2454,6 +4174,13 @@ def press_key(key: str) -> dict:
 
 def hotkey(keys: list[str]) -> dict:
     _require_display()
+    blocked = _blocked_excel_hotkey_result(keys)
+    if blocked is not None:
+        return blocked
+    window = _get_agent_excel_window()
+    if not window:
+        raise RuntimeError("Excel window not found")
+    _require_no_open_popup(window.handle)
     
     # Use window safety module if available
     if _HAS_WINDOW_SAFETY:
@@ -2464,9 +4191,6 @@ def hotkey(keys: list[str]) -> dict:
             print(f"[WindowSafety] {e}, falling back to legacy method")
     
     # Legacy method
-    window = _get_agent_excel_window()
-    if not window:
-        raise RuntimeError("Excel window not found")
     if _activate_excel_window(window):
         normalized = [str(key).lower().strip() for key in keys]
         if normalized[:1] == ["alt"] and len(normalized) > 2:
@@ -2494,6 +4218,49 @@ def _clear_parse_cache_safe():
         pass
 
 
+def _blocked_excel_hotkey_result(keys: list[str], *, allow_alt_sequence: bool = False) -> dict | None:
+    """Reject unsafe or ambiguous raw key input before it reaches Excel."""
+    normalized = tuple(str(key).lower().strip() for key in keys)
+    blocked = {
+        ("alt", "tab"): "Alt+Tab switches Windows applications and is not an Excel action.",
+        ("alt", "f4"): "Alt+F4 can close the Excel application and is not allowed during a task.",
+        ("ctrl", "f4"): "Ctrl+F4 can close the active workbook and is not allowed during a task.",
+        ("ctrl", "shift", "esc"): "Ctrl+Shift+Esc opens Windows Task Manager and is not an Excel action.",
+        (
+            "ctrl", "shift", "f3"
+        ): "Ctrl+Shift+F3 opens Create Names from Selection. It is not a supported table-naming action.",
+    }
+    if normalized not in blocked:
+        # ``hotkey`` represents a simultaneous modifier chord.  A sequence
+        # such as ["o", "i"] or a bare ["r"] is not a shortcut; it can type
+        # into a selected cell, change an Excel menu, or act on a modal dialog.
+        # Route those through their explicit, verified tools instead.
+        if not normalized or not any(key in {"ctrl", "control", "alt", "shift"} for key in normalized):
+            return {
+                "verified": False,
+                "status": "ambiguous_raw_key_input_blocked",
+                "error": "Use press_key for one key, press_alt for a Ribbon KeyTip sequence, or a documented Ctrl shortcut. Raw key sequences are not allowed.",
+            }
+        if normalized[0] == "alt" and not allow_alt_sequence:
+            return {
+                "verified": False,
+                "status": "ambiguous_raw_key_input_blocked",
+                "error": "Use press_alt for Excel Ribbon KeyTips or execute_excel_shortcut for a documented Alt shortcut; do not send Alt sequences through hotkey.",
+            }
+        if normalized == ("shift", "f11"):
+            return {
+                "verified": False,
+                "status": "ambiguous_raw_key_input_blocked",
+                "error": "Use create_sheet(sheet_name) so the new worksheet is observed and named before later input is sent.",
+            }
+        return None
+    return {
+        "verified": False,
+        "status": "unsafe_system_shortcut_blocked",
+        "error": blocked[normalized],
+    }
+
+
 def _send_text_to_excel(window, text: str) -> None:
     """Type literal user data into the known Excel window without foreground focus."""
     escaped = (text.replace("{", "{{}").replace("}", "{}}").replace("+", "{+}")
@@ -2505,7 +4272,13 @@ def _send_text_to_excel(window, text: str) -> None:
 
 def _pyautogui_key_to_sendkeys(key: str) -> str:
     normalized = key.lower().strip()
-    special = {"enter": "{ENTER}", "esc": "{ESC}", "escape": "{ESC}", "tab": "{TAB}", "backspace": "{BACKSPACE}", "delete": "{DELETE}"}
+    special = {
+        "enter": "{ENTER}", "esc": "{ESC}", "escape": "{ESC}", "tab": "{TAB}",
+        "backspace": "{BACKSPACE}", "delete": "{DELETE}", "home": "{HOME}",
+        "end": "{END}", "up": "{UP}", "down": "{DOWN}", "left": "{LEFT}",
+        "right": "{RIGHT}", "pageup": "{PGUP}", "pagedown": "{PGDN}",
+        "insert": "{INSERT}",
+    }
     if normalized in special:
         return special[normalized]
     if re.fullmatch(r"f(?:[1-9]|1[0-2])", normalized):
@@ -2538,6 +4311,7 @@ def go_to_range(reference: str) -> dict:
     window = _get_agent_excel_window()
     if not window:
         raise RuntimeError("Excel window not found")
+    _require_no_open_popup(window.handle)
     if _activate_excel_window(window):
         pyautogui.hotkey("ctrl", "g")
         time.sleep(0.2)
@@ -2761,11 +4535,18 @@ def verify_task_completion(expected_sheets: list[str] = None, expected_formulas:
             else:
                 issues.append(f"Sheet '{sheet}' not found. Existing sheets: {existing}")
     
+    complete = len(issues) == 0
     return {
-        "complete": len(issues) == 0,
+        "verified": complete,
+        "complete": complete,
         "issues": issues,
         "verified_sheets": verified_sheets,
         "all_sheets": get_existing_sheet_names(),
+        "verification_note": (
+            "All requested worksheet names were found."
+            if complete
+            else "The requested worksheet verification found missing deliverables."
+        ),
     }
 
 
@@ -2856,6 +4637,15 @@ def press_alt(keys: list[str]) -> dict:
     keys = [str(k).strip().lower() for k in keys if str(k).strip()]
     if not keys:
         raise RuntimeError("press_alt requires a non-empty list of keys.")
+    if keys[0] == "f":
+        return {
+            "verified": False,
+            "status": "save_shortcut_blocked",
+            "error": "Do not navigate Excel's File menu. Use save_workbook only as the final workbook action after verification.",
+        }
+    blocked = _blocked_excel_hotkey_result(["alt", *keys], allow_alt_sequence=True)
+    if blocked is not None:
+        return blocked
     # Alt first to open keytips, then each key in sequence.
     pyautogui.press("alt")
     time.sleep(0.35)
@@ -2914,6 +4704,8 @@ def press_shortcut(shortcut_name: str) -> dict:
             f"Unknown Alt shortcut '{shortcut_name}'. Supported: "
             f"{', '.join(sorted(_ALT_TASK_SHORTCUTS))}"
         )
+    if name == "insert_table":
+        return create_excel_table()
     keys = _ALT_TASK_SHORTCUTS[name]
     # For sum_below the natural key is Alt+=, but represented generally:
     if name == "sum_below":
@@ -2944,6 +4736,21 @@ def find_and_click(name: str, control_type: str = None, double: bool = False) ->
     _focus_excel_for_keyboard()
     target = None
     name_l = " ".join(name.strip().split()).lower()
+
+    # Models sometimes ask to "find" the active worksheet tab. Route an exact
+    # sheet-name request to the dedicated tab operation instead of searching
+    # every Ribbon control and falsely reporting that a real sheet is absent.
+    for sheet_name in get_existing_sheet_names():
+        if sheet_name.lower() == name_l:
+            sheet_result = go_to_sheet(sheet_name)
+            if sheet_result.get("verified") is True:
+                return {
+                    "clicked_element": sheet_name,
+                    "found_by": "worksheet_tab",
+                    "verified": True,
+                    "verification_note": f"Activated worksheet tab '{sheet_name}' through the dedicated sheet navigator.",
+                }
+            return sheet_result
     for control in window.descendants():
         try:
             txt = " ".join(control.window_text().split()).lower()
@@ -3010,13 +4817,39 @@ def execute_excel_shortcut(shortcut_name: str) -> dict:
         Dict with verification info
     """
     _require_display()
-    
-    if shortcut_name not in EXCEL_SHORTCUTS:
+
+    normalized_name = str(shortcut_name or "").strip().lower()
+    # Saving a new workbook is not just a key chord: Excel opens Save As and
+    # a filename plus a real Save-button click are required.  Route named Save
+    # through the transactional visual helper so the agent cannot mistake a
+    # blocked dialog for a completed save.
+    if normalized_name == "save":
+        return save_workbook()
+    if normalized_name == "save_as":
         return {
             "verified": False,
-            "error": f"Unknown shortcut: {shortcut_name}",
-            "available_shortcuts": list(EXCEL_SHORTCUTS.keys())[:20],
+            "status": "save_filename_required",
+            "error": "Use save_workbook with file_name to complete the native Save As dialog safely.",
         }
+    if normalized_name == "insert_table":
+        return create_excel_table()
+    
+    resolved = resolve_shortcut(shortcut_name)
+    if not resolved:
+        return {
+            "verified": False,
+            "error": (
+                f"Unknown shortcut: {shortcut_name}. Use a named shortcut, a standard chord such as "
+                "'ctrl+shift+l', or press_alt for a sequential Ribbon KeyTip command."
+            ),
+            "available_shortcuts": list(EXCEL_SHORTCUTS.keys()),
+        }
+    blocked = _blocked_excel_hotkey_result(
+        list(resolved[0]),
+        allow_alt_sequence=bool(resolved[0] and resolved[0][0] == "alt"),
+    )
+    if blocked is not None:
+        return blocked
     
     # Focus Excel first
     _focus_excel_for_keyboard()
@@ -3028,7 +4861,8 @@ def execute_excel_shortcut(shortcut_name: str) -> dict:
         return {
             "verified": True,
             "shortcut": shortcut_name,
-            "keys": list(EXCEL_SHORTCUTS[shortcut_name]),
+            "keys": list(resolved[0]),
+            "shortcut_kind": resolved[1],
             "verification_note": f"Executed shortcut '{shortcut_name}' directly without vision.",
         }
     else:
@@ -3051,6 +4885,9 @@ def execute_excel_alt_sequence(keys: list[str]) -> dict:
         Dict with verification info
     """
     _require_display()
+    blocked = _blocked_excel_hotkey_result(keys)
+    if blocked is not None:
+        return blocked
     _focus_excel_for_keyboard()
     
     success = execute_alt_sequence(keys)

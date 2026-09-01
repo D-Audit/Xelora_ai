@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 import config
 import security
+from agent import providers
 from agent.core import AgentTask, get_task_completion_status, run_task
 from agent.reveal import reveal_workflow, progress_snapshot
 from auth import decode_token
@@ -49,6 +50,16 @@ _TASK_EXECUTION_LOCK = threading.Lock()
 
 @app.on_event("startup")
 def on_startup():
+    try:
+        config.validate_local_omniparser_configuration()
+    except RuntimeError as exc:
+        print(f"REFUSING TO START: {exc}")
+        raise SystemExit(1) from exc
+    try:
+        providers.validate_provider_tool_catalogues()
+    except RuntimeError as exc:
+        print(f"REFUSING TO START: {exc}")
+        raise SystemExit(1) from exc
     if not config.LOCAL_API_KEY and not config.ALLOW_NO_AUTH:
         print("REFUSING TO START: LOCAL_API_KEY is not set. Set it in .env, or set "
               "ALLOW_NO_AUTH=true if you intend to run without authentication.")
@@ -185,9 +196,14 @@ def _start_task_in_background(task, task_id, user_id, user_preferences):
         acquired_immediately = _TASK_EXECUTION_LOCK.acquire(blocking=False)
         if not acquired_immediately:
             wait_message = "Waiting for the current Excel task to finish before this task can safely use the workbook."
-            task.log_step(wait_message)
+            task.set_recovery_state(
+                "waiting_for_workbook",
+                wait_message,
+                safe_to_continue=False,
+            )
             task.structured_steps.append({"type": "reasoning", "text": wait_message})
             _TASK_EXECUTION_LOCK.acquire()
+            task.clear_recovery_state("The workbook is available; starting this task now.")
 
         db = None
         try:
@@ -322,6 +338,7 @@ def get_status(task_id: int, jwt_user_id: int | None = Depends(_current_user_id_
         "is_done": task.is_done,
         "is_paused": task.is_paused,
         "status": get_task_completion_status(task),
+        "recovery": task.recovery_state,
         "progress_log": task.progress_log,
         "final_response": task.final_response,
     }
@@ -349,7 +366,12 @@ def get_progress(task_id: int, jwt_user_id: int | None = Depends(_current_user_i
     if not task:
         raise HTTPException(status_code=404, detail="Task not found.")
     _assert_task_owner(task.user_id, jwt_user_id)
-    snapshot = progress_snapshot(task.structured_steps, task.is_done, task.final_response)
+    snapshot = progress_snapshot(
+        task.structured_steps,
+        task.is_done,
+        task.final_response,
+        task.recovery_state,
+    )
     snapshot["task_id"] = task_id
     snapshot["is_paused"] = task.is_paused
     snapshot["status"] = get_task_completion_status(task)

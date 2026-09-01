@@ -81,7 +81,12 @@ def reveal_workflow(structured_steps: list) -> list:
     return revealed
 
 
-def progress_snapshot(structured_steps: list, is_done: bool, final_response: str | None = None) -> dict:
+def progress_snapshot(
+    structured_steps: list,
+    is_done: bool,
+    final_response: str | None = None,
+    recovery_state: dict | None = None,
+) -> dict:
     """A compact 'what is the AI doing right now' view - Current task /
     Completed actions / Decision explanations, per the Intelligent
     Progress Visualization capability."""
@@ -89,7 +94,11 @@ def progress_snapshot(structured_steps: list, is_done: bool, final_response: str
     reasoning = [s["text"] for s in structured_steps if s.get("type") == "reasoning"]
     visual_checkpoints = [s for s in structured_steps if s.get("type") == "visual_checkpoint"]
 
-    current_task = reasoning[-1] if reasoning and not is_done else ("Done" if is_done else "Starting up...")
+    active_recovery = recovery_state if isinstance(recovery_state, dict) else None
+    if not is_done and active_recovery and active_recovery.get("message"):
+        current_task = active_recovery["message"]
+    else:
+        current_task = reasoning[-1] if reasoning and not is_done else ("Done" if is_done else "Starting up...")
 
     return {
         "current_task": current_task,
@@ -102,6 +111,7 @@ def progress_snapshot(structured_steps: list, is_done: bool, final_response: str
             for s in visual_checkpoints
         ],
         "decision_explanations": reasoning,
+        "recovery": active_recovery,
         "is_done": is_done,
         "final_response": final_response,
     }
