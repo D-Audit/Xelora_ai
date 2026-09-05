@@ -43,8 +43,12 @@ def _inspect_sheet(wb, sheet):
     formula_map = {}
     formula_errors = []
     formula_scan_warning = None
+    nonempty_cell_count = 0
     if used:
         values = normalize(used.value)
+        nonempty_cell_count = sum(
+            1 for row in values for value in row if value not in (None, "")
+        )
         first_row = normalize(used.rows[0].value)[0]
         header_guess = all(isinstance(v, str) for v in first_row if v is not None)
 
@@ -95,6 +99,7 @@ def _inspect_sheet(wb, sheet):
     return {
         "sheet": sheet_name,
         "used_range": used_address,
+        "nonempty_cell_count": nonempty_cell_count,
         "likely_has_header_row": header_guess,
         "existing_tables": existing_tables,
         "existing_charts": existing_charts,

@@ -131,6 +131,129 @@ class AutomationReliabilityTests(unittest.TestCase):
         self.assertFalse(valid)
         self.assertIn("Whole-column reference", error)
 
+    def test_delivery_contract_rejects_empty_tabs_as_a_completed_workbook(self):
+        task = core.AgentTask(
+            """Create these worksheets in this order:
+1. Product Master
+2. Sales Data
+3. Executive Dashboard
+
+Format as an Excel Table named ProductMaster.
+Create the Excel Table first and name it SalesData.
+Use formulas linked to SalesData.
+- Add these charts:
+- Monthly Revenue Trend
+- Revenue by Region
+
+Before finishing, save the workbook as Business_Performance_Control.xlsx."""
+        )
+        task.owns_new_workbook = True
+        inspection = {
+            "verified": True,
+            "sheet_reports": [
+                {"sheet": "Product Master", "used_range": "$A$1", "existing_tables": [], "existing_charts": [], "formulas_found": {}},
+                {"sheet": "Sales Data", "used_range": "$A$1", "existing_tables": [], "existing_charts": [], "formulas_found": {}},
+                {"sheet": "Executive Dashboard", "used_range": "$A$1", "existing_tables": [], "existing_charts": [], "formulas_found": {}},
+                {"sheet": "Sheet1", "used_range": "$A$1", "existing_tables": [], "existing_charts": [], "formulas_found": {}},
+            ],
+        }
+
+        result = core._evaluate_workbook_delivery_contract(task, inspection)
+
+        self.assertFalse(result["verified"])
+        self.assertIn("missing Excel Table(s): ProductMaster, SalesData", result["missing"])
+        self.assertIn("no verified worksheet formulas were found", result["missing"])
+        self.assertIn("only 0 verified chart(s) found; at least 2 were explicitly requested", result["missing"])
+        self.assertTrue(any("unpopulated worksheet(s)" in item for item in result["missing"]))
+        self.assertTrue(any("unexpected blank worksheet(s): Sheet1" in item for item in result["missing"]))
+
+    def test_delivery_contract_accepts_live_evidence_for_explicit_requirements(self):
+        task = core.AgentTask(
+            """Create these worksheets in this order:
+1. Product Master
+2. Sales Data
+3. Executive Dashboard
+
+Format as an Excel Table named ProductMaster.
+Create the Excel Table first and name it SalesData.
+Add formulas after the table exists.
+Add these charts:
+- Monthly Revenue Trend
+- Revenue by Region"""
+        )
+        task.owns_new_workbook = True
+        inspection = {
+            "verified": True,
+            "sheet_reports": [
+                {"sheet": "Product Master", "used_range": "$A$1:$I$41", "existing_tables": ["ProductMaster"], "existing_charts": [], "formulas_found": {}},
+                {"sheet": "Sales Data", "used_range": "$A$1:$Q$351", "existing_tables": ["SalesData"], "existing_charts": [], "formulas_found": {"$M$2": {"formula": "=J2*K2"}}},
+                {"sheet": "Executive Dashboard", "used_range": "$A$1:$N$30", "existing_tables": [], "existing_charts": ["RevenueTrend", "RevenueByRegion"], "formulas_found": {"$B$3": {"formula": "='Sales Data'!M2"}}},
+            ],
+        }
+
+        result = core._evaluate_workbook_delivery_contract(task, inspection)
+
+        self.assertTrue(result["verified"])
+        self.assertEqual(2, result["observed_chart_count"])
+        self.assertEqual(2, result["observed_formula_count"])
+
+    def test_incomplete_delivery_contract_cannot_receive_completed_status(self):
+        task = core.AgentTask("Create a report workbook.")
+        task.is_done = True
+        task.structured_steps.append({
+            "type": "action",
+            "tool_name": "write_table",
+            "status": "success",
+            "result": {"verified": True},
+        })
+        task.last_delivery_contract = {
+            "verified": False,
+            "missing": ["missing Excel Table(s): SalesData"],
+        }
+
+        self.assertEqual("completed_with_warnings", core.get_task_completion_status(task))
+
+    def test_created_sheet_batch_becomes_content_boundary_for_structured_request(self):
+        task = core.AgentTask("Build a sales dashboard with formulas and charts.")
+        task.owns_new_workbook = True
+
+        core._record_created_sheets_in_delivery_contract(
+            task,
+            {"verified": True, "sheet_names": ["Data", "Dashboard"]},
+            {"sheet_names": ["Data", "Dashboard"]},
+        )
+        result = core._evaluate_workbook_delivery_contract(task, {
+            "verified": True,
+            "sheet_reports": [
+                {"sheet": "Data", "nonempty_cell_count": 0, "existing_tables": [], "existing_charts": [], "formulas_found": {}},
+                {"sheet": "Dashboard", "nonempty_cell_count": 0, "existing_tables": [], "existing_charts": [], "formulas_found": {}},
+            ],
+        })
+
+        self.assertEqual(["Data", "Dashboard"], task.delivery_contract["required_sheet_names"])
+        self.assertFalse(result["verified"])
+        self.assertTrue(any("unpopulated worksheet(s): Data, Dashboard" in item for item in result["missing"]))
+
+    def test_latest_workbook_inspection_reuses_post_change_live_evidence(self):
+        old_inspection = {
+            "verified": True,
+            "sheet_reports": [{"sheet": "Data", "nonempty_cell_count": 0}],
+        }
+        final_inspection = {
+            "verified": True,
+            "sheet_reports": [{"sheet": "Data", "nonempty_cell_count": 15}],
+        }
+        steps = [
+            {"tool_name": "write_table", "status": "success", "result": {"verified": True}},
+            {"tool_name": "inspect_workbook", "status": "success", "result": old_inspection},
+            {"tool_name": "write_table", "status": "success", "result": {"verified": True}},
+            {"tool_name": "inspect_workbook", "status": "success", "result": final_inspection},
+        ]
+
+        result = core._latest_workbook_wide_inspection(steps, after_index=2)
+
+        self.assertEqual(final_inspection, result)
+
     def test_timeout_recovery_rebinds_the_task_to_the_restarted_excel_pid(self):
         task = core.AgentTask("Build a workbook.")
         task.workbook_name = "Book1.xlsx"
@@ -150,6 +273,38 @@ class AutomationReliabilityTests(unittest.TestCase):
         self.assertEqual("Book1.xlsx", task.workbook_name)
         self.assertEqual(222, task.excel_app_pid)
         bind_context.assert_called_once_with("Book1.xlsx", 222)
+
+    def test_closed_owned_workbook_reopens_once_from_its_exact_checkpoint(self):
+        task = core.AgentTask("Build a new workbook.")
+        task.owns_new_workbook = True
+        task.workbook_path = r"C:\\Users\\HP\\Documents\\Book1.xlsx"
+
+        with patch("agent.core.os.path.isfile", return_value=True), patch(
+            "skills.excel_shared.reopen_owned_workbook",
+            return_value={
+                "verified": True,
+                "workbook_name": "Book1.xlsx",
+                "excel_app_pid": 222,
+                "file_path": task.workbook_path,
+            },
+        ) as reopen:
+            result = core._recover_closed_owned_workbook(task)
+
+        self.assertTrue(result["verified"])
+        self.assertTrue(result["workbook_recovered"])
+        self.assertEqual("closed_owned_workbook", result["recovery_reason"])
+        self.assertTrue(task.closed_workbook_recovery_attempted)
+        reopen.assert_called_once_with(task.workbook_path)
+
+    def test_closed_user_workbook_is_not_reopened_automatically(self):
+        task = core.AgentTask("Use my existing workbook.")
+        task.owns_new_workbook = False
+        task.workbook_path = r"C:\\Users\\HP\\Documents\\CustomerData.xlsx"
+
+        result = core._recover_closed_owned_workbook(task)
+
+        self.assertFalse(result["verified"])
+        self.assertEqual("user_workbook_reopen_requires_user", result["status"])
 
     def test_workbook_audit_reports_displayed_error_when_formula_metadata_fails(self):
         class _UsedRange:

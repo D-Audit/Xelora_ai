@@ -153,6 +153,19 @@ class AgentTask:
         # ["Sheet1"] when it asks to verify completion.
         self.required_visual_sheet_names = []
         self.final_save_requested = False
+        # Explicit workbook-build requests carry a small, evidence-based
+        # delivery contract. This is derived only from objectively stated
+        # requirements, so empty tabs cannot be confused with a finished
+        # workbook merely because no formula error was found.
+        self.delivery_contract = _derive_workbook_delivery_contract(instruction)
+        self.last_delivery_contract = None
+        self.delivery_contract_repair_requests = 0
+        self.owns_new_workbook = False
+        self.workbook_path = None
+        # One automatic reopen is helpful after an accidental close, but a
+        # loop that keeps reopening a window a user deliberately closed is
+        # not respectful or reliable.
+        self.closed_workbook_recovery_attempted = False
         # Direct imperative requests (for example, "click the Insert tab")
         # already state the action the user wants.  Start those tasks in
         # execution mode; descriptive or exploratory requests still begin
@@ -589,6 +602,56 @@ def _is_lost_visual_excel_window(result: dict | None) -> bool:
     return _is_lost_task_workbook(result)
 
 
+def _recover_closed_owned_workbook(task: AgentTask) -> dict:
+    """Reopen one saved Xelora-owned workbook after an accidental close.
+
+    This never searches for or attaches to another open workbook. It is
+    deliberately unavailable for a user-supplied workbook, because reopening
+    or replacing a user's document without an explicit request is unsafe.
+    """
+    if not getattr(task, "owns_new_workbook", False):
+        return {
+            "verified": False,
+            "status": "user_workbook_reopen_requires_user",
+            "error": "This task uses a user workbook, so Xelora will not reopen or replace it automatically.",
+        }
+    if getattr(task, "closed_workbook_recovery_attempted", False):
+        return {
+            "verified": False,
+            "status": "owned_workbook_reopen_already_attempted",
+            "error": "Xelora already attempted one safe reopen for this task workbook.",
+        }
+
+    workbook_path = getattr(task, "workbook_path", None)
+    if not isinstance(workbook_path, str) or not os.path.isfile(workbook_path):
+        return {
+            "verified": False,
+            "status": "owned_workbook_checkpoint_missing",
+            "error": "No saved Xelora workbook checkpoint is available to reopen safely.",
+        }
+
+    task.closed_workbook_recovery_attempted = True
+    try:
+        from skills.excel_shared import reopen_owned_workbook
+
+        recovered = reopen_owned_workbook(workbook_path)
+    except Exception as exc:
+        return {
+            "verified": False,
+            "status": "owned_workbook_reopen_failed",
+            "error": str(exc),
+        }
+    if not isinstance(recovered, dict) or recovered.get("verified") is not True:
+        return recovered if isinstance(recovered, dict) else {
+            "verified": False,
+            "status": "owned_workbook_reopen_invalid_result",
+            "error": "The workbook reopen helper returned no verified result.",
+        }
+    recovered["workbook_recovered"] = True
+    recovered["recovery_reason"] = "closed_owned_workbook"
+    return recovered
+
+
 def _has_pending_create_table_completion(task: AgentTask, popups: list[dict]) -> bool:
     """Whether this task opened the valid Create Table dialog it now sees.
 
@@ -787,6 +850,9 @@ def _adopt_workbook_from_result(task: AgentTask, result: dict, db=None, db_task_
         return
 
     task.workbook_name = workbook_name
+    file_path = result.get("file_path")
+    if isinstance(file_path, str) and file_path.strip():
+        task.workbook_path = os.path.abspath(file_path)
     excel_app_pid = result.get("excel_app_pid")
     if not isinstance(excel_app_pid, int):
         excel_app_pid = getattr(task, "excel_app_pid", None)
@@ -831,6 +897,9 @@ def _adopt_recovered_workbook_identity(task: AgentTask, result: dict, db=None, d
         return
 
     task.workbook_name = workbook_name
+    file_path = result.get("file_path")
+    if isinstance(file_path, str) and file_path.strip():
+        task.workbook_path = os.path.abspath(file_path)
     task.excel_app_pid = excel_app_pid
     try:
         from skills.excel_shared import bind_workbook_context
@@ -1239,6 +1308,178 @@ def _requested_workbook_file_name(instruction: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _derive_workbook_delivery_contract(instruction: str) -> dict:
+    """Extract only explicit, objectively inspectable workbook promises.
+
+    This is not a task template and it does not prescribe execution. The
+    model still chooses a skill/API, documented shortcut, narrow visual
+    action, or justified atomic codegen fallback from the live catalogue.
+    The contract only defines what evidence is needed before it can say done.
+    """
+    if not isinstance(instruction, str):
+        return {
+            "required_sheet_names": [], "required_table_names": [],
+            "requires_formula_evidence": False, "required_chart_count": 0,
+            "requires_populated_sheets": False,
+        }
+
+    required_sheets = _required_visual_sheet_names(instruction)
+    table_names = []
+    table_patterns = (
+        r"\b(?:Excel\s+)?Table\s+(?:named|called)\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+        r"\b(?:Excel\s+)?Table\b(?:(?!\n\s*\n)[\s\S]){0,180}?\b(?:name\s+it|named|called)\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+    )
+    for pattern in table_patterns:
+        for match in re.finditer(pattern, instruction, flags=re.IGNORECASE):
+            name = match.group(1)
+            if name.casefold() not in {existing.casefold() for existing in table_names}:
+                table_names.append(name)
+
+    chart_count = 0
+    chart_blocks = re.finditer(
+        r"(?im)^\s*(?:[-*]\s*)?(?:add|create|include)\s+(?:these\s+)?(?:[A-Za-z-]+\s+)?charts?\s*:\s*\n"
+        r"((?:\s*[-*]\s+[^\r\n]+(?:\r?\n|$))+)",
+        instruction,
+    )
+    for block in chart_blocks:
+        chart_count += len(re.findall(r"(?m)^\s*[-*]\s+[^\r\n]+", block.group(1)))
+
+    lowered = instruction.casefold()
+    requires_formula_evidence = bool(re.search(r"\bformulas?\b", lowered))
+    structured_content_requested = bool(re.search(
+        r"\b(formulas?|charts?|dashboard|transactions?|records?|kpis?|summary|analysis|report|"
+        r"populate(?:d)?|realistic|tables?)\b|\bdata\s+(?:from|with|for)\b",
+        lowered,
+    ))
+    return {
+        "required_sheet_names": required_sheets,
+        "required_table_names": table_names,
+        "requires_formula_evidence": requires_formula_evidence,
+        "required_chart_count": chart_count,
+        "requires_populated_sheets": structured_content_requested,
+    }
+
+
+def _record_created_sheets_in_delivery_contract(task: AgentTask, result: dict, tool_input: dict) -> None:
+    """Retain model-created sheet names as a minimum completion boundary.
+
+    Some users phrase a large task as "build a dashboard with Product Master
+    and Sales Data" rather than using the exact "worksheets in this order"
+    heading. When the model itself creates a batch of tabs for such a request,
+    those tabs must at least be populated before it can claim success. This
+    does not impose a sheet list on simple "create empty tabs" requests.
+    """
+    contract = getattr(task, "delivery_contract", None)
+    if not isinstance(contract, dict) or contract.get("required_sheet_names"):
+        return
+    if not contract.get("requires_populated_sheets"):
+        return
+    candidate_names = result.get("sheet_names") if isinstance(result, dict) else None
+    if not isinstance(candidate_names, list):
+        candidate_names = tool_input.get("sheet_names") if isinstance(tool_input, dict) else None
+    names = []
+    for name in candidate_names or []:
+        cleaned = " ".join(str(name).split())
+        if cleaned and cleaned.casefold() not in {known.casefold() for known in names}:
+            names.append(cleaned)
+    if names:
+        contract["required_sheet_names"] = names
+
+
+def _evaluate_workbook_delivery_contract(task: AgentTask, inspection: dict) -> dict:
+    """Compare the live inspection to the explicit delivery contract."""
+    contract = dict(getattr(task, "delivery_contract", {}) or {})
+    reports = inspection.get("sheet_reports", []) if isinstance(inspection, dict) else []
+    if not isinstance(reports, list):
+        reports = []
+    valid_reports = [report for report in reports if isinstance(report, dict)]
+    names = [str(report.get("sheet", "")).strip() for report in valid_reports]
+    name_lookup = {name.casefold(): report for name, report in zip(names, valid_reports) if name}
+    missing = []
+
+    def report_is_empty(report: dict) -> bool:
+        observed_count = report.get("nonempty_cell_count")
+        if isinstance(observed_count, int):
+            return observed_count == 0
+        # Compatibility fallback for inspections produced before the explicit
+        # non-empty-cell count was added.
+        return str(report.get("used_range") or "").upper() == "$A$1"
+
+    required_sheets = list(contract.get("required_sheet_names") or [])
+    required_sheet_keys = {name.casefold() for name in required_sheets}
+    missing_sheets = [name for name in required_sheets if name.casefold() not in name_lookup]
+    if missing_sheets:
+        missing.append("missing worksheet(s): " + ", ".join(missing_sheets))
+
+    # Only a blank workbook owned by this task may be held to an exact order;
+    # a user's pre-existing workbook is never rearranged for a completion test.
+    if getattr(task, "owns_new_workbook", False) and required_sheets and not missing_sheets:
+        actual_required_order = [name for name in names if name.casefold() in required_sheet_keys]
+        if _normalised_sheet_names(actual_required_order) != _normalised_sheet_names(required_sheets):
+            missing.append(
+                "worksheet order differs from the requested order: expected "
+                + ", ".join(required_sheets)
+            )
+        unexpected_blank_sheets = [
+            str(report.get("sheet")) for report in valid_reports
+            if str(report.get("sheet", "")).casefold() not in required_sheet_keys
+            and report_is_empty(report)
+        ]
+        if unexpected_blank_sheets:
+            missing.append("unexpected blank worksheet(s): " + ", ".join(unexpected_blank_sheets))
+
+    if contract.get("requires_populated_sheets"):
+        empty_required_sheets = [
+            name for name in required_sheets
+            if name.casefold() in name_lookup
+            and report_is_empty(name_lookup[name.casefold()])
+        ]
+        if empty_required_sheets:
+            missing.append("unpopulated worksheet(s): " + ", ".join(empty_required_sheets))
+
+    all_tables = {
+        str(table).casefold()
+        for report in valid_reports
+        for table in (report.get("existing_tables") or [])
+    }
+    missing_tables = [name for name in contract.get("required_table_names", []) if name.casefold() not in all_tables]
+    if missing_tables:
+        missing.append("missing Excel Table(s): " + ", ".join(missing_tables))
+
+    formula_count = sum(len(report.get("formulas_found") or {}) for report in valid_reports)
+    if contract.get("requires_formula_evidence") and formula_count == 0:
+        missing.append("no verified worksheet formulas were found")
+
+    chart_count = sum(len(report.get("existing_charts") or []) for report in valid_reports)
+    required_chart_count = int(contract.get("required_chart_count") or 0)
+    if required_chart_count and chart_count < required_chart_count:
+        missing.append(
+            f"only {chart_count} verified chart(s) found; at least {required_chart_count} were explicitly requested"
+        )
+
+    return {
+        "verified": not missing,
+        "status": "delivery_contract_verified" if not missing else "delivery_contract_incomplete",
+        "missing": missing,
+        "contract": contract,
+        "observed_sheet_names": names,
+        "observed_formula_count": formula_count,
+        "observed_chart_count": chart_count,
+    }
+
+
+def _delivery_contract_repair_request(result: dict) -> str:
+    missing = result.get("missing") if isinstance(result, dict) else []
+    detail = "; ".join(str(item) for item in missing) or "the final workbook evidence is incomplete"
+    return (
+        "The controller blocked completion because the live workbook does not yet meet explicit user "
+        "requirements: " + detail + ". Do not describe this as complete. Inspect the relevant worksheet and choose "
+        "the fastest safe capability from the catalogue for each missing item (skill/API for precise Excel work, a "
+        "documented shortcut for a standard command, UIA/OmniParser only for an unknown visible control, and codegen "
+        "only for one justified atomic fallback). Verify each result, then run inspect_workbook with no sheet_name again."
+    )
+
+
 def _audit_workbook_formula_errors() -> dict:
     """Read every worksheet for displayed Excel errors before completion."""
     try:
@@ -1259,6 +1500,23 @@ def _audit_workbook_formula_errors() -> dict:
         }
     audit.setdefault("formula_errors", [])
     return audit
+
+
+def _latest_workbook_wide_inspection(action_steps: list[dict], after_index: int = -1) -> dict | None:
+    """Return the newest successful full-workbook inspection after a change."""
+    for index in range(len(action_steps) - 1, after_index, -1):
+        step = action_steps[index]
+        result = step.get("result") if isinstance(step, dict) else None
+        if (
+            isinstance(step, dict)
+            and step.get("tool_name") == "inspect_workbook"
+            and step.get("status") == "success"
+            and isinstance(result, dict)
+            and result.get("verified") is True
+            and isinstance(result.get("sheet_reports"), list)
+        ):
+            return dict(result)
+    return None
 
 
 def _formula_error_summary(errors: list[dict], limit: int = 12) -> str:
@@ -1340,6 +1598,14 @@ def _build_final_response_reality_check(task: AgentTask, ai_final_text: str) -> 
         return (
             "INCOMPLETE: " + detail + " "
             "The requested task was not completed and no workbook result should be relied on."
+        )
+
+    contract = getattr(task, "last_delivery_contract", None)
+    if isinstance(contract, dict) and contract.get("verified") is False:
+        missing = "; ".join(str(item) for item in contract.get("missing", []))
+        return (
+            "INCOMPLETE: The workbook did not meet the requested deliverables. "
+            + (missing or "The final workbook evidence was incomplete.")
         )
 
     if not failed_or_unresolved:
@@ -1630,6 +1896,9 @@ def get_task_completion_status(task: AgentTask) -> str:
         return "failed"
     if task.started_in_execution_mode and not meaningful_actions:
         return "failed"
+    contract = getattr(task, "last_delivery_contract", None)
+    if isinstance(contract, dict) and contract.get("verified") is False:
+        return "completed_with_warnings" if meaningful_actions else "failed"
     if unresolved or explicitly_incomplete:
         return "completed_with_warnings" if meaningful_actions else "failed"
     return "completed"
@@ -1686,6 +1955,8 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             workbook = start_task_workbook()
             task.workbook_name = workbook.name
             task.excel_app_pid = workbook.app.pid
+            task.workbook_path = workbook.fullname
+            task.owns_new_workbook = True
         else:
             bind_workbook_context(task.workbook_name, task.excel_app_pid)
         _keep_excel_visible(task)
@@ -1979,8 +2250,61 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             if (requires_final_verification and has_attempted_action
                     and not has_final_inspection and not task.final_verification_requested):
                 task.final_verification_requested = True
-                task.log_step("Final verification required: requesting a fresh workbook inspection.")
-                if config.VISUAL_ONLY_MODE:
+                if not config.VISUAL_ONLY_MODE:
+                    # This is a controller-owned, read-only safety check, not
+                    # an Excel edit the model needs to choose. Waiting for an
+                    # extra model turn just to request inspect_workbook made a
+                    # finished sheet batch appear frozen for minutes when a
+                    # provider was slow. Run the same verified inspection now.
+                    task.log_step("Final verification required: running a fresh workbook inspection.")
+                    try:
+                        final_result, final_layer, final_code = dispatch_action(
+                            "inspect_workbook", {},
+                            workbook_name=task.workbook_name,
+                            excel_app_pid=task.excel_app_pid,
+                            recover_excel_on_timeout=False,
+                        )
+                    except Exception as exc:
+                        final_result, final_layer, final_code = (
+                            {"verified": False, "status": "final_inspection_failed", "error": str(exc)},
+                            "error",
+                            None,
+                        )
+                    final_status = (
+                        "success" if isinstance(final_result, dict) and final_result.get("verified") is True
+                        else "failed"
+                    )
+                    final_step = {
+                        "type": "action", "tool_name": "inspect_workbook",
+                        "execution_layer": final_layer, "input": {},
+                        "result": final_result, "status": final_status,
+                    }
+                    task.structured_steps.append(final_step)
+                    action_steps.append(final_step)
+                    if db is not None and db_task_id is not None:
+                        _log_action_to_db(
+                            db, db_task_id, "inspect_workbook", {}, final_layer,
+                            final_code, final_result, final_status,
+                        )
+                    if final_status == "success":
+                        _adopt_workbook_from_result(task, final_result, db, db_task_id)
+                        _keep_excel_visible(task)
+                        has_final_inspection = True
+                        task.log_step("Final workbook inspection completed by the controller.")
+                    else:
+                        detail = final_result.get("error", "no details") if isinstance(final_result, dict) else "invalid result"
+                        task.log_step("Final workbook inspection failed: " + str(detail))
+                        task.messages.append({
+                            "role": "user",
+                            "content": (
+                                "The controller could not complete the required final workbook inspection. "
+                                "Call inspect_workbook with no sheet_name now; do not claim completion. Error: "
+                                + str(detail)
+                            ),
+                        })
+                        continue
+                else:
+                    task.log_step("Final verification required: requesting a fresh workbook inspection.")
                     required_json = json.dumps(required_visual_sheets)
                     verification_request = (
                         "Before giving a final answer, call verify_task_completion with expected_sheets "
@@ -1988,59 +2312,35 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                         "It must confirm every required sheet exists after the final workbook change. "
                         "Fix any missing sheets before trying the check again."
                     )
-                else:
-                    actual_sheet_names = _live_sheet_names()
-                    known_sheets = ", ".join(actual_sheet_names) if actual_sheet_names else "(could not read sheet names)"
-                    verification_request = (
-                        f"Before giving a final answer, call {verification_tool} with NO sheet_name now as the final "
-                        "workbook-wide verification step. It must inspect every worksheet and report all formula errors. "
-                        "Compare the live state to every requested deliverable. Fix any gaps you find; if you cannot "
-                        "fix them, respond INCOMPLETE with the missing items. "
-                        f"The live workbook currently contains only these sheet names: {known_sheets}. "
-                        "Never inspect or claim a sheet name outside that exact list."
-                    )
-                task.messages.append({
-                    "role": "user",
-                    "content": verification_request,
-                })
-                continue
-
-            requested_file_name = _requested_workbook_file_name(task.instruction)
-            if (
-                config.VISUAL_ONLY_MODE
-                and requested_file_name
-                and has_final_inspection
-                and not any(
-                    index > last_workbook_change
-                    and step.get("tool_name") == "save_workbook"
-                    and step.get("status") == "success"
-                    and isinstance(step.get("result"), dict)
-                    and step["result"].get("verified") is True
-                    for index, step in enumerate(action_steps)
-                )
-                and not task.final_save_requested
-            ):
-                task.final_save_requested = True
-                task.log_step("Final verification passed; requesting the one required named workbook save.")
-                task.messages.append({
-                    "role": "user",
-                    "content": (
-                        "The required completion check passed. Now call save_workbook exactly once with "
-                        f"file_name='{requested_file_name}'. Do not use Save As, Ctrl+S, or any other save route."
-                    ),
-                })
-                continue
+                    task.messages.append({
+                        "role": "user",
+                        "content": verification_request,
+                    })
+                    continue
 
             formula_audit = None
             formula_errors = []
             if requires_final_verification and has_attempted_action and has_final_inspection:
-                formula_audit = _audit_workbook_formula_errors()
+                # A successful final inspect_workbook already contains the
+                # workbook-wide displayed-error scan. Reuse that exact live
+                # evidence instead of issuing a second redundant COM call.
+                formula_audit = (
+                    _latest_workbook_wide_inspection(action_steps, last_workbook_change)
+                    if not config.VISUAL_ONLY_MODE else None
+                )
+                if formula_audit is None:
+                    formula_audit = _audit_workbook_formula_errors()
                 task.last_formula_error_audit = formula_audit
                 task.structured_steps.append({
                     "type": "formula_audit",
                     "result": formula_audit,
                     "status": "success" if formula_audit.get("verified") is True else "failed",
                 })
+                if formula_audit.get("verified") is not True:
+                    task.log_step(
+                        "Formula audit unavailable: "
+                        + str(formula_audit.get("error", formula_audit.get("status", "no details")))
+                    )
                 formula_errors = [
                     error for error in formula_audit.get("formula_errors", [])
                     if isinstance(error, dict)
@@ -2062,6 +2362,67 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                     })
                     continue
 
+            delivery_contract = None
+            if (
+                requires_final_verification
+                and has_attempted_action
+                and has_final_inspection
+                and formula_audit is not None
+                and formula_audit.get("verified") is True
+            ):
+                delivery_contract = _evaluate_workbook_delivery_contract(task, formula_audit)
+                task.last_delivery_contract = delivery_contract
+                task.structured_steps.append({
+                    "type": "delivery_contract",
+                    "result": delivery_contract,
+                    "status": "success" if delivery_contract.get("verified") is True else "blocked",
+                })
+                if delivery_contract.get("verified") is not True and task.delivery_contract_repair_requests < 2:
+                    task.delivery_contract_repair_requests += 1
+                    task.log_step(
+                        "Completion blocked: live workbook evidence is missing required deliverables. "
+                        "Requesting a focused repair."
+                    )
+                    task.messages.append({
+                        "role": "user",
+                        "content": _delivery_contract_repair_request(delivery_contract),
+                    })
+                    continue
+
+            requested_file_name = _requested_workbook_file_name(task.instruction)
+            successful_named_save = any(
+                index > last_workbook_change
+                and step.get("tool_name") == "save_workbook"
+                and step.get("status") == "success"
+                and isinstance(step.get("result"), dict)
+                and step["result"].get("verified") is True
+                and str(step.get("result", {}).get("file_name") or "").casefold()
+                    == str(requested_file_name or "").casefold()
+                for index, step in enumerate(action_steps)
+            )
+            if (
+                requested_file_name
+                and delivery_contract is not None
+                and delivery_contract.get("verified") is True
+                and not successful_named_save
+            ):
+                if not task.final_save_requested:
+                    task.final_save_requested = True
+                    task.log_step("Final verification passed; requesting the one required named workbook save.")
+                    task.messages.append({
+                        "role": "user",
+                        "content": (
+                            "The required workbook check passed. Now call save_workbook exactly once with "
+                            f"file_name='{requested_file_name}'. Do not use a different filename or any other save route."
+                        ),
+                    })
+                    continue
+                task.last_delivery_contract = {
+                    "verified": False,
+                    "status": "required_final_save_missing",
+                    "missing": [f"workbook was not verified as saved with the requested filename: {requested_file_name}"],
+                }
+
             task.is_done = True
             final_text = text_blocks[-1] if text_blocks else "Task complete."
             if requires_final_verification and has_attempted_action and not has_final_inspection:
@@ -2080,6 +2441,12 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                     + _formula_error_summary(formula_errors)
                     + ".\n\n" + final_text
                 )
+            elif isinstance(task.last_delivery_contract, dict) and task.last_delivery_contract.get("verified") is False:
+                final_text = (
+                    "INCOMPLETE: "
+                    + "; ".join(str(item) for item in task.last_delivery_contract.get("missing", []))
+                    + ".\n\n" + final_text
+                )
             task.final_response = _build_final_response_reality_check(task, final_text)
             task.chat_transcript.append({"role": "assistant", "text": task.final_response})
 
@@ -2096,6 +2463,15 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                     "⚠️ Task stopped with unresolved failures: "
                     + ", ".join(failed_names)
                     + ". Do not treat this run as fully complete."
+                )
+            elif isinstance(task.last_delivery_contract, dict) and task.last_delivery_contract.get("verified") is False:
+                task.log_step(
+                    "⚠️ Task stopped incomplete: the final delivery contract was not satisfied. "
+                    + "; ".join(str(item) for item in task.last_delivery_contract.get("missing", []))
+                )
+            elif formula_audit is not None and formula_audit.get("verified") is not True:
+                task.log_step(
+                    "⚠️ Task stopped incomplete: the workbook-wide formula audit was unavailable."
                 )
             else:
                 task.log_step("✅ Task complete.")
@@ -2288,7 +2664,7 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                     providers.submit_tool_result(task, tool_call, result)
                     continue
 
-            if config.VISUAL_ONLY_MODE and _is_visual_save_attempt(tool_name, tool_input):
+            if _is_visual_save_attempt(tool_name, tool_input):
                 required_file_name = _requested_workbook_file_name(task.instruction)
                 supplied_file_name = str(tool_input.get("file_name", "")).strip()
                 if required_file_name and supplied_file_name.casefold() != required_file_name.casefold():
@@ -2304,6 +2680,32 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                     task.structured_steps.append({
                         "type": "action", "tool_name": tool_name,
                         "execution_layer": "required_filename_guard",
+                        "input": tool_input, "result": result, "status": "blocked",
+                    })
+                    providers.submit_tool_result(task, tool_call, result)
+                    continue
+
+            if not config.VISUAL_ONLY_MODE and _is_visual_save_attempt(tool_name, tool_input):
+                contract = getattr(task, "delivery_contract", {}) or {}
+                structured_build = bool(
+                    contract.get("required_sheet_names")
+                    or contract.get("required_table_names")
+                    or contract.get("requires_formula_evidence")
+                    or contract.get("required_chart_count")
+                )
+                if structured_build and not task.final_save_requested:
+                    result = {
+                        "verified": False,
+                        "status": "save_deferred_until_delivery_verification",
+                        "error": (
+                            "Do not save this structured workbook yet. Complete the requested sheets, data, "
+                            "tables, formulas, and charts; then let the final inspection and delivery contract "
+                            "pass before the one final save_workbook action."
+                        ),
+                    }
+                    task.log_step("Blocked an early save; final workbook evidence is still required.")
+                    task.structured_steps.append({
+                        "type": "action", "tool_name": tool_name, "execution_layer": "save_order_guard",
                         "input": tool_input, "result": result, "status": "blocked",
                     })
                     providers.submit_tool_result(task, tool_call, result)
@@ -2448,16 +2850,36 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 )
                 workbook_lost = _is_lost_task_workbook(result)
                 if workbook_lost:
-                    status = "failed"
-                    task.set_recovery_state(
-                        "needs_user_action",
-                        "Recovery stopped: the Excel window bound to this task is no longer available. Keep the intended workbook open, then start a new task.",
-                        tool_name=tool_name,
-                        safe_to_continue=False,
-                    )
-                    task.log_step(
-                        "Excel window lost. Stopping this task without sending recovery shortcuts or opening another workbook."
-                    )
+                    reopened = _recover_closed_owned_workbook(task)
+                    if reopened.get("verified") is True:
+                        result.update({
+                            key: value for key, value in reopened.items()
+                            if key in {"workbook_recovered", "workbook_name", "excel_app_pid", "file_path", "recovery_reason"}
+                        })
+                        _adopt_recovered_workbook_identity(task, result, db, db_task_id)
+                        _keep_excel_visible(task)
+                        status = "retried"
+                        task.set_recovery_state(
+                            "retry_pending",
+                            "Excel was closed, so Xelora reopened its own saved workbook and will inspect it before continuing.",
+                            tool_name=tool_name,
+                            safe_to_continue=False,
+                        )
+                        task.log_step(
+                            "Excel window closed. Reopened the same saved Xelora workbook once; "
+                            "the interrupted action will be inspected before any retry."
+                        )
+                    else:
+                        status = "failed"
+                        task.set_recovery_state(
+                            "needs_user_action",
+                            "Recovery stopped: the Excel window bound to this task is no longer available. Keep the intended workbook open, then start a new task.",
+                            tool_name=tool_name,
+                            safe_to_continue=False,
+                        )
+                        task.log_step(
+                            "Excel window lost. Stopping this task without sending recovery shortcuts or opening another workbook."
+                        )
                 elif _should_schedule_codegen_fallback(tool_name, result, execution_layer):
                     _schedule_codegen_fallback(task, tool_name, tool_input, result)
                     status = "fallback_pending"
@@ -2518,6 +2940,8 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             })
 
             if status == "success" and isinstance(result, dict) and result.get("verified") is True:
+                if tool_name == "create_sheets":
+                    _record_created_sheets_in_delivery_contract(task, result, tool_input)
                 if fallback_being_executed:
                     _mark_codegen_fallback_recovered(task, fallback_being_executed)
                     task.clear_recovery_state(
@@ -2546,6 +2970,8 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                     # check. A later final response must obtain fresh proof.
                     task.final_verification_requested = False
                     task.final_save_requested = False
+                    task.last_delivery_contract = None
+                    task.delivery_contract_repair_requests = 0
                 _keep_excel_visible(task)
                 _show_verified_result_in_excel(task, tool_name, tool_input, result)
                 _capture_visual_checkpoint(task, tool_name)
@@ -2558,7 +2984,7 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
 
             providers.submit_tool_result(task, tool_call, result)
 
-            if is_failure and _is_lost_task_workbook(result):
+            if is_failure and _is_lost_task_workbook(result) and result.get("workbook_recovered") is not True:
                 task.is_done = True
                 task.final_response = (
                     "INCOMPLETE: The workbook bound to this task became unavailable. "

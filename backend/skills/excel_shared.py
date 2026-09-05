@@ -390,6 +390,57 @@ def save_active_workbook_best_effort():
         pass
 
 
+def reopen_owned_workbook(file_path: str) -> dict:
+    """Open one exact saved Xelora workbook after its Excel window was closed.
+
+    The caller supplies the checkpoint path recorded for the active task. This
+    routine never falls back to ``xw.apps.active`` and never attaches to an
+    unrelated Excel window, so an accidental close cannot redirect later work
+    into a user's other workbook.
+    """
+    normalized_path = normalize_workbook_path(file_path)
+    if not os.path.isfile(normalized_path):
+        return {
+            "verified": False,
+            "status": "workbook_checkpoint_not_found",
+            "error": f"The saved task workbook checkpoint was not found: {normalized_path}",
+        }
+
+    app = None
+    try:
+        app = xw.App(visible=True)
+        retain_owned_excel_app(app)
+        if not _wait_until_responsive(app):
+            raise RuntimeError("Excel did not become responsive while reopening the saved task workbook.")
+        _harden_app(app)
+        _close_startup_books(app)
+        wb = app.books.open(normalized_path)
+        restore_screen_updating(app)
+        maximize = _maximize_excel_window(app)
+        _bind_resolved_workbook(wb)
+        return {
+            "verified": True,
+            "status": "owned_workbook_reopened",
+            "workbook_name": wb.name,
+            "excel_app_pid": app.pid,
+            "file_path": normalized_path,
+            "window_maximized": maximize.get("verified") is True,
+            "verification_note": "Reopened the same saved Xelora workbook after its Excel window was closed.",
+        }
+    except Exception as exc:
+        if app is not None:
+            try:
+                _forget_owned_excel_app(_app_pid(app))
+                app.quit()
+            except Exception:
+                pass
+        return {
+            "verified": False,
+            "status": "owned_workbook_reopen_failed",
+            "error": str(exc),
+        }
+
+
 def _wait_until_responsive(app, timeout=RESPONSIVENESS_TIMEOUT_SECONDS) -> bool:
     """Polls a cheap, harmless COM call until the relaunched Excel process
     genuinely answers, instead of a blind sleep and hoping - this is what

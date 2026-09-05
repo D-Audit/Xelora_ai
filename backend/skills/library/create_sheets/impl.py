@@ -1,6 +1,15 @@
-"""Fast, idempotent worksheet creation for multi-sheet workbook requests."""
+"""Fast, ordered, idempotent worksheet creation for multi-sheet requests."""
 
-from skills.excel_shared import get_active_workbook
+from skills.excel_shared import get_active_workbook, normalize, use_task_bootstrap_workbook
+
+
+def _is_blank_startup_sheet(sheet) -> bool:
+    """Return whether a new workbook's only default sheet has no contents."""
+    try:
+        values = normalize(sheet.used_range.value)
+    except Exception:
+        return False
+    return all(value in (None, "") for row in values for value in row)
 
 
 def run(sheet_names: list[str]):
@@ -36,12 +45,33 @@ def run(sheet_names: list[str]):
     workbook = get_active_workbook()
     before = {sheet.name for sheet in workbook.sheets}
     created = []
+    reused_default_sheet = None
     try:
+        # A new Xelora-owned workbook begins as one empty Sheet1. Renaming it
+        # to the first requested name avoids a stray blank tab and lets every
+        # later insertion preserve the user's requested left-to-right order.
+        previous_sheet = None
+        if (
+            use_task_bootstrap_workbook()
+            and len(workbook.sheets) == 1
+            and _is_blank_startup_sheet(workbook.sheets[0])
+            and normalized[0] not in before
+        ):
+            previous_sheet = workbook.sheets[0]
+            default_sheet_name = previous_sheet.name
+            previous_sheet.name = normalized[0]
+            reused_default_sheet = normalized[0]
+            created.append(normalized[0])
+            before.remove(default_sheet_name)
+            before.add(normalized[0])
+
         for name in normalized:
             if name not in before:
-                workbook.sheets.add(name)
+                previous_sheet = workbook.sheets.add(name, after=previous_sheet)
                 created.append(name)
                 before.add(name)
+            elif previous_sheet is None:
+                previous_sheet = workbook.sheets[name]
         # One checkpoint instead of one disk save per sheet substantially
         # reduces perceived delay while keeping the complete batch recoverable.
         workbook.save()
@@ -55,16 +85,27 @@ def run(sheet_names: list[str]):
             "status": "sheet_batch_create_failed",
         }
 
-    final_names = {sheet.name for sheet in workbook.sheets}
+    final_sheet_names = [sheet.name for sheet in workbook.sheets]
+    final_names = set(final_sheet_names)
     missing = [name for name in normalized if name not in final_names]
+    requested_order_verified = (
+        [name for name in final_sheet_names if name in set(normalized)] == normalized
+    )
     return {
         "sheet_names": normalized,
         "created_sheet_names": created,
+        "reused_default_sheet": reused_default_sheet,
         "already_present_sheet_names": [name for name in normalized if name not in created],
-        "verified": not missing,
-        "status": "sheets_created" if not missing else "sheet_batch_verification_failed",
+        "final_sheet_names": final_sheet_names,
+        "requested_order_verified": requested_order_verified,
+        "verified": not missing and requested_order_verified,
+        "status": "sheets_created" if not missing and requested_order_verified else "sheet_batch_verification_failed",
         "verification_note": (
-            f"Confirmed all {len(normalized)} requested worksheet tabs exist after one saved Excel action."
-            if not missing else f"Missing worksheet tabs after creation: {missing}"
+            f"Confirmed all {len(normalized)} requested worksheet tabs exist in the requested order after one saved Excel action."
+            if not missing and requested_order_verified
+            else (
+                f"Missing worksheet tabs after creation: {missing}"
+                if missing else "Worksheet tabs exist but their order could not be verified."
+            )
         ),
     }
