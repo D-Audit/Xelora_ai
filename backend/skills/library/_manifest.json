@@ -216,7 +216,7 @@
   },
   "insert_formula": {
     "category": "write",
-    "sha256_impl": "e35dff68990ad1ecf1975b2506ebd0de33f5ca5293a627d882d0c795121ed068",
+    "sha256_impl": "6cbcab1f0683b7bc85997b5dc1e1ebd018aa097da24f81d1a119b8646c78986e",
     "sha256_skill_md": "d97f7978d8e0877e1467c7c5b9e3ef9e060dc34cc2909487d4ff3f86b396b7c9"
   },
   "insert_picture": {
@@ -309,6 +309,11 @@
     "sha256_impl": "33afe7e9792aaf740ee5c9f60cb154a6fa66a96a738089216ae141877b858609",
     "sha256_skill_md": "37e15fc2e033fe3336ee74e0b1a9e112e08f8a4909c70916f1ca592e5d36cf93"
   },
+  "scenario_builder": {
+    "category": "analysis",
+    "sha256_impl": "4b32554c413fec91c7d5635a850480b6aa62f9a2fa22417a7ad2d290a8257251",
+    "sha256_skill_md": "edaa4eeabf3c910570f09c307a4cabc3ff615f91ab50ceb278137b9085c132ca"
+  },
   "set_autofilter": {
     "category": "data",
     "sha256_impl": "663a9dadc0f96393fc588eb14a5561a5a52f47e88fe3901f7a3520e0ca848736",
@@ -339,6 +344,11 @@
     "sha256_impl": "bb79bfebfe0ba77f1d6a97ba1f2ba7fa7a4e305ff6886a1a10bed1c650a63b8e",
     "sha256_skill_md": "79ffa95153a67b2cd1d4298019220a03cf73c429ac7a384d1834c17f601eb64e"
   },
+  "unpivot_data": {
+    "category": "transform",
+    "sha256_impl": "9fe5caa2d74032e513bad84ad0e3df0dcd02320d5edbee01a63f1518a3dd2cdb",
+    "sha256_skill_md": "17c6ccfde2e5610c5d2131ed415c8f63f6a69f610d37d60a90a938a23e7efa87"
+  },
   "unprotect_sheet": {
     "category": "structure",
     "sha256_impl": "375e3cde491002a0a475ac8ba610b173e4491d7a393603897390e44f03c6bbf7",
@@ -348,6 +358,11 @@
     "category": "write",
     "sha256_impl": "ebf03d8bde8691fcf7d6bf2093b28a7b5a425f1eb3c05e6fe43ece6574c16621",
     "sha256_skill_md": "9046ead9168b0ea3ad1e764db02249adbb1dc024f0f0d7a8798222afebfec949"
+  },
+  "variance_analysis": {
+    "category": "analysis",
+    "sha256_impl": "6776d28929aec8b2dd944f87f5560256f72a84288f47761d964fa8dcedeb7ad1",
+    "sha256_skill_md": "aba27b9f72a77ba3d9cb1608759204a63d924dd18685827cb548b486c6019944"
   },
   "write_table": {
     "category": "write",

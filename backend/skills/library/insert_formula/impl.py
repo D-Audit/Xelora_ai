@@ -75,6 +75,30 @@ def _first_blank_formula_result(sheet, rng):
     return None
 
 
+def _first_missing_formula_in_range(sheet, rng, prefer_formula2: bool = False):
+    """Return the first cell in a filled range that no longer stores a formula.
+
+    ``FillDown`` can occasionally leave a value behind in a middle row when a
+    workbook is interrupted or protected.  Checking only the first and last
+    cells would then report a calculated column as healthy even though later
+    source-data changes could not recalculate that row.  Every target cell
+    must still begin with ``=`` before the fill is accepted.
+    """
+    try:
+        formula_values = normalize(rng.formula2 if prefer_formula2 else rng.formula)
+    except Exception:
+        formula_values = normalize(rng.formula)
+    start_row, start_column = rng.row, rng.column
+    for row_index, row in enumerate(formula_values):
+        for column_index, value in enumerate(row):
+            if not isinstance(value, str) or not value.startswith("="):
+                return {
+                    "address": sheet.range((start_row + row_index, start_column + column_index)).address,
+                    "stored_value": value,
+                }
+    return None
+
+
 def _formula_may_spill(formula: str) -> bool:
     upper = formula.upper()
     return any(fn in upper for fn in _SPILLING_FUNCTIONS)
@@ -399,6 +423,21 @@ def run(
             ),
         }
 
+    if fill_range is not None:
+        missing_formula = _first_missing_formula_in_range(sheet, checked_range, prefers_formula2)
+        if missing_formula:
+            return {
+                "sheet": sheet_name, "cell": cell, "formula": formula, "fill_to": fill_to,
+                "calculated_value": calculated_value, "fill_end_value": fill_end_value,
+                "formula_cell": missing_formula["address"],
+                "stored_value": missing_formula["stored_value"],
+                "status": "fill_down_not_preserved", "attempts": attempts, "verified": False,
+                "verification_note": (
+                    "Excel did not preserve a formula in every filled target cell; "
+                    f"{missing_formula['address']} is not recalculable."
+                ),
+            }
+
     if not allow_blank_result:
         blank_result = _first_blank_formula_result(sheet, checked_range)
         if blank_result:
@@ -456,6 +495,6 @@ def run(
         "verification_note": (
             "Confirmed the requested formula is stored and calculates without an Excel error."
             if fill_end is None else
-            f"Confirmed the formula is stored at {cell}, filled through {fill_to}, and both endpoints calculate without an Excel error."
+            f"Confirmed the formula is stored at {cell}, filled through {fill_to}, remains a formula in every target cell, and calculates without an Excel error."
         ),
     }

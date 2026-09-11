@@ -43,7 +43,11 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 LOCAL_API_KEY = os.getenv("LOCAL_API_KEY", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
-MAX_STEPS_PER_TASK = int(_local_agent_setting("MAX_STEPS_PER_TASK", "60"))
+# Complex dashboard work can legitimately need several planning, repair, and
+# verification turns. Keep a finite safety boundary, but do not stop a healthy
+# task at the old 60-turn default before its charts and final audit are done.
+# 180 still leaves a firm stop for a genuinely faulty agent loop.
+MAX_STEPS_PER_TASK = int(_local_agent_setting("MAX_STEPS_PER_TASK", "180"))
 MAX_RETRIES_PER_ACTION = int(_local_agent_setting("MAX_RETRIES_PER_ACTION", "2"))
 SKILL_TIMEOUT_SECONDS = int(_local_agent_setting("SKILL_TIMEOUT_SECONDS", "60"))
 # Startup must not appear frozen because an optional Excel-version probe is
@@ -204,3 +208,15 @@ RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", 60))
 RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", 60))
 
 KNOWLEDGE_INGEST_ALLOWED_DIR = os.getenv("KNOWLEDGE_INGEST_ALLOWED_DIR", os.path.join(os.path.expanduser("~"), "Documents"))
+
+# Optional agent-expansion features. They are independently switchable so a
+# desktop installation can disable a nonessential capability without changing
+# its existing Excel execution path.
+ENABLE_TASK_PLANNER = _local_agent_setting("ENABLE_TASK_PLANNER", "true").lower() == "true"
+ENABLE_SUBAGENTS = _local_agent_setting("ENABLE_SUBAGENTS", "true").lower() == "true"
+ENABLE_SKILL_EXTRACTION = _local_agent_setting("ENABLE_SKILL_EXTRACTION", "true").lower() == "true"
+ENABLE_DATA_PROFILING = _local_agent_setting("ENABLE_DATA_PROFILING", "true").lower() == "true"
+ENABLE_PDF_REPORTS = _local_agent_setting("ENABLE_PDF_REPORTS", "true").lower() == "true"
+ENABLE_SSE_STREAMING = _local_agent_setting("ENABLE_SSE_STREAMING", "true").lower() == "true"
+ENABLE_MEMORY_STORAGE = _local_agent_setting("ENABLE_MEMORY_STORAGE", "true").lower() == "true"
+MEMORY_STORE_DIR = _local_agent_setting("MEMORY_STORE_DIR", str(Path(__file__).parent / "memory" / "store"))

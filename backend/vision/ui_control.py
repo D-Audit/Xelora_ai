@@ -1148,8 +1148,35 @@ def go_to_sheet(sheet_name: str) -> dict:
     This is more reliable than using Go To dialog with sheet prefix
     (e.g., "Sheet1!A1") which often fails with cross-sheet references.
     """
+    if not isinstance(sheet_name, str) or not sheet_name.strip():
+        return {"success": False, "verified": False, "error": "sheet_name must be a non-empty string"}
+    sheet_name = sheet_name.strip()
+
+    # The Excel object model is authoritative. UIA selection state is a
+    # fallback only: it can be unavailable for a hidden tab or a background
+    # window even while Excel knows exactly which worksheet is active.
+    object_model_error = None
+    try:
+        from skills.excel_shared import get_active_workbook
+
+        workbook = get_active_workbook()
+        target = next((sheet for sheet in workbook.sheets if str(sheet.name).casefold() == sheet_name.casefold()), None)
+        if target is not None:
+            target.activate()
+            active_name = str(workbook.api.ActiveSheet.Name)
+            if active_name.casefold() == sheet_name.casefold():
+                return {
+                    "success": True,
+                    "verified": True,
+                    "sheet_name": active_name,
+                    "method": "excel_object_model",
+                    "verification_note": f"Excel activated worksheet '{active_name}'.",
+                }
+    except Exception as exc:
+        object_model_error = str(exc)
+
     if not _HAS_PYWINAUTO:
-        return {"success": False, "verified": False, "error": "pywinauto not available"}
+        return {"success": False, "verified": False, "error": object_model_error or "pywinauto not available"}
     
     try:
         window = _get_agent_excel_window()
@@ -1178,13 +1205,22 @@ def go_to_sheet(sheet_name: str) -> dict:
         
         # Click the sheet tab to switch to it
         target_tab.click_input()
-        time.sleep(0.3)
+        time.sleep(0.5)
+        active = _get_active_sheet_name_value()
+        if active is None or active.casefold() != sheet_name.casefold():
+            return {
+                "success": False,
+                "verified": False,
+                "error": f"Excel did not verify activation of worksheet '{sheet_name}'.",
+                "active_sheet": active,
+            }
         
         return {
             "success": True,
-            "sheet_name": sheet_name,
+            "sheet_name": active,
             "verified": True,
-            "verification_note": f"Switched to sheet '{sheet_name}'",
+            "method": "uia_tab",
+            "verification_note": f"Switched to sheet '{active}' and verified it is active.",
         }
     except Exception as e:
         return {"success": False, "verified": False, "error": str(e)}
@@ -1203,14 +1239,19 @@ def navigate_to_cell_on_sheet(sheet_name: str, cell: str = "A1") -> dict:
     
     # Step 2: Navigate to the cell on that sheet
     cell_result = go_to_range(cell)
+    cell_verified = cell_result.get("verified") is True
     return {
-        "success": True,
+        "success": cell_verified,
         "sheet_name": sheet_name,
         "cell": cell,
         "sheet_switched": True,
-        "cell_navigated": cell_result.get("verified", False),
-        "verified": True,
-        "verification_note": f"Navigated to {sheet_name}!{cell}",
+        "cell_navigated": cell_verified,
+        "verified": cell_verified,
+        "verification_note": (
+            f"Navigated to {sheet_name}!{cell}"
+            if cell_verified
+            else f"Activated worksheet '{sheet_name}', but Excel did not verify cell navigation to {cell}."
+        ),
     }
 
 
@@ -1220,6 +1261,13 @@ def _get_active_sheet_name_value() -> str | None:
     Uses pywinauto to find which sheet tab is selected.
     Filters out view mode tabs (Normal, Page Layout, Page Break Preview).
     """
+    try:
+        from skills.excel_shared import get_active_workbook
+
+        return str(get_active_workbook().api.ActiveSheet.Name)
+    except Exception:
+        pass
+
     if not _HAS_PYWINAUTO:
         return None
     
@@ -1277,17 +1325,6 @@ def verify_current_sheet(expected_sheet: str) -> dict:
     """
     active = _get_active_sheet_name_value()
     if active is None:
-        # If we can't determine the active sheet, check if the expected sheet exists
-        # and assume we're on it if go_to_sheet succeeded
-        existing = get_existing_sheet_names()
-        if any(s.lower() == expected_sheet.lower() for s in existing):
-            return {
-                "verified": True,
-                "active_sheet": "unknown (assumed correct)",
-                "expected": expected_sheet,
-                "verification_note": f"Sheet '{expected_sheet}' exists and go_to_sheet was called",
-                "warning": "Could not verify active sheet, but sheet exists",
-            }
         return {
             "verified": False,
             "error": "Could not determine active sheet",
@@ -1301,18 +1338,12 @@ def verify_current_sheet(expected_sheet: str) -> dict:
             "expected": expected_sheet,
             "verification_note": f"Active sheet matches expected: '{active}'",
         }
-    else:
-        # Check if the expected sheet exists at least
-        existing = get_existing_sheet_names()
-        sheet_exists = any(s.lower() == expected_sheet.lower() for s in existing)
-        
-        return {
-            "verified": sheet_exists,  # Trust go_to_sheet if sheet exists
-            "active_sheet": active,
-            "expected": expected_sheet,
-            "verification_note": f"Active sheet is '{active}' but '{expected_sheet}' exists - go_to_sheet was called",
-            "warning": f"Could not confirm active sheet, but '{expected_sheet}' exists" if sheet_exists else None,
-        }
+    return {
+        "verified": False,
+        "active_sheet": active,
+        "expected": expected_sheet,
+        "verification_note": f"Active sheet is '{active}', not '{expected_sheet}'. The target sheet was not verified.",
+    }
 
 
 def get_sheet_info(sheet_name: str = None) -> dict:
@@ -4300,7 +4331,14 @@ def _hotkey_to_sendkeys(keys: list[str]) -> str:
 
 
 def go_to_range(reference: str) -> dict:
-    """Select a cell/range through Excel's native Go To dialog (Ctrl+G)."""
+    """Select a cell or range, preferring Excel's object model over Ctrl+G.
+
+    Ctrl+G opens a modal **Go To** dialog.  Treating that dialog as a successful
+    navigation before proving that it closed left the workbook blocked in some
+    visible sessions.  The object model selects ordinary A1 ranges without any
+    dialog, so it is the authoritative route.  The keyboard dialog remains a
+    narrow fallback for an unavailable object model and must prove it closed.
+    """
     _require_display()
     reference = reference.strip()
     if not _is_valid_go_to_reference(reference):
@@ -4308,9 +4346,61 @@ def go_to_range(reference: str) -> dict:
             "reference must be an A1 cell/range, whole-column range, whole-row range, or defined Excel name. "
             "Quote sheet names containing spaces, for example 'Sales Data'!A:M."
         )
+
+    object_model_error = None
+    try:
+        from skills.excel_shared import get_active_workbook
+
+        workbook = get_active_workbook()
+        target_sheet_name = None
+        local_reference = reference
+        if "!" in reference:
+            sheet_token, local_reference = reference.split("!", 1)
+            sheet_token = sheet_token.strip()
+            if sheet_token.startswith("'") and sheet_token.endswith("'"):
+                sheet_token = sheet_token[1:-1].replace("''", "'")
+            target_sheet_name = sheet_token
+
+        if target_sheet_name:
+            target_sheet = next(
+                (sheet for sheet in workbook.sheets
+                 if str(sheet.name).casefold() == target_sheet_name.casefold()),
+                None,
+            )
+            if target_sheet is None:
+                raise ValueError(f"Worksheet '{target_sheet_name}' was not found in the active workbook.")
+            target_sheet.activate()
+        else:
+            target_sheet = workbook.sheets.active
+
+        try:
+            target_sheet.range(local_reference).select()
+        except Exception:
+            # Defined names can refer to a workbook range rather than a
+            # particular sheet. Excel's own object model resolves those names
+            # without opening the visible Ctrl+G dialog.
+            workbook.app.api.Goto(reference)
+
+        active_sheet_name = str(workbook.api.ActiveSheet.Name)
+        if target_sheet_name and active_sheet_name.casefold() != target_sheet_name.casefold():
+            raise RuntimeError(
+                f"Excel selected a range but did not activate worksheet '{target_sheet_name}' "
+                f"(active: '{active_sheet_name}')."
+            )
+        _clear_parse_cache_safe()
+        return {
+            "reference": reference,
+            "sheet_name": active_sheet_name,
+            "verified": True,
+            "method": "excel_object_model",
+            "verification_note": "Excel selected the requested cell, range, or defined name without opening a dialog.",
+        }
+    except Exception as exc:
+        object_model_error = str(exc)
+
     window = _get_agent_excel_window()
     if not window:
-        raise RuntimeError("Excel window not found")
+        raise RuntimeError(object_model_error or "Excel window not found")
     _require_no_open_popup(window.handle)
     if _activate_excel_window(window):
         pyautogui.hotkey("ctrl", "g")
@@ -4326,11 +4416,24 @@ def go_to_range(reference: str) -> dict:
         window.type_keys("^a", set_foreground=False)
         window.type_keys(reference, set_foreground=False)
         window.type_keys("{ENTER}", set_foreground=False)
-    time.sleep(0.25)
-    # Clear parse cache after navigation (cell selection changed)
+
+    time.sleep(0.3)
+    popup_state = inspect_excel_popups(window.handle)
+    if popup_state.get("status") != "clean":
+        labels = [str(popup.get("title", "dialog")).strip() or "dialog"
+                  for popup in popup_state.get("popups", [])]
+        raise RuntimeError(
+            "Excel did not close the Go To dialog after navigation ("
+            + ", ".join(labels or ["unknown dialog"])
+            + "). The range was not verified; no further worksheet input will be sent."
+        )
+
     _clear_parse_cache_safe()
-    return {"reference": reference, "verified": True,
-            "verification_note": "Excel Go To accepted the requested cell, range, or defined name."}
+    raise RuntimeError(
+        object_model_error
+        or "Excel's Go To dialog closed but the selected range could not be verified. "
+        "Navigation is stopped so later input cannot be written to an unknown cell."
+    )
 
 
 def paste_table(headers: list[str], rows: list[list], start_cell: str = "A1") -> dict:

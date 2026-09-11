@@ -151,16 +151,17 @@ export default function RegisterPage() {
   };
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex justify-center">
+    <div className="auth-page auth-register-page flex flex-col gap-6">
+      <div className="hidden">
         <Link href="/" aria-label="Go to homepage">
           <XeloraLogo size="lg" />
         </Link>
       </div>
 
-      <Card>
-        <CardHeader className="text-center pb-2">
-          <CardTitle className="text-xl font-semibold text-xelora-text">
+      <Card className="auth-card">
+        <CardHeader className="auth-card-header pb-2">
+          <span className="auth-form-kicker">Create your workspace</span>
+          <CardTitle className="auth-form-title text-xelora-text">
             Create your account
           </CardTitle>
           <CardDescription>

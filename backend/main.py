@@ -29,6 +29,9 @@ from database import init_db, get_db
 from learning.memory import set_preference, get_all_preferences
 from learning.pattern_miner import mine_patterns, promotable_patterns
 
+if config.ENABLE_SSE_STREAMING:
+    from streaming.sse import streamer
+
 app = FastAPI(title="AI Excel Agent Backend")
 
 if config.ALLOWED_ORIGINS:
@@ -46,6 +49,11 @@ _next_local_id = 1
 # task runs prevents two background requests from interleaving clicks or
 # workbook operations against the same active Excel window.
 _TASK_EXECUTION_LOCK = threading.Lock()
+
+
+def _require_feature(enabled: bool, feature_name: str) -> None:
+    if not enabled:
+        raise HTTPException(status_code=404, detail=f"{feature_name} is disabled by server configuration.")
 
 
 @app.on_event("startup")
@@ -187,6 +195,8 @@ def start_task(
         _next_local_id += 1
 
     ACTIVE_TASKS[task_id] = task
+    if config.ENABLE_SSE_STREAMING:
+        task.progress_callback = lambda message: streamer.emit_step(task_id, "progress", message)
     _start_task_in_background(task, task_id, user_id, user_prefs)
 
     return {"task_id": task_id, "status": "started",
@@ -210,6 +220,17 @@ def _start_task_in_background(task, task_id, user_id, user_preferences):
             _TASK_EXECUTION_LOCK.acquire()
             task.clear_recovery_state("The workbook is available; starting this task now.")
 
+        history_task_id = None
+        if config.ENABLE_MEMORY_STORAGE:
+            try:
+                from memory.task_history import log_task_start
+                history_task_id = log_task_start(task.instruction, user_id=user_id)
+            except Exception as exc:
+                task.log_step(f"Task history was unavailable: {exc}")
+
+        if config.ENABLE_SSE_STREAMING:
+            streamer.emit_step(task_id, "start", f"Task started: {task.instruction[:160]}")
+
         db = None
         try:
             db = SessionLocal() if SessionLocal is not None else None
@@ -222,7 +243,41 @@ def _start_task_in_background(task, task_id, user_id, user_preferences):
                 f"Reason: {e}"
             )
             task.chat_transcript.append({"role": "assistant", "text": task.final_response})
+            if config.ENABLE_SSE_STREAMING:
+                streamer.emit_error(task_id, str(e))
         finally:
+            status = get_task_completion_status(task)
+            success = status == "completed"
+            actions = _task_actions(task)
+            if config.ENABLE_MEMORY_STORAGE:
+                try:
+                    from memory.chat_memory import store_conversation
+                    from memory.task_history import log_task_action, log_task_complete
+
+                    if history_task_id:
+                        for action in actions:
+                            log_task_action(
+                                history_task_id,
+                                action["name"],
+                                action.get("input", {}),
+                                action.get("result", {}),
+                                user_id=user_id,
+                            )
+                        log_task_complete(
+                            history_task_id,
+                            task.final_response or status,
+                            success,
+                            error=None if success else task.final_response,
+                            user_id=user_id,
+                        )
+                    store_conversation(user_id, task.instruction, actions, task.final_response or status, success)
+                    if config.ENABLE_SKILL_EXTRACTION:
+                        from agent.skills import extract_skills_from_task
+                        extract_skills_from_task(task.instruction, actions, success, user_id=user_id)
+                except Exception as exc:
+                    task.log_step(f"Task learning was unavailable: {exc}")
+            if config.ENABLE_SSE_STREAMING:
+                streamer.emit_completion(task_id, success, task.final_response or status)
             try:
                 if db is not None:
                     try:
@@ -244,6 +299,22 @@ def _start_task_in_background(task, task_id, user_id, user_preferences):
 
     thread = threading.Thread(target=_worker, daemon=True)
     thread.start()
+
+
+def _task_actions(task: AgentTask) -> list[dict]:
+    """Normalize the core executor's action steps for reports and memory."""
+    actions = []
+    for step in task.structured_steps:
+        if step.get("type") != "action":
+            continue
+        result = step.get("result")
+        actions.append({
+            "name": step.get("tool_name", "unknown"),
+            "input": step.get("input", step.get("tool_input", {})) or {},
+            "result": result if isinstance(result, dict) else {"result": result},
+            "status": step.get("status"),
+        })
+    return actions
 
 
 @app.post("/task/{task_id}/pause", dependencies=_AUTH)
@@ -603,4 +674,126 @@ def health_check():
     return {"status": "backend is running", "ai_provider": config.AI_PROVIDER,
             "persistence": bool(config.DATABASE_URL), "visual_fallback": config.ENABLE_VISUAL_FALLBACK,
             "visual_only_mode": config.VISUAL_ONLY_MODE,
-            "codegen_layer": config.ENABLE_CODEGEN_LAYER}
+            "codegen_layer": config.ENABLE_CODEGEN_LAYER,
+            "agent_expansion": {
+                "task_planner": config.ENABLE_TASK_PLANNER,
+                "subagents": config.ENABLE_SUBAGENTS,
+                "skill_extraction": config.ENABLE_SKILL_EXTRACTION,
+                "data_profiling": config.ENABLE_DATA_PROFILING,
+                "pdf_reports": config.ENABLE_PDF_REPORTS,
+                "sse_streaming": config.ENABLE_SSE_STREAMING,
+                "memory_storage": config.ENABLE_MEMORY_STORAGE,
+            }}
+
+
+# ── Agent memory, learned skills, and reporting ─────────────────────
+
+@app.get("/memory/{user_id}", dependencies=_AUTH)
+def get_user_memory(user_id: int, jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
+    _require_feature(config.ENABLE_MEMORY_STORAGE, "Agent memory")
+    _assert_user_scope(user_id, jwt_user_id)
+    from memory.chat_memory import get_user_profile
+    profile = get_user_profile(user_id)
+    return {"profile": profile, "memory_count": profile["total_tasks"]}
+
+
+@app.get("/memory/{user_id}/similar", dependencies=_AUTH)
+def get_similar_memories(user_id: int, query: str, jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
+    _require_feature(config.ENABLE_MEMORY_STORAGE, "Agent memory")
+    _assert_user_scope(user_id, jwt_user_id)
+    from memory.chat_memory import get_relevant_memories
+    return {"memories": get_relevant_memories(user_id, query)}
+
+
+@app.get("/skills", dependencies=_AUTH)
+def list_agent_skills(jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
+    _require_feature(config.ENABLE_MEMORY_STORAGE, "Learned skills")
+    from memory.skill_store import get_all_skills
+    return {"skills": get_all_skills(user_id=jwt_user_id)}
+
+
+@app.get("/skills/recommend", dependencies=_AUTH)
+def recommend_skills(instruction: str, jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
+    _require_feature(config.ENABLE_MEMORY_STORAGE, "Learned skills")
+    from agent.skills import get_skill_recommendations
+    skills = get_skill_recommendations(instruction, user_id=jwt_user_id)
+    return {"skills": [{"name": skill["name"], "description": skill["description"]} for skill in skills]}
+
+
+@app.get("/agent/stats", dependencies=_AUTH)
+def get_agent_stats(jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
+    _require_feature(config.ENABLE_MEMORY_STORAGE, "Agent statistics")
+    from memory.chat_memory import get_memory_count
+    from memory.skill_store import get_all_skills
+    from memory.task_history import get_stats
+    return {
+        **get_stats(user_id=jwt_user_id),
+        "skill_count": len(get_all_skills(user_id=jwt_user_id)),
+        "memory_entries": get_memory_count(jwt_user_id),
+    }
+
+
+@app.post("/profile", dependencies=_AUTH)
+def profile_sheet(jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
+    _require_feature(config.ENABLE_DATA_PROFILING, "Data profiling")
+    from reporting.data_profiler import generate_profile_report, profile_current_sheet
+    if not _TASK_EXECUTION_LOCK.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="An Excel task is running; profile the workbook after it finishes.")
+    try:
+        profile = profile_current_sheet()
+    finally:
+        _TASK_EXECUTION_LOCK.release()
+    return {"profile": profile, "report": generate_profile_report(profile)}
+
+
+@app.post("/report/generate", dependencies=_AUTH)
+def generate_report(req: InstructionRequest, jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
+    _require_feature(config.ENABLE_PDF_REPORTS, "PDF reporting")
+    from pathlib import Path
+    from reporting.pdf_generator import generate_task_report
+
+    profile = None
+    if config.ENABLE_DATA_PROFILING:
+        acquired = _TASK_EXECUTION_LOCK.acquire(blocking=False)
+        if acquired:
+            try:
+                from reporting.data_profiler import profile_current_sheet
+                profile = profile_current_sheet()
+            except Exception:
+                pass
+            finally:
+                _TASK_EXECUTION_LOCK.release()
+    report_path = generate_task_report(
+        instruction=req.instruction,
+        actions=[],
+        outcome="Report generated through the Xelora API.",
+        success=True,
+        profile=profile,
+        user_id=jwt_user_id,
+    )
+    return {"report_name": Path(report_path).name, "message": "Report generated"}
+
+
+@app.get("/reports", dependencies=_AUTH)
+def list_reports(jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
+    _require_feature(config.ENABLE_PDF_REPORTS, "PDF reporting")
+    from reporting.pdf_generator import list_reports as list_all_reports
+    return {"reports": list_all_reports(jwt_user_id)}
+
+
+@app.get("/task/{task_id}/stream", dependencies=_AUTH)
+async def stream_task_progress(task_id: int, jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
+    """Open an authenticated SSE stream for a task's live progress."""
+    _require_feature(config.ENABLE_SSE_STREAMING, "Task progress streaming")
+    from fastapi.responses import StreamingResponse
+    from streaming.sse import task_event_generator
+
+    task = ACTIVE_TASKS.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    _assert_task_owner(task.user_id, jwt_user_id)
+    return StreamingResponse(
+        task_event_generator(task_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )

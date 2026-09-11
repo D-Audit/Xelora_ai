@@ -106,6 +106,10 @@ class AgentTask:
         self.is_done = False
         self.progress_log = []
         self.structured_steps = []
+        self.execution_plan = None
+        # Assigned by the API layer when SSE streaming is enabled. Keeping the
+        # callback optional prevents the core executor from depending on HTTP.
+        self.progress_callback = None
         self.retry_counts = {}
         self.gemini_model_index = 0
         # The task normally stays with the configured primary provider.  This
@@ -250,6 +254,7 @@ class AgentTask:
             # into a corrected run, otherwise a previous visual/API failure
             # can make the next response look failed even after it succeeds.
             self.structured_steps = []
+            self.execution_plan = None
             self.progress_log = []
             self.retry_counts = {}
             self.text_only_action_retry_used = False
@@ -285,6 +290,12 @@ class AgentTask:
             encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
             safe_message = message.encode(encoding, errors="backslashreplace").decode(encoding)
             print(safe_message)
+        if self.progress_callback is not None:
+            try:
+                self.progress_callback(message)
+            except Exception:
+                # Progress delivery must never interrupt workbook execution.
+                pass
 
     def set_recovery_state(
         self,
@@ -1345,6 +1356,12 @@ def _derive_workbook_delivery_contract(instruction: str) -> dict:
         chart_count += len(re.findall(r"(?m)^\s*[-*]\s+[^\r\n]+", block.group(1)))
 
     lowered = instruction.casefold()
+    # A dashboard that explicitly asks for charts/graphs must not be marked
+    # complete with only KPI cells and summary tables.  Detailed lists above
+    # preserve their requested count; this is the minimum for natural wording
+    # such as "create a dashboard with graphs".
+    if chart_count == 0 and re.search(r"\b(?:charts?|graphs?|visuali[sz]ations?)\b", lowered):
+        chart_count = 1
     requires_formula_evidence = bool(re.search(r"\bformulas?\b", lowered))
     structured_content_requested = bool(re.search(
         r"\b(formulas?|charts?|dashboard|transactions?|records?|kpis?|summary|analysis|report|"
@@ -1970,6 +1987,24 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
         _adopt_workbook_from_result(task, workbook_state, db, db_task_id)
     task.execution_capabilities = build_execution_capabilities()
     system_prompt = build_system_prompt(user_preferences, excel_version_info)
+    if config.ENABLE_TASK_PLANNER:
+        try:
+            from agent.planner import build_plan, plan_context
+
+            task.execution_plan = build_plan(
+                task.instruction,
+                workbook_info=workbook_state,
+                user_id=task.user_id,
+            )
+            task.structured_steps.append({
+                "type": "plan",
+                "steps": task.execution_plan.get("plan", []),
+                "estimated_steps": task.execution_plan.get("estimated_steps", 0),
+            })
+            system_prompt += plan_context(task.execution_plan)
+            task.log_step(f"Prepared an execution checklist with {task.execution_plan.get('estimated_steps', 0)} step(s).")
+        except Exception as exc:
+            task.log_step(f"Planning preflight unavailable; continuing with the verified core workflow. ({exc})")
     system_prompt += planning_context(workbook_state, excel_version_info)
     if task.awaiting_approval:
         if task.defer_excel_until_approval:
