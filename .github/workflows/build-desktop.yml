@@ -1,4 +1,4 @@
-name: Build Desktop Installer
+﻿name: Build Desktop Installer
 
 on:
   push:
