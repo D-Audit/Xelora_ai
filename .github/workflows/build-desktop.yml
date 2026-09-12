@@ -1,4 +1,4 @@
-﻿name: Build Desktop Installer
+name: Build Desktop Installer
 
 on:
   push:
@@ -29,7 +29,7 @@ jobs:
         run: npm install
 
       - name: Build Windows installer (NSIS)
-        run: npm run dist
+        run: npx electron-builder --win --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
