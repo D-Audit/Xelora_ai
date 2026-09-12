@@ -1,5 +1,6 @@
-const { app, BrowserWindow, shell, Menu, ipcMain, screen } = require('electron');
+﻿const { app, BrowserWindow, shell, Menu, ipcMain, screen } = require('electron');
 const path = require('path');
+const { autoUpdater } = require('electron-updater');
 
 const WEB_APP_URL = process.env.XELORA_WEB_URL || 'http://localhost:3000/dashboard';
 
@@ -90,6 +91,10 @@ function setFloatingMode(enabled) {
 
 app.whenReady().then(() => {
   createWindow();
+
+  if (app.isPackaged) {
+    autoUpdater.checkForUpdatesAndNotify();
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

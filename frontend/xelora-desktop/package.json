@@ -1,7 +1,7 @@
-{
+﻿{
   "name": "xelora-desktop",
   "version": "1.3.0",
-  "description": "Xelora Desktop Ã¢â‚¬â€ AI-powered spreadsheet automation",
+  "description": "Xelora Desktop - AI-powered spreadsheet automation",
   "main": "main.js",
   "author": "Xelora",
   "license": "MIT",
@@ -11,10 +11,14 @@
     "dist": "electron-builder --win"
   },
   "build": {
-    "publish": null,
     "appId": "app.xelora.desktop",
     "productName": "Xelora",
-    "copyright": "Copyright Ã‚Â© 2026 Xelora",
+    "copyright": "Copyright 2026 Xelora",
+    "publish": {
+      "provider": "github",
+      "owner": "D-Audit",
+      "repo": "Xelora_ai"
+    },
     "win": {
       "target": "nsis"
     },
@@ -35,12 +39,11 @@
     ]
   },
   "dependencies": {
-    "electron-is-dev": "^3.0.1"
+    "electron-is-dev": "^3.0.1",
+    "electron-updater": "^6.3.9"
   },
   "devDependencies": {
     "electron": "^31.0.0",
     "electron-builder": "^24.13.3"
   }
 }
-
-

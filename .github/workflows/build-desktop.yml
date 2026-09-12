@@ -1,4 +1,4 @@
-name: Build Desktop Installer
+﻿name: Build Desktop Installer
 
 on:
   push:
@@ -39,6 +39,7 @@ jobs:
           name: xelora-windows-installer
           path: |
             frontend/xelora-desktop/release/*.exe
+            frontend/xelora-desktop/release/latest.yml
           if-no-files-found: error
 
       - name: Attach installer to the GitHub Release
@@ -47,3 +48,4 @@ jobs:
         with:
           files: |
             frontend/xelora-desktop/release/*.exe
+            frontend/xelora-desktop/release/latest.yml
