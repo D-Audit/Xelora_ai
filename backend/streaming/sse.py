@@ -10,7 +10,6 @@ import time
 from collections import defaultdict
 from typing import Any, AsyncIterator
 
-
 class TaskProgressStreamer:
     """Publish task events from worker threads to async SSE clients."""
 

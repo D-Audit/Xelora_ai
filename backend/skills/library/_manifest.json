@@ -304,15 +304,15 @@
     "sha256_impl": "579bfa200161840baf4c1c3c92201e7a8068eaf3501363280eda6db7fab9481b",
     "sha256_skill_md": "1ace20636fd22cd506955da7b74146a060a261ba26c9ed0bff26b7e0aec11b43"
   },
+  "scenario_builder": {
+    "category": "analysis",
+    "sha256_impl": "4636388c18aa8a49abdf4f3119d4300e7f9d476e6ae8133fa10bf6a32646a524",
+    "sha256_skill_md": "a6cdb1ea1d842d0b68468f2b438ebbc06362208fee9f90731c93e2e36941cd7b"
+  },
   "search_knowledge_base": {
     "category": "knowledge",
     "sha256_impl": "33afe7e9792aaf740ee5c9f60cb154a6fa66a96a738089216ae141877b858609",
     "sha256_skill_md": "37e15fc2e033fe3336ee74e0b1a9e112e08f8a4909c70916f1ca592e5d36cf93"
-  },
-  "scenario_builder": {
-    "category": "analysis",
-    "sha256_impl": "4b32554c413fec91c7d5635a850480b6aa62f9a2fa22417a7ad2d290a8257251",
-    "sha256_skill_md": "edaa4eeabf3c910570f09c307a4cabc3ff615f91ab50ceb278137b9085c132ca"
   },
   "set_autofilter": {
     "category": "data",
@@ -346,23 +346,23 @@
   },
   "unpivot_data": {
     "category": "transform",
-    "sha256_impl": "9fe5caa2d74032e513bad84ad0e3df0dcd02320d5edbee01a63f1518a3dd2cdb",
-    "sha256_skill_md": "17c6ccfde2e5610c5d2131ed415c8f63f6a69f610d37d60a90a938a23e7efa87"
+    "sha256_impl": "6e8397de3c202d48104f9b75b708e49d8cab8dca93accfcd576efb1dde75fe00",
+    "sha256_skill_md": "e3c8746e83ff1884b29f577ba043647a49f14e639beb124b231824fda81169d6"
   },
   "unprotect_sheet": {
     "category": "structure",
     "sha256_impl": "375e3cde491002a0a475ac8ba610b173e4491d7a393603897390e44f03c6bbf7",
     "sha256_skill_md": "8d3b528a799a38cbdd287ee13db4f09743c3d2a4db6230c34ad5f3f0484c1835"
   },
+  "variance_analysis": {
+    "category": "analysis",
+    "sha256_impl": "51b8e9d37b0ebc630f6df9431575d4df59d823ea0af7706a6060544a6ed916e7",
+    "sha256_skill_md": "5eec66f111f8c94789771065e28fdc5f11f39714d83b272978b1d23aa90fc05a"
+  },
   "write_cell": {
     "category": "write",
     "sha256_impl": "ebf03d8bde8691fcf7d6bf2093b28a7b5a425f1eb3c05e6fe43ece6574c16621",
     "sha256_skill_md": "9046ead9168b0ea3ad1e764db02249adbb1dc024f0f0d7a8798222afebfec949"
-  },
-  "variance_analysis": {
-    "category": "analysis",
-    "sha256_impl": "6776d28929aec8b2dd944f87f5560256f72a84288f47761d964fa8dcedeb7ad1",
-    "sha256_skill_md": "aba27b9f72a77ba3d9cb1608759204a63d924dd18685827cb548b486c6019944"
   },
   "write_table": {
     "category": "write",
