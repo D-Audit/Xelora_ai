@@ -21,10 +21,14 @@ from agent.capabilities import (
     planning_context,
     recovery_options,
 )
+from agent import audit
+from agent.tool_registry import availability as tool_registry_availability
+from agent.tool_registry import get_tool_spec, validate_tool_input
+from agent.permissions import decide_action
 from agent.prompts import build_system_prompt
 
 VISUAL_TOOL_NAMES = {"take_screenshot", "parse_screen", "click", "double_click", "hover_and_read_tooltip", "inspect_popup", "click_popup_button", "click_popup_control", "set_popup_text", "save_workbook", "type_text", "press_key", "hotkey", "scroll", "activate_ribbon_tab", "press_alt", "press_shortcut", "go_to_range", "paste_table", "fill_formula_down", "format_currency", "format_bold", "autofit_columns", "create_clustered_column_chart", "create_pie_chart", "execute_excel_shortcut", "batch_excel_operations", "search_cached_elements", "find_and_click", "click_ribbon_tab", "click_button", "create_sheet", "rename_sheet", "go_to_sheet", "navigate_to_cell_on_sheet", "verify_task_completion", "get_active_sheet_name", "verify_current_sheet", "get_sheet_info", "get_cell_value", "apply_cell_style", "set_header_style", "set_fill_color", "set_font_color", "apply_dashboard_theme"}
-READ_ONLY_TOOL_NAMES = {"take_screenshot", "parse_screen", "inspect_popup", "search_cached_elements", "get_execution_capabilities"}
+READ_ONLY_TOOL_NAMES = {"take_screenshot", "parse_screen", "inspect_popup", "search_cached_elements", "get_execution_capabilities", "list_workspace_files", "read_workspace_file", "search_workspace_files", "get_workspace_file_metadata", "run_terminal"}
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -96,6 +100,16 @@ class AgentTask:
     def __init__(self, instruction: str, user_id: int = None, workbook_name: str = None):
         self.instruction = instruction
         self.user_id = user_id
+        # Explicit default: only main.py sets this after JWT verification. It
+        # gates the user-scoped file tools so a local-API-key client cannot
+        # reach another user's storage.
+        self.has_authenticated_user = False
+        # (pid, window_id) pairs inspected with cua__get_window_state in this
+        # task. Cua input is refused for any window not observed first.
+        self.cua_observed_targets: set[tuple[int, int]] = set()
+        # Set from the capability route. Default True keeps the established
+        # rule that an Excel task must show a verified workbook change.
+        self.route_requires_workbook = True
         self.workbook_name = workbook_name
         # Set after the first live workbook inspection.  Names such as Book1
         # are not unique, so all later codegen and visual fallback work must
@@ -688,6 +702,80 @@ def _has_pending_create_table_completion(task: AgentTask, popups: list[dict]) ->
     return False
 
 
+def _dispatch_general_tool(
+    tool_spec,
+    tool_name: str,
+    tool_input: dict,
+    *,
+    workbook_name: str | None = None,
+    user_id: int | None,
+    file_access_authorized: bool,
+    excel_app_pid: int | None,
+    cua_observed_targets: set | None,
+):
+    """Execute non-Excel tools (web, files, terminal, Cua, MCP).
+
+    Returns None for Excel layers so the established skill/codegen/visual
+    dispatch below stays unchanged. Every failure becomes a structured,
+    user-meaningful result instead of an exception.
+    """
+    layer = tool_spec.execution_layer
+    if layer not in {"web", "files", "terminal", "cua_driver", "mcp", "workspace_import"}:
+        return None
+    enabled, why = tool_registry_availability(tool_spec)
+    if not enabled:
+        return {"verified": False, "status": "disabled", "error": why}, layer, None
+    if layer in {"files", "workspace_import"} and not file_access_authorized:
+        return {
+            "verified": False,
+            "status": "authenticated_file_access_required",
+            "error": "User file tools require a JWT-authenticated Xelora session.",
+        }, layer, None
+    arguments, error = validate_tool_input(tool_spec, tool_input)
+    if error:
+        return {"verified": False, "status": "invalid_arguments", "error": error, "retryable": False}, layer, None
+    try:
+        if layer == "web":
+            from tools.web import web_fetch, web_search
+            result = web_search(**arguments) if tool_name == "web_search" else web_fetch(**arguments)
+        elif layer == "files":
+            from tools import filesystem
+            result = getattr(filesystem, tool_name)(user_id, **arguments)
+        elif layer == "workspace_import":
+            from tools.workspace_import import import_workspace_file_to_sheet
+            result = import_workspace_file_to_sheet(
+                user_id, **arguments, workbook_name=workbook_name, excel_app_pid=excel_app_pid,
+            )
+        elif layer == "terminal":
+            from tools.terminal import run_terminal
+            result = run_terminal(**arguments)
+        elif layer == "mcp":
+            from tools.mcp_external import call_tool as call_mcp_tool
+            result = call_mcp_tool(tool_name, arguments)
+        elif tool_name == "cua_act_and_verify":
+            from vision.cua_driver import act_and_verify
+            result = act_and_verify(
+                arguments["action"], arguments["arguments"], arguments["expect"],
+                max_attempts=arguments.get("max_attempts", 2),
+                timeout_ms=arguments.get("timeout_ms", 5000),
+                observed_targets=cua_observed_targets,
+                bound_pid=excel_app_pid,
+            )
+        else:
+            from vision.cua_driver import call_tool
+            result = call_tool(
+                tool_name[len("cua__"):], arguments,
+                observed_targets=cua_observed_targets, bound_pid=excel_app_pid,
+            )
+    except PermissionError as exc:
+        result = {"verified": False, "status": "permission_denied", "error": str(exc), "retryable": False}
+    except (ValueError, TypeError) as exc:
+        result = {"verified": False, "status": "invalid_arguments", "error": str(exc), "retryable": False}
+    except OSError as exc:
+        result = {"verified": False, "status": "io_error", "error": str(exc), "retryable": True}
+    return result, layer, None
+
+
 def dispatch_action(
     tool_name: str,
     tool_input: dict,
@@ -695,9 +783,33 @@ def dispatch_action(
     excel_app_pid: int | None = None,
     skill_timeout: int | None = None,
     recover_excel_on_timeout: bool = True,
+    user_id: int | None = None,
+    file_access_authorized: bool = False,
+    cua_observed_targets: set | None = None,
 ):
+    tool_spec = get_tool_spec(tool_name, visual_tool_names=VISUAL_TOOL_NAMES)
+    if tool_spec is None:
+        return {"error": f"Unknown tool '{tool_name}'", "verified": False, "status": "unknown_tool"}, "unknown", None
+
     if tool_name == "get_execution_capabilities":
-        return build_execution_capabilities(), "capability_catalog", None
+        result = build_execution_capabilities()
+        result["tool_metadata"] = {
+            "category": tool_spec.category,
+            "risk": tool_spec.risk.value,
+            "verification_required": tool_spec.verification_required,
+        }
+        return result, "capability_catalog", None
+
+    general = _dispatch_general_tool(
+        tool_spec, tool_name, tool_input,
+        workbook_name=workbook_name,
+        user_id=user_id,
+        file_access_authorized=file_access_authorized,
+        excel_app_pid=excel_app_pid,
+        cua_observed_targets=cua_observed_targets,
+    )
+    if general is not None:
+        return general
 
     if config.VISUAL_ONLY_MODE:
         if tool_name not in VISUAL_TOOL_NAMES:
@@ -1552,6 +1664,12 @@ def _formula_error_summary(errors: list[dict], limit: int = 12) -> str:
     return "; ".join(summary) or "The workbook audit reported formula errors without usable coordinates."
 
 
+_NOT_EXECUTED_STATUSES = {
+    "rejected_by_sandbox", "invalid_arguments", "disabled", "tool_not_authorized",
+    "authenticated_file_access_required",
+}
+
+
 def _is_unresolved_workbook_action(step: dict) -> bool:
     """Whether an action left a workbook change unresolved.
 
@@ -1567,13 +1685,42 @@ def _is_unresolved_workbook_action(step: dict) -> bool:
         return False
 
     result = step.get("result")
-    if isinstance(result, dict) and result.get("status") == "rejected_by_sandbox":
+    # Refused before execution: nothing touched the workbook.
+    if isinstance(result, dict) and result.get("status") in _NOT_EXECUTED_STATUSES:
         return False
 
     return (
         step.get("status") in {"failed", "retried", "blocked"}
         or (isinstance(result, dict) and result.get("verified") is False)
     )
+
+
+_WORKBOOK_CAPABILITIES = {
+    "excel_skills", "python_codegen", "excel_shortcuts", "cua_accessibility", "ui_automation", "omniparser",
+}
+_GENERAL_EVIDENCE_TOOLS = {
+    "web_search", "web_fetch", "list_workspace_files", "read_workspace_file", "search_workspace_files",
+    "get_workspace_file_metadata", "create_workspace_file", "update_workspace_file", "run_terminal",
+}
+
+
+def _non_workbook_task_evidence(task: AgentTask) -> bool:
+    """Whether a task that never needed Excel produced verified tool evidence.
+
+    Research, file, terminal, and MCP-only requests are judged by their own
+    verified results instead of by a workbook change they never asked for.
+    """
+    if getattr(task, "route_requires_workbook", True):
+        return False
+    for step in task.structured_steps:
+        name = str(step.get("tool_name") or "")
+        result = step.get("result")
+        if step.get("type") != "action" or step.get("status") != "success" or not isinstance(result, dict):
+            continue
+        if (name in _GENERAL_EVIDENCE_TOOLS or name.startswith("mcp__")) and result.get("verified") is True \
+                and result.get("succeeded", True) is not False:
+            return True
+    return False
 
 
 def _build_final_response_reality_check(task: AgentTask, ai_final_text: str) -> str:
@@ -1607,7 +1754,7 @@ def _build_final_response_reality_check(task: AgentTask, ai_final_text: str) -> 
     # A completion paragraph is not evidence that Excel changed.  This also
     # keeps a text-only Gemini response from being shown above a red failure
     # status, which previously made the user see two contradictory results.
-    if task.started_in_execution_mode and not meaningful_verified_actions:
+    if task.started_in_execution_mode and not meaningful_verified_actions and not _non_workbook_task_evidence(task):
         if action_steps:
             detail = "Xelora did not make a verified workbook change."
         else:
@@ -1660,12 +1807,43 @@ def _user_facing_action_name(tool_name: str) -> str:
     }.get(tool_name, "an Excel action")
 
 
-_OBSERVATION_TOOL_NAMES = {
+class _ObservationToolNames(frozenset):
+    """Tools that cannot change the workbook.
+
+    Their failures must not put the task into Excel recovery, their successes
+    are not workbook evidence, and repeating them is never a duplicate edit.
+    Allowlisted read-only external MCP tools are recognised by name at lookup
+    time because their names come from administrator configuration.
+    """
+
+    def __contains__(self, name) -> bool:
+        if frozenset.__contains__(self, name):
+            return True
+        if isinstance(name, str) and name.startswith("mcp__"):
+            try:
+                from tools.mcp_external import find_tool
+                remote = find_tool(name)
+            except Exception:
+                return False
+            return bool(remote and remote.get("risk") == "read")
+        return False
+
+    def __or__(self, other):
+        return _ObservationToolNames(frozenset.__or__(self, other))
+
+
+_OBSERVATION_TOOL_NAMES = _ObservationToolNames({
     "get_excel_version", "inspect_workbook", "read_range", "screenshot_active_window",
     "take_screenshot", "parse_screen", "inspect_popup", "search_cached_elements",
     "get_active_sheet_name", "verify_current_sheet", "get_sheet_info", "get_cell_value",
     "verify_task_completion", "get_execution_capabilities",
-}
+    "cua__list_apps", "cua__list_windows", "cua__get_desktop_state",
+    "cua__get_screen_size", "cua__get_cursor_position", "cua__get_window_state",
+    "cua__verify_state", "cua__clipboard_read",
+    # General research/inspection tools never touch the workbook.
+    "web_search", "web_fetch", "list_workspace_files", "read_workspace_file",
+    "search_workspace_files", "get_workspace_file_metadata", "run_terminal",
+})
 
 
 _FORMULA_REPAIR_FAILURE_STATUSES = {
@@ -1912,6 +2090,8 @@ def get_task_completion_status(task: AgentTask) -> str:
     if not verified_actions:
         return "failed"
     if task.started_in_execution_mode and not meaningful_actions:
+        if _non_workbook_task_evidence(task) and not unresolved and not explicitly_incomplete:
+            return "completed"
         return "failed"
     contract = getattr(task, "last_delivery_contract", None)
     if isinstance(contract, dict) and contract.get("verified") is False:
@@ -2006,6 +2186,17 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
         except Exception as exc:
             task.log_step(f"Planning preflight unavailable; continuing with the verified core workflow. ({exc})")
     system_prompt += planning_context(workbook_state, excel_version_info)
+    try:
+        from agent.router import route_instruction, routing_context
+        route = route_instruction(
+            task.instruction,
+            file_access=bool(getattr(task, "has_authenticated_user", False)),
+        )
+        system_prompt += routing_context(route)
+        task.route_requires_workbook = bool(set(route.capabilities()) & _WORKBOOK_CAPABILITIES)
+        audit.record("task_route", task_user=task.user_id, **route.as_dict())
+    except Exception as exc:
+        task.log_step(f"Capability routing hint unavailable; continuing with the full catalogue. ({exc})")
     if task.awaiting_approval:
         if task.defer_excel_until_approval:
             system_prompt += (
@@ -2546,14 +2737,29 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                     providers.submit_tool_result(task, tool_call, result)
                     continue
 
-            if task.awaiting_approval and tool_name not in READ_ONLY_TOOL_NAMES:
+            tool_spec = get_tool_spec(tool_name, visual_tool_names=VISUAL_TOOL_NAMES)
+            policy_decision = decide_action(
+                tool_spec,
+                planning_only=task.awaiting_approval,
+                tool_input=tool_input,
+                file_access_authorized=bool(getattr(task, "has_authenticated_user", False)),
+            )
+            audit.record(
+                "tool_decision", task_user=task.user_id, tool=tool_name,
+                layer=tool_spec.execution_layer if tool_spec else None,
+                risk=tool_spec.risk.value if tool_spec else None,
+                allowed=policy_decision.allowed, decision=policy_decision.status,
+                reason=policy_decision.reason, input=tool_input,
+            )
+            if not policy_decision.allowed:
                 result = {
                     "verified": False,
-                    "error": "Workbook changes are locked until the user explicitly confirms the proposed plan.",
+                    "status": policy_decision.status,
+                    "error": policy_decision.reason,
                 }
                 task.structured_steps.append({
                     "type": "action", "tool_name": tool_name, "execution_layer": "approval_gate",
-                    "input": tool_input, "result": result, "status": "blocked",
+                    "input": tool_input, "result": result, "status": "awaiting_approval" if policy_decision.needs_user else "blocked",
                 })
                 providers.submit_tool_result(task, tool_call, result)
                 continue
@@ -2767,27 +2973,33 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 providers.submit_tool_result(task, tool_call, result)
                 continue
 
-            if not config.VISUAL_ONLY_MODE and tool_name not in VISUAL_TOOL_NAMES:
+            if (
+                not config.VISUAL_ONLY_MODE
+                and tool_spec is not None
+                and tool_spec.execution_layer in {"skill", "codegen", "visual", "workspace_import"}
+                and tool_name not in VISUAL_TOOL_NAMES
+            ):
                 _show_target_in_excel(task, tool_name, tool_input)
 
             task.log_step(f"⏳ Running: {tool_name} {tool_input}")
 
             try:
-                from vision.ui_control import handle_blocking_dialogs, _get_agent_excel_window
-                try:
-                    win = _get_agent_excel_window()
-                    pre_check = {"status": "clean"}
-                    if win and win.handle:
-                        pre_check = handle_blocking_dialogs(win.handle)
-                        if pre_check.get("status") == "handled":
-                            task.log_step("Safely dismissed a classified stale Excel dialog before the next action.")
-                        elif pre_check.get("status") in {"popup_requires_workflow", "popup_requires_attention"}:
-                            task.log_step(
-                                "Excel popup identified before the next action: "
-                                + json.dumps(pre_check.get("popups", []), default=str)[:900]
-                            )
-                except Exception:
-                    pre_check = {"status": "clean"}
+                pre_check = {"status": "clean"}
+                if tool_spec is not None and tool_spec.execution_layer in {"skill", "codegen", "visual", "workspace_import"}:
+                    from vision.ui_control import handle_blocking_dialogs, _get_agent_excel_window
+                    try:
+                        win = _get_agent_excel_window()
+                        if win and win.handle:
+                            pre_check = handle_blocking_dialogs(win.handle)
+                            if pre_check.get("status") == "handled":
+                                task.log_step("Safely dismissed a classified stale Excel dialog before the next action.")
+                            elif pre_check.get("status") in {"popup_requires_workflow", "popup_requires_attention"}:
+                                task.log_step(
+                                    "Excel popup identified before the next action: "
+                                    + json.dumps(pre_check.get("popups", []), default=str)[:900]
+                                )
+                    except Exception:
+                        pre_check = {"status": "clean"}
 
                 popup_actions = {"inspect_popup", "parse_screen", "click_popup_button", "click_popup_control", "set_popup_text", "save_workbook"}
                 is_table_completion = (
@@ -2825,11 +3037,34 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                     result, execution_layer, generated_code = dispatch_action(
                         tool_name, tool_input, workbook_name=task.workbook_name,
                         excel_app_pid=task.excel_app_pid,
+                        user_id=task.user_id,
+                        file_access_authorized=bool(getattr(task, "has_authenticated_user", False)),
+                        cua_observed_targets=task.cua_observed_targets,
                     )
                 status = "success"
+                if (
+                    tool_name == "cua__get_window_state"
+                    and isinstance(result, dict)
+                    and result.get("verified") is True
+                ):
+                    from vision.cua_driver import target_of
+                    observed = target_of(tool_input if isinstance(tool_input, dict) else {})
+                    if observed is not None:
+                        task.cua_observed_targets.add(observed)
+                if tool_name == "cua__verify_state" and isinstance(result, dict) and result.get("verified") is True:
+                    verify_target = {key: tool_input.get(key) for key in ("pid", "window_id", "target") if key in tool_input}
+                    for prior_step in reversed(task.structured_steps):
+                        if prior_step.get("type") == "action" and str(prior_step.get("tool_name", "")).startswith("cua__") and prior_step.get("tool_name") not in _OBSERVATION_TOOL_NAMES:
+                            prior_input = prior_step.get("input") if isinstance(prior_step.get("input"), dict) else {}
+                            prior_target = {key: prior_input.get(key) for key in ("pid", "window_id", "target") if key in prior_input}
+                            prior_result = prior_step.get("result")
+                            if isinstance(prior_result, dict) and prior_result.get("status") == "action_dispatched" and verify_target == prior_target and verify_target:
+                                prior_result["verified"] = True
+                                prior_result["verification_note"] = "A subsequent Cua verify_state call confirmed predicates for the same target window."
+                            break
                 is_failure = isinstance(result, dict) and result.get("verified") is False
 
-                if is_failure and _HAS_WINDOW_SAFETY:
+                if is_failure and _HAS_WINDOW_SAFETY and tool_spec is not None and tool_spec.execution_layer in {"skill", "codegen", "visual", "workspace_import"}:
                     try:
                         win = _get_agent_excel_window()
                         if win and win.handle:
@@ -3014,6 +3249,10 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             if config.VISUAL_ONLY_MODE and status == "success" and tool_name not in READ_ONLY_TOOL_NAMES:
                 task.successful_visual_actions.add(action_signature)
 
+            audit.record(
+                "tool_result", task_user=task.user_id, tool=tool_name, layer=execution_layer,
+                step_status=status, result=audit.result_summary(result),
+            )
             if db is not None and db_task_id is not None:
                 _log_action_to_db(db, db_task_id, tool_name, tool_input, execution_layer, generated_code, result, status)
 

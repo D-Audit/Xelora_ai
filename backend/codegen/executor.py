@@ -39,7 +39,14 @@ from pathlib import Path
 # intentionally is not allowed here: it operates on a separate file object,
 # which is how a model can accidentally verify one workbook while changing
 # another.  Skills may still use openpyxl utilities internally where needed.
-ALLOWED_IMPORTS = {"xlwings", "datetime", "math", "random", "re", "json", "statistics"}
+ALLOWED_IMPORTS = {
+    "xlwings", "datetime", "math", "random", "re", "json", "statistics",
+    "collections", "itertools", "decimal", "fractions", "string",
+    # In-memory data analysis. Every file/network/pickle entry point of these
+    # libraries is refused below, so data only enters from and leaves through
+    # the task workbook.
+    "pandas", "numpy",
+}
 
 DISALLOWED_NAMES = {
     "eval", "exec", "compile", "__import__", "open", "input",
@@ -47,6 +54,28 @@ DISALLOWED_NAMES = {
 }
 
 DISALLOWED_MODULES_ANYWHERE = {"os", "sys", "subprocess", "shutil", "socket", "ctypes", "pathlib", "importlib"}
+
+# pandas/numpy I/O and code-execution entry points. Reading or writing files,
+# URLs, SQL, pickles (arbitrary code execution) and string-evaluated
+# expressions are not available to generated code.
+_DATA_IO_ATTRS = {
+    "read_pickle", "to_pickle", "read_sql", "read_sql_query", "read_sql_table", "to_sql",
+    "read_html", "read_xml", "read_json", "read_csv", "read_table", "read_fwf", "read_excel",
+    "read_parquet", "read_feather", "read_orc", "read_hdf", "read_stata", "read_sas", "read_spss",
+    "read_clipboard", "to_clipboard", "to_csv", "to_excel", "to_json", "to_html", "to_xml",
+    "to_parquet", "to_feather", "to_orc", "to_hdf", "to_stata", "to_latex", "to_markdown",
+    "query", "load", "save", "savez", "savez_compressed", "savetxt", "loadtxt",
+    "genfromtxt", "fromfile", "tofile", "memmap", "DataSource", "ctypeslib", "lib",
+}
+# Excel COM / xlwings members that run programs or macros, evaluate XLM, or
+# open/save other files. COM dispatch is case-insensitive, so these are
+# compared in lower case.
+_COM_BLOCKED_ATTRS = {
+    "executeexcel4macro", "run", "macro", "vbproject", "vbe", "shell", "sendkeys",
+    "followhyperlink", "evaluate", "registerxll", "saveas", "savecopyas",
+    "exportasfixedformat", "opentext", "openxml", "opendatabase", "workbooks",
+    "book", "books", "apps", "ontime", "onkey",
+}
 DISALLOWED_EXCEL_FORMULA_ATTRS = {"formula", "formula2"}
 
 
@@ -126,6 +155,23 @@ def _check_ast(code: str):
             )
         elif isinstance(node, ast.Attribute) and node.attr in DISALLOWED_NAMES:
             raise CodeRejected(f"Use of '.{node.attr}' is not allowed in generated code.")
+        elif isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+            # Dunder traversal (e.g. ().__class__.__subclasses__()) is the
+            # standard way out of an import allowlist.
+            raise CodeRejected(f"Access to '{node.attr}' is not allowed in generated code.")
+        elif isinstance(node, ast.Name) and node.id.startswith("__") and node.id != "__name__":
+            raise CodeRejected(f"Use of '{node.id}' is not allowed in generated code.")
+        elif isinstance(node, ast.Attribute) and node.attr.lower() in _COM_BLOCKED_ATTRS:
+            raise CodeRejected(
+                f"'.{node.attr}' is not available in generated code: it can run macros or programs, or open "
+                "other files. Work only through get_task_workbook() and its sheets and ranges."
+            )
+        elif isinstance(node, ast.Attribute) and node.attr in _DATA_IO_ATTRS:
+            raise CodeRejected(
+                f"'.{node.attr}' is not available: generated code may not read or write files, URLs, "
+                "databases, or pickles. Read input from the workbook (e.g. "
+                "sheet.range(...).options(pd.DataFrame, header=1, index=False).value) and write results back to it."
+            )
         elif _attribute_path(node) in {"xw.books.active", "xlwings.books.active", "xw.apps.active"}:
             raise CodeRejected(
                 "Do not select an active xlwings workbook. Use get_task_workbook() "
@@ -167,11 +213,11 @@ def _check_ast(code: str):
                 "the final workbook inspection succeeds."
             )
 
-    if len(referenced_sheets) > 1:
+    if len(referenced_sheets) > 2:
         raise CodeRejected(
-            "Generated code must have one atomic worksheet target, not a multi-sheet workbook build. "
-            "Use create_sheets and the dedicated Excel skills for workbook structure, formulas, "
-            "tables, charts, and final saving."
+            "Generated code may read one source worksheet and write one target worksheet, not build "
+            f"a multi-sheet workbook (it referenced {len(referenced_sheets)} sheets). Use create_sheets and "
+            "the dedicated Excel skills for workbook structure, formulas, tables, charts, and final saving."
         )
 
 
@@ -225,7 +271,9 @@ def _subprocess_env(project_root: str) -> dict:
     single time, because project_root was never actually on sys.path from
     there. This was breaking the entire code-generation layer, not just
     some calls - setting PYTHONPATH explicitly is what fixes it."""
-    env = os.environ.copy()
+    # Provider keys, database URLs and tokens are never visible to generated code.
+    from tools.mcp_client import scrubbed_environment
+    env = scrubbed_environment()
     env["PYTHONPATH"] = project_root + os.pathsep + env.get("PYTHONPATH", "")
     # The generated worker only needs skills.excel_shared. Avoid paying the
     # import cost of the complete signed skill catalogue on every fallback.

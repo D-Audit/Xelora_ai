@@ -64,6 +64,11 @@ def on_startup():
         print(f"REFUSING TO START: {exc}")
         raise SystemExit(1) from exc
     try:
+        config.validate_terminal_configuration()
+    except RuntimeError as exc:
+        print(f"REFUSING TO START: {exc}")
+        raise SystemExit(1) from exc
+    try:
         config.validate_ai_provider_configuration()
     except RuntimeError as exc:
         print(f"REFUSING TO START: {exc}")
@@ -88,6 +93,9 @@ def on_startup():
 
     if config.DATABASE_URL:
         init_db()
+        if config.ENABLE_AUTOMATIONS:
+            from automation import get_scheduler
+            get_scheduler().start()
     else:
         print("DATABASE_URL not set - running WITHOUT persistence. Tasks will run but "
               "nothing will be saved (no Reveal Workflow history, no memory, no pattern "
@@ -180,6 +188,10 @@ def start_task(
     user_prefs = get_all_preferences(db, user_id) if (db and user_id) else {}
 
     task = AgentTask(req.instruction, user_id=user_id, workbook_name=req.workbook_name)
+    # A client using only the local API key may retain legacy task behavior,
+    # but it must not gain access to a user-scoped file workspace by supplying
+    # a numeric user_id in its request body.
+    task.has_authenticated_user = jwt_user_id is not None
 
     db_task_id = None
     if db is not None:
@@ -201,6 +213,33 @@ def start_task(
 
     return {"task_id": task_id, "status": "started",
             "message": f"Poll GET /task/{task_id}/progress or /task/{task_id}/reveal to watch it run."}
+
+
+class ChatRequest(BaseModel):
+    instruction: str
+    workbook_name: str | None = None
+    has_workbook_context: bool = False
+    history: list[dict] = []
+
+
+@app.post("/chat", dependencies=_AUTH)
+def quick_chat(req: ChatRequest):
+    """Route one composer message: a quick tool-free answer, or the Excel task flow.
+
+    Called by the frontend's /api/chat proxy. When the route is "task" no
+    reply is generated; the client submits POST /task instead, so workbook
+    changes always go through the governed agent loop.
+    """
+    from quick_chat import classify_message, quick_reply
+
+    route = classify_message(
+        req.instruction,
+        workbook_name=req.workbook_name,
+        has_workbook_context=req.has_workbook_context,
+    )
+    if route.kind == "task":
+        return {"route": "task", "reason": route.reason, "reply": None}
+    return {"route": "chat", "reason": route.reason, "reply": quick_reply(req.instruction, req.history[-12:])}
 
 
 def _start_task_in_background(task, task_id, user_id, user_preferences):
@@ -683,7 +722,138 @@ def health_check():
                 "pdf_reports": config.ENABLE_PDF_REPORTS,
                 "sse_streaming": config.ENABLE_SSE_STREAMING,
                 "memory_storage": config.ENABLE_MEMORY_STORAGE,
+                "terminal_tools": config.ENABLE_TERMINAL_TOOLS,
+                "cua_driver": config.ENABLE_CUA_DRIVER,
+                "mcp_client": config.ENABLE_MCP_CLIENT,
+                "automations": config.ENABLE_AUTOMATIONS,
             }}
+
+
+@app.get("/agent/cua/health", dependencies=_AUTH)
+def cua_health():
+    """Report whether the local Cua Driver is enabled, installed, and reachable.
+
+    Safe to call on any platform: on Linux without a Driver it reports
+    disabled/unavailable instead of failing, so the frontend can show real
+    desktop-control readiness before a task needs it.
+    """
+    from vision.cua_driver import health_check
+    return health_check()
+
+
+@app.get("/agent/tools", dependencies=_AUTH)
+def agent_tool_catalogue():
+    """The runtime tool registry: schemas, risk, permissions, availability."""
+    from agent.tool_registry import catalogue_summary
+    from agent.providers import _available_vision_tools
+    visual_tool_names = (
+        {tool["name"] for tool in _available_vision_tools()}
+        if (config.ENABLE_VISUAL_FALLBACK or config.VISUAL_ONLY_MODE) else set()
+    )
+    return catalogue_summary(visual_tool_names=visual_tool_names)
+
+
+# ── Automations: user-approved scheduled workflow runs ──────────────
+
+class AutomationScheduleRequest(BaseModel):
+    workflow_id: int
+    enabled: bool = True
+    interval_minutes: int = 60
+
+
+@app.get("/automations", dependencies=_AUTH)
+def list_automations(jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
+    _require_feature(config.ENABLE_AUTOMATIONS, "Automations")
+    from automation import get_scheduler, _serialize_schedule
+    from database import get_db
+    from workspace_models import AutomationSchedule
+
+    db = next(get_db())
+    try:
+        schedules = (
+            db.query(AutomationSchedule)
+            .filter(AutomationSchedule.user_id == jwt_user_id)
+            .order_by(AutomationSchedule.id.desc())
+            .limit(100)
+            .all()
+        )
+        return {"schedules": [_serialize_schedule(s) for s in schedules], "scheduler": get_scheduler().status()}
+    finally:
+        db.close()
+
+
+@app.post("/automations", dependencies=_AUTH)
+def create_automation(
+    req: AutomationScheduleRequest,
+    jwt_user_id: int | None = Depends(_current_user_id_from_jwt),
+):
+    _require_feature(config.ENABLE_AUTOMATIONS, "Automations")
+    if jwt_user_id is None:
+        raise HTTPException(status_code=403, detail="Automations require a signed-in user.")
+    from automation import get_scheduler, _serialize_schedule, _validate_interval
+    from database import get_db
+    from workspace_models import AutomationSchedule, Workflow
+    from datetime import datetime, timedelta, timezone
+
+    interval = _validate_interval(req.interval_minutes)
+    db = next(get_db())
+    try:
+        workflow = (
+            db.query(Workflow)
+            .filter(Workflow.id == req.workflow_id, Workflow.user_id == jwt_user_id)
+            .first()
+        )
+        if workflow is None:
+            raise HTTPException(status_code=404, detail="Workflow not found.")
+        existing = (
+            db.query(AutomationSchedule)
+            .filter(AutomationSchedule.workflow_id == workflow.id, AutomationSchedule.user_id == jwt_user_id)
+            .first()
+        )
+        now = datetime.now(timezone.utc)
+        if existing:
+            existing.enabled = req.enabled
+            existing.interval_minutes = interval
+            existing.next_run_at = (now + timedelta(minutes=interval)) if req.enabled else None
+            db.commit()
+            db.refresh(existing)
+            schedule = existing
+        else:
+            schedule = AutomationSchedule(
+                workflow_id=workflow.id,
+                user_id=jwt_user_id,
+                enabled=req.enabled,
+                interval_minutes=interval,
+                next_run_at=(now + timedelta(minutes=interval)) if req.enabled else None,
+            )
+            db.add(schedule)
+            db.commit()
+            db.refresh(schedule)
+        return _serialize_schedule(schedule)
+    finally:
+        db.close()
+
+
+@app.delete("/automations/{schedule_id}", dependencies=_AUTH)
+def delete_automation(schedule_id: int, jwt_user_id: int | None = Depends(_current_user_id_from_jwt)):
+    _require_feature(config.ENABLE_AUTOMATIONS, "Automations")
+    from database import get_db
+    from workspace_models import AutomationSchedule
+
+    db = next(get_db())
+    try:
+        schedule = (
+            db.query(AutomationSchedule)
+            .filter(AutomationSchedule.id == schedule_id, AutomationSchedule.user_id == jwt_user_id)
+            .first()
+        )
+        if schedule is None:
+            raise HTTPException(status_code=404, detail="Automation schedule not found.")
+        db.delete(schedule)
+        db.commit()
+        return {"deleted": True}
+    finally:
+        db.close()
 
 
 # ── Agent memory, learned skills, and reporting ─────────────────────

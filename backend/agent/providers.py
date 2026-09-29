@@ -14,6 +14,14 @@ import json
 import time
 
 import config
+from agent.tool_registry import (
+    cua_act_and_verify_spec,
+    file_tool_spec,
+    provider_declaration,
+    terminal_tool_spec,
+    web_tool_spec,
+    workspace_import_tool_spec,
+)
 from skills.registry import claude_tools, gemini_tools
 
 CODEGEN_TOOL_CLAUDE = {
@@ -56,6 +64,18 @@ CODEGEN_TOOL_CLAUDE = {
         "required": ["code", "fallback_reason", "atomic_goal", "alternatives_considered", "reveal_reference"],
     },
 }
+
+# Web, file, terminal and Cua composite declarations come from the runtime
+# tool registry, so the schema the model sees is the schema dispatch enforces.
+WEB_TOOLS_CLAUDE = [provider_declaration(web_tool_spec(name)) for name in ("web_search", "web_fetch")]
+FILE_TOOLS_CLAUDE = [
+    provider_declaration(file_tool_spec(name))
+    for name in (
+        "list_workspace_files", "read_workspace_file", "search_workspace_files",
+        "get_workspace_file_metadata", "create_workspace_file", "update_workspace_file",
+    )
+] + [provider_declaration(workspace_import_tool_spec())]
+TERMINAL_TOOLS_CLAUDE = [provider_declaration(terminal_tool_spec())]
 
 VISION_TOOLS_CLAUDE = [
     {
@@ -285,12 +305,47 @@ def _append_non_overlapping_tools(destination: list, candidates: list) -> None:
     )
 
 
+def _cua_provider_tools() -> list[dict]:
+    """Live Cua Driver tools plus Xelora's bounded act-and-verify wrapper.
+
+    Nothing is offered when the Driver is disabled or unreachable, so the
+    model never sees desktop tools it cannot use.
+    """
+    if not config.ENABLE_CUA_DRIVER:
+        return []
+    from vision.cua_driver import discover_tools
+    tools = [
+        {"name": item["name"], "description": item["description"], "input_schema": item["input_schema"]}
+        for item in discover_tools().get("tools", [])
+    ]
+    if any(item["name"] == "cua__verify_state" for item in tools):
+        tools.append(provider_declaration(cua_act_and_verify_spec()))
+    return tools
+
+
+def _mcp_provider_tools() -> list[dict]:
+    """Allowlisted tools from administrator-configured external MCP servers."""
+    if not config.ENABLE_MCP_CLIENT:
+        return []
+    from tools.mcp_external import discover_tools
+    return [
+        {"name": item["name"], "description": item["description"], "input_schema": item["input_schema"]}
+        for item in discover_tools().get("tools", [])
+    ]
+
+
 def build_claude_tools():
     if config.VISUAL_ONLY_MODE:
-        tools = _available_vision_tools()
+        tools = _available_vision_tools() + _cua_provider_tools()
         _assert_unique_tool_names(tools, "Claude visual")
         return tools
     tools = claude_tools()
+    tools.extend(WEB_TOOLS_CLAUDE)
+    tools.extend(FILE_TOOLS_CLAUDE)
+    tools.extend(_cua_provider_tools())
+    tools.extend(_mcp_provider_tools())
+    if config.ENABLE_TERMINAL_TOOLS:
+        tools.extend(TERMINAL_TOOLS_CLAUDE)
     if config.ENABLE_CODEGEN_LAYER:
         tools.append(CODEGEN_TOOL_CLAUDE)
     if config.ENABLE_VISUAL_FALLBACK:
@@ -353,6 +408,10 @@ def build_gemini_tools(allowed_function_names=None):
             {"name": t["name"], "description": t["description"], "parameters": _strip_unsupported_schema_keys(t["input_schema"])}
             for t in vision_tools if include(t["name"])
         ]
+        declarations.extend(
+            {"name": t["name"], "description": t["description"], "parameters": _strip_unsupported_schema_keys(t["input_schema"])}
+            for t in _cua_provider_tools() if include(t["name"])
+        )
         _assert_unique_tool_names(declarations, "Gemini visual")
         return [{"function_declarations": declarations}]
     merged = [
@@ -369,6 +428,13 @@ def build_gemini_tools(allowed_function_names=None):
             "description": CODEGEN_TOOL_CLAUDE["description"],
             "parameters": CODEGEN_TOOL_CLAUDE["input_schema"],
         })
+    general_tools = WEB_TOOLS_CLAUDE + FILE_TOOLS_CLAUDE + _cua_provider_tools() + _mcp_provider_tools()
+    if config.ENABLE_TERMINAL_TOOLS:
+        general_tools = general_tools + TERMINAL_TOOLS_CLAUDE
+    merged.extend(
+        {"name": tool["name"], "description": tool["description"], "parameters": _strip_unsupported_schema_keys(tool["input_schema"])}
+        for tool in general_tools if include(tool["name"])
+    )
     if config.ENABLE_VISUAL_FALLBACK:
         _append_non_overlapping_tools(
             merged,
@@ -390,7 +456,7 @@ def validate_provider_tool_catalogues() -> None:
 
 _GEMINI_READ_ONLY_TOOL_NAMES = {
     "get_excel_version", "inspect_workbook", "read_range", "screenshot_active_window",
-    "take_screenshot", "parse_screen", "get_execution_capabilities",
+    "take_screenshot", "parse_screen", "get_execution_capabilities", "web_search", "web_fetch", "list_workspace_files", "read_workspace_file", "search_workspace_files", "get_workspace_file_metadata",
 }
 
 # This is deliberately small enough to work with Gemini's forced-function
@@ -644,6 +710,9 @@ def _gemini_tool_config(task):
         # workbook. Require a real, task-relevant Excel operation instead of
         # accepting another textual completion claim.
         names = set(_GEMINI_INITIAL_MUTATION_TOOLS)
+        names |= {"web_search", "web_fetch", "list_workspace_files", "read_workspace_file", "search_workspace_files", "get_workspace_file_metadata", "import_workspace_file_to_sheet", "copy_range"}
+        if config.ENABLE_TERMINAL_TOOLS:
+            names.add("run_terminal")
         if config.ENABLE_VISUAL_FALLBACK:
             names |= _GEMINI_INITIAL_VISUAL_MUTATION_TOOLS
         if config.ENABLE_CODEGEN_LAYER:

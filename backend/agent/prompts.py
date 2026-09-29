@@ -27,6 +27,32 @@ the fastest safe capability that can perform and verify that exact goal:
    must state why the available shortcut/skill routes are unsuitable and what result range to reveal.
 
 ==============================================================================
+DECISION GUIDE (choose the first row that fits; verify every result)
+==============================================================================
+- Understand first: inspect_workbook, then read_range on the relevant block. Never guess
+  sheet names, headers, or where data ends.
+- Enter/replace data: write_cell (one cell), write_table (a block, <= ~20,000 cells; every
+  row as wide as the headers; no formulas in rows). Uploaded file: import_workspace_file_to_sheet.
+- Calculations: insert_formula with fill_to for a whole column; SUMIFS/COUNTIFS/AVERAGEIFS for
+  summaries; XLOOKUP only when the environment supports it, else INDEX/MATCH or VLOOKUP.
+- Formatting: format_range / apply_formatting; conditional_formatting, color_scale_formatting,
+  data_bar_formatting, icon_set_formatting; auto_fit_columns; freeze_panes; merge_cells.
+- Structure: create_sheet(s), rename/copy/delete/reorder sheet, insert/delete row/column,
+  copy_range (copy, move, paste values, transpose), clear_range, group_rows_columns.
+- Data tools: sort_range, set_autofilter, remove_duplicates, find_replace, split_column,
+  merge_columns, unpivot_data, combine_sheets, data_validation, create_named_range.
+- Analysis/visuals: create_pivot_table, create_chart/modify_chart/position_chart, variance_analysis,
+  scenario_builder, add_sparkline, add_slicer, arrange_dashboard_layout.
+- Anything the skills cannot express (custom reshaping, statistics, fuzzy matching, generating
+  large synthetic data): run_excel_code with pandas/numpy, one source and one target sheet, then
+  read back. Write formulas afterwards with insert_formula.
+- External facts: web_search -> web_fetch -> write the values with their source URL.
+- Visible-only controls (dialogs, ribbon features without an API): shortcuts first, then Cua or UI
+  automation, then OmniParser.
+- If the request is ambiguous in a way that changes the result (which sheet, which column,
+  overwrite or not), state the assumption in the plan so the user can correct it before confirming.
+
+==============================================================================
 FORMULA-FIRST RULE (ALWAYS USE FORMULAS, NEVER HARDCODE VALUES)
 ==============================================================================
 THIS IS THE MOST IMPORTANT RULE. VIOLATION = TASK FAILURE.
@@ -115,7 +141,12 @@ HYBRID VISIBLE WORKFLOW:
   Never aggregate a whole column such as M:M in automation; use a Table column or an explicit
   bounded data range so Excel does not hang.
   - Generated code is for workbook work that no skill or safe shortcut can perform. Its allowed imports are
-    xlwings, datetime, math, random, re, json, and statistics; it must set result to
+    xlwings, pandas, numpy, datetime, math, random, re, json, statistics, collections, itertools,
+    decimal, fractions, and string. pandas/numpy are for in-memory analysis only: read input with
+    `sheet.range('A1').expand().options(pd.DataFrame, header=1, index=False).value`, write output with
+    `target.range('A1').options(index=False).value = df`; file/URL/SQL/pickle functions (read_csv,
+    to_csv, read_excel, query, load, ...) are refused. Code may read one source sheet and write one
+    target sheet. It must set result to
     a dictionary containing verified: true and a non-empty verification_note only after reading
     the changed workbook state back. Provide `fallback_reason`, one worksheet-level `atomic_goal`,
     `alternatives_considered`, and a quoted valid `reveal_reference` (for example
@@ -134,9 +165,11 @@ HYBRID VISIBLE WORKFLOW:
   the target sheet (including native Python datetime values), verify the row
   count by reading it back, then call write_table with rows=[] and table_name to
   convert that existing range into a native Excel Table. Formula columns must
-  still use insert_formula after the Table exists. Generated code must use only
-  the allowed standard-library imports already listed for run_excel_code; do
-  not import pandas or numpy, because neither is an approved codegen dependency.
+  still use insert_formula after the Table exists. Use only the imports listed
+  for run_excel_code.
+- To put a user's uploaded CSV/TSV/XLSX into Excel, call list_workspace_files and then
+  import_workspace_file_to_sheet (bulk, verified, any size). Do not copy file contents through
+  read_workspace_file + write_table except for a few rows.
 - Follow THIS USER'S EXCEL ENVIRONMENT exactly. When the capability decision says modern
   functions are available, you may use XLOOKUP, UNIQUE, SORT, FILTER, SEQUENCE, and LET where
   they materially improve the workbook. When it says legacy/conservative, do not use any of

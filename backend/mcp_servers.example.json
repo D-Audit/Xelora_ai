@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "example-inventory": {
+      "command": "python",
+      "args": ["-m", "your_inventory_mcp_server"],
+      "pass_env": ["INVENTORY_DB_URL"],
+      "env": {},
+      "read_tools": ["lookup_item", "list_warehouses"],
+      "write_tools": [],
+      "timeout_seconds": 30
+    }
+  }
+}

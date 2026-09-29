@@ -132,6 +132,32 @@ class WorkflowRun(Base):
     workflow = relationship("Workflow", back_populates="runs")
 
 
+class AutomationSchedule(Base):
+    """A user-approved schedule that repeatedly runs one existing workflow.
+
+    Created only through the automation API by the workflow's owner. The
+    scheduler claims due rows atomically and submits runs through the same
+    internal /task endpoint as manual runs, so nothing here bypasses plan
+    limits, the task lock, or action verification.
+    """
+    __tablename__ = "automation_schedules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    workflow_id = Column(Integer, ForeignKey("workflows.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("auth_users.id"), nullable=False)
+
+    enabled = Column(Boolean, default=False, nullable=False)
+    interval_minutes = Column(Integer, nullable=False, default=60)
+    next_run_at = Column(DateTime(timezone=True), nullable=True)
+    last_run_at = Column(DateTime(timezone=True), nullable=True)
+    last_status = Column(String, nullable=True)
+    last_task_id = Column(Integer, nullable=True)
+
+    created_at = Column(DateTime, default=_now)
+
+    workflow = relationship("Workflow")
+
+
 class WorkflowTemplate(Base):
     __tablename__ = "workflow_templates"
 

@@ -4,6 +4,9 @@ anthropic
 google-genai
 xlwings
 openpyxl
+# In-memory analysis for sandboxed code generation (codegen/executor.py
+# blocks every pandas/numpy file, URL, SQL, and pickle entry point).
+pandas
 python-dotenv
 pydantic
 sqlalchemy
@@ -21,7 +24,9 @@ pillow
 
 # Visual/UI fallback layer (Windows required for real desktop control)
 pyautogui
-pywinauto
+# Windows-only packages: markers keep `pip install -r requirements.txt`
+# working on Linux/macOS developer machines (CI, unit tests).
+pywinauto; sys_platform == "win32"
 pillow
 
 # Unstructured Data Intelligence (document ingestion)
@@ -34,13 +39,16 @@ scikit-learn
 
 # OS-Level Event Listener (Windows required for window-focus tracking)
 watchdog
-pywin32
+pywin32; sys_platform == "win32"
 
 # MCP Support - pinned to the last pre-rewrite (2.0.0) release; mcp 2.0.0
 # restructured the Server API and is NOT compatible with mcp_server/server.py
 # as written. If you want to move to 2.0.0 later, mcp_server/server.py's
 # decorator-based Server usage will need to be rewritten against the new API.
 mcp==1.29.0
+# The same pinned package also provides the stdio MCP *client* used by
+# tools/mcp_client.py for the Cua Driver and administrator-configured
+# external MCP servers; no extra dependency is needed.
 
 # Database/ERP connector - install the driver for whichever database you're
 # actually connecting to, in addition to sqlalchemy above, e.g.:

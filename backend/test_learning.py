@@ -9,6 +9,13 @@ BASE_URL = "http://127.0.0.1:8000"
 USER_ID = 1
 
 def test_learning_system():
+    # Live end-to-end script: needs a running backend and Excel. Skip (not
+    # fail) when no server is listening, so unit runs stay meaningful.
+    import pytest
+    try:
+        requests.get(BASE_URL, timeout=2)
+    except requests.RequestException:
+        pytest.skip(f"No Xelora backend running at {BASE_URL}; start it to run this live test.")
     print("🧪 Testing Automatic Learning System\n")
     
     print("1️⃣  Submitting a task with 'dashboard' and 'professional' keywords...")

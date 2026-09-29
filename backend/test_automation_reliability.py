@@ -6,6 +6,7 @@ threads, unverified codegen results, path expansion, and Gemini tool history.
 """
 
 import os
+import sys
 import io
 import time
 import json
@@ -385,6 +386,7 @@ Add these charts:
             item["window_text"] for item in snapshot["tab_items"]
         ])
 
+    @unittest.skipUnless(sys.platform == "win32", "Needs Windows (pyautogui / UI Automation / Win32 executable paths); run on the Windows Excel host.")
     def test_bound_window_is_identified_as_microsoft_excel_by_its_executable(self):
         window = _Object(
             handle=77,
@@ -781,13 +783,15 @@ Add these charts:
             "wb = get_task_workbook()\n"
             "first = wb.sheets['Sales Data']\n"
             "second = wb.sheets['Sales Summary']\n"
+            "third = wb.sheets['Dashboard']\n"
             "result = {'verified': True, 'verification_note': 'Not reached.'}",
             BACKEND_ROOT,
         )
 
+        # One source + one target sheet is allowed; a multi-sheet build is not.
         self.assertFalse(result["verified"])
         self.assertEqual("rejected_by_sandbox", result["status"])
-        self.assertIn("one atomic worksheet target", result["error"])
+        self.assertIn("not build a multi-sheet workbook", result["error"])
 
     def test_codegen_rejects_formula_text_written_through_value(self):
         result = run_generated_code(
@@ -1034,7 +1038,11 @@ Add these charts:
             "result": {"verified": True},
         }]
 
-        config = providers._gemini_tool_config(task)
+        # Like the other routing tests, this must not depend on a developer's
+        # .env: patching the fallback flag guarantees the visual shortcut set
+        # below is part of the forced first-mutation allowlist.
+        with patch("agent.core.config.ENABLE_VISUAL_FALLBACK", True):
+            config = providers._gemini_tool_config(task)
 
         self.assertEqual("ANY", config["function_calling_config"]["mode"])
         self.assertIn("create_sheet", config["function_calling_config"]["allowed_function_names"])
@@ -1261,6 +1269,7 @@ Add these charts:
         self.assertFalse(missing["verified"])
         self.assertIn("wps pdf", ui_control._NON_SHEET_TAB_TITLES)
 
+    @unittest.skipUnless(sys.platform == "win32", "Needs Windows (pyautogui / UI Automation / Win32 executable paths); run on the Windows Excel host.")
     def test_find_and_click_routes_an_exact_sheet_name_to_the_sheet_navigator(self):
         window = _Object(handle=10)
         with patch("vision.ui_control._require_display"), patch(
@@ -1328,6 +1337,7 @@ Add these charts:
         set_name.assert_called_once_with(popup, "Management Report.xlsx")
         click_save.assert_called_once_with(popup, ("Save",))
 
+    @unittest.skipUnless(sys.platform == "win32", "Needs Windows (pyautogui / UI Automation / Win32 executable paths); run on the Windows Excel host.")
     def test_new_workbook_save_uses_browse_and_a_generated_local_filename(self):
         backstage = {
             "handle": None,
@@ -1466,6 +1476,7 @@ Add these charts:
         self.assertIn("create_sheet", tool_names)
         self.assertIn("create_sheet", core.VISUAL_TOOL_NAMES)
 
+    @unittest.skipUnless(sys.platform == "win32", "Needs Windows (pyautogui / UI Automation / Win32 executable paths); run on the Windows Excel host.")
     def test_create_sheet_renames_only_the_observed_new_tab(self):
         window = _Object(handle=77)
         with patch("vision.ui_control._get_agent_excel_window", return_value=window), patch(

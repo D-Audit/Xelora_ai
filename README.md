@@ -39,10 +39,11 @@ source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt -r requirements-auth.txt
 ```
 
-Create your `.env` by combining the two example files:
+Create your `.env` from the example (it lists every variable the code
+reads, with defaults):
 
 ```bash
-cat .env.example .env.auth.example > .env
+cp .env.example .env        # Windows: copy .env.example .env
 ```
 
 Then edit `.env` and fill in, at minimum:
@@ -76,7 +77,33 @@ check response, plus you can hit `http://localhost:8000/docs` for the
 full interactive API (original agent routes + new `/auth` and
 `/billing` routes together).
 
-## 2A. OmniParser-only visual Excel mode
+## 2A. Agent capabilities beyond Excel (web, files, terminal, Cua, MCP, automations)
+
+Excel stays the core: structured Excel skills are always tried first. Other
+capabilities go through one governed boundary (tool registry → permission
+policy → audit log → dispatch → verification). Architecture details:
+`docs/ARCHITECTURE.md`. Tests and the Windows acceptance procedure:
+`docs/TESTING.md`.
+
+| Capability | Default | Enable with |
+|---|---|---|
+| Web search / fetch (SSRF-guarded, 2 MB cap, untrusted output) | on | — |
+| User files in `STORAGE_DIR/<user_id>` (signed-in users only) | on | — |
+| Terminal (argv allowlist, no shell, read-only) | off | `ENABLE_TERMINAL_TOOLS=true`, `XELORA_TERMINAL_ROOT=<dir>` (+ `TERMINAL_WRITE_TOOLS=true` for pip install -r / pytest) |
+| Cua Driver desktop control (same host as Excel) | off | `ENABLE_CUA_DRIVER=true` — see `docs/WINDOWS_CUA_SETUP.md` |
+| External MCP servers (per-tool allowlist) | off | `ENABLE_MCP_CLIENT=true`, `MCP_SERVERS_FILE=mcp_servers.json` (see `mcp_servers.example.json`) |
+| Scheduled workflow runs (≥5 min intervals) | off | `ENABLE_AUTOMATIONS=true` (needs `DATABASE_URL`) |
+
+The backend refuses to start if an enabled capability is misconfigured
+(e.g. terminal without an existing root, MCP without a valid server file).
+
+Status endpoints (all need `X-API-Key`): `GET /` (feature flags),
+`GET /agent/cua/health` (Driver installed/reachable, with a setup hint),
+`GET /agent/tools` (every tool's schema, risk, permissions, verification and
+whether it is enabled). Every tool decision/result is logged as one JSON line
+on the `xelora.audit` logger with secrets masked.
+
+## 2B. OmniParser-only visual Excel mode
 
 Xelora can operate Excel like a person: it focuses the visible Excel window,
 uses Excel's native **Go To / Name Box** behavior to select a known range, and
@@ -176,7 +203,7 @@ formatting; it parses only ambiguous visual controls.
 ```bash
 cd frontend/xelora
 npm install
-cp .env.local.example .env.local
+cp .env.example .env.local        # Windows: copy .env.example .env.local
 ```
 
 Edit `.env.local`:

@@ -7,6 +7,8 @@ __pycache__/
 # Ignore environment files
 .env
 .env.*
+# Example files document configuration and contain no secrets.
+!.env.example
 
 # Ignore Node dependencies and lock files
 node_modules/

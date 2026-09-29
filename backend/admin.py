@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from auth import get_current_user_id, get_db_or_503, _require_db
 from models import User, Task
-from auoth_billing_models import AuthUser, Subscription
+from auth_billing_models import AuthUser, Subscription
 from workspace_models import Workflow, WorkflowRun
 from plan_catalog import PLAN_CATALOG
 

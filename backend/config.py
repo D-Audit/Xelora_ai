@@ -62,6 +62,27 @@ INITIAL_EXCEL_CHECK_TIMEOUT_SECONDS = int(
 MAX_VISUAL_ACTIONS_PER_TASK = int(_local_agent_setting("MAX_VISUAL_ACTIONS_PER_TASK", "240"))
 
 ENABLE_CODEGEN_LAYER = _local_agent_setting("ENABLE_CODEGEN_LAYER", "true").lower() == "true"
+# General terminal tools are isolated behind a dedicated opt-in.
+ENABLE_TERMINAL_TOOLS = _local_agent_setting("ENABLE_TERMINAL_TOOLS", "false").lower() == "true"
+# Even with terminal tools enabled, mutating commands stay blocked unless the
+# administrator also opts in to the bounded write allowlist (pip install -r,
+# pytest) anchored to XELORA_TERMINAL_ROOT.
+TERMINAL_WRITE_TOOLS = _local_agent_setting("TERMINAL_WRITE_TOOLS", "false").lower() == "true"
+ENABLE_CUA_DRIVER = _local_agent_setting("ENABLE_CUA_DRIVER", "false").lower() == "true"
+TERMINAL_TIMEOUT_SECONDS = int(_local_agent_setting("TERMINAL_TIMEOUT_SECONDS", "30"))
+# Absolute path to the Cua Driver binary when it is not on PATH (use the
+# location reported by `cua-driver doctor`). Leave empty to resolve
+# `cua-driver` from PATH. CUA_DRIVER_ARGS defaults to its stdio MCP server.
+CUA_DRIVER_COMMAND = os.getenv("CUA_DRIVER_COMMAND", "").strip()
+CUA_DRIVER_ARGS = os.getenv("CUA_DRIVER_ARGS", "mcp").strip()
+# Cua input normally must target an observed pid+window_id, and only the
+# task's bound Excel process once one is known. These widen that boundary.
+CUA_ALLOW_DESKTOP_SCOPE = _local_agent_setting("CUA_ALLOW_DESKTOP_SCOPE", "false").lower() == "true"
+CUA_ALLOW_OTHER_APPS = _local_agent_setting("CUA_ALLOW_OTHER_APPS", "false").lower() == "true"
+# Outbound MCP: tools from administrator-configured stdio MCP servers. Every
+# server lists the exact tools it may expose; nothing is exposed by default.
+ENABLE_MCP_CLIENT = _local_agent_setting("ENABLE_MCP_CLIENT", "false").lower() == "true"
+MCP_SERVERS_FILE = _local_agent_setting("MCP_SERVERS_FILE", "").strip()
 ENABLE_VISUAL_FALLBACK = _local_agent_setting("ENABLE_VISUAL_FALLBACK", "false").lower() == "true"
 VISUAL_ONLY_MODE = _local_agent_setting("VISUAL_ONLY_MODE", "false").lower() == "true"
 # Hybrid mode keeps the real Excel window visible while structured skills do
@@ -99,6 +120,12 @@ if OMNIPARSER_ONLY_MODE:
     # rejecting every structured workbook request before OmniParser can help.
     ALLOW_VISUAL_STRUCTURED_EDITS = True
 
+# Scheduled automation runs over existing workflows. Disabled by default:
+# recurring actions must never start without an explicit administrator and
+# user opt-in. Schedules themselves are still created per user through the
+# automation API; this flag only starts the background scheduler process.
+ENABLE_AUTOMATIONS = _local_agent_setting("ENABLE_AUTOMATIONS", "false").lower() == "true"
+
 # Local OmniParser mode: when true, loads YOLOv9 + Florence-2 models directly
 # in-process instead of calling an external HTTP service. Requires PyTorch +
 # transformers + easyocr. Model weights are cached to ~/.cache/omniparser/.
@@ -109,6 +136,37 @@ OMNIPARSER_LOCAL_MODE = _local_agent_setting("OMNIPARSER_LOCAL_MODE", "false").l
 # also get AI-generated captions (~3-5s additional). Set to false on Windows
 # if you don't need icon descriptions and want snappy visual responses.
 ENABLE_FLORENCE_CAPTION = _local_agent_setting("ENABLE_FLORENCE_CAPTION", "true").lower() == "true"
+
+
+def validate_terminal_configuration() -> None:
+    """Fail at startup when opted-in agent tools are misconfigured.
+
+    Terminal tools without a workspace root, or an MCP client without a
+    readable server file, are refused. A Cua command override that does not
+    exist only warns: the Driver may be installed after the backend starts,
+    and /agent/cua/health reports the live state.
+    """
+    if ENABLE_TERMINAL_TOOLS:
+        root = os.getenv("XELORA_TERMINAL_ROOT", "").strip()
+        if not root:
+            raise RuntimeError(
+                "ENABLE_TERMINAL_TOOLS=true requires XELORA_TERMINAL_ROOT to point at the "
+                "directory the agent may inspect. Set it in backend/.env, then restart."
+            )
+        if not os.path.isdir(os.path.expanduser(root)):
+            raise RuntimeError(f"XELORA_TERMINAL_ROOT={root} is not an existing directory.")
+    if ENABLE_MCP_CLIENT:
+        if not MCP_SERVERS_FILE or not os.path.isfile(MCP_SERVERS_FILE):
+            raise RuntimeError(
+                "ENABLE_MCP_CLIENT=true requires MCP_SERVERS_FILE to point at a JSON server "
+                "configuration (see backend/mcp_servers.example.json)."
+            )
+        from tools.mcp_external import load_server_config
+        load_server_config(MCP_SERVERS_FILE)  # raises RuntimeError with the exact problem
+    if ENABLE_CUA_DRIVER and CUA_DRIVER_COMMAND and not os.path.isfile(CUA_DRIVER_COMMAND):
+        import shutil as _shutil
+        if _shutil.which(CUA_DRIVER_COMMAND) is None:
+            print(f"WARNING: CUA_DRIVER_COMMAND={CUA_DRIVER_COMMAND} was not found; Cua tools stay unavailable until it is fixed.")
 
 
 def validate_local_omniparser_configuration() -> None:

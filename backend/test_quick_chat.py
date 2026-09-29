@@ -33,5 +33,25 @@ class QuickChatRoutingTests(unittest.TestCase):
         )
 
 
+class QuickChatEndpointTests(unittest.TestCase):
+    """POST /chat backs the frontend's /api/chat proxy."""
+
+    def test_endpoint_answers_or_defers_to_task_flow(self):
+        from unittest.mock import patch
+        from fastapi.testclient import TestClient
+        import config
+        import main
+
+        with patch.object(config, "LOCAL_API_KEY", "k"):
+            client = TestClient(main.app)
+            chat = client.post("/chat", json={"instruction": "hello"}, headers={"X-API-Key": "k"})
+            task = client.post("/chat", json={"instruction": "Sort column B in this sheet"}, headers={"X-API-Key": "k"})
+            denied = client.post("/chat", json={"instruction": "hello"})
+        self.assertEqual("chat", chat.json()["route"])
+        self.assertTrue(chat.json()["reply"])
+        self.assertEqual({"route": "task", "reply": None}, {k: task.json()[k] for k in ("route", "reply")})
+        self.assertEqual(401, denied.status_code)
+
+
 if __name__ == "__main__":
     unittest.main()
