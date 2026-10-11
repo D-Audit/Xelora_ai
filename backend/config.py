@@ -41,7 +41,22 @@ AI_PROVIDER_FALLBACK_CHAIN = [
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 LOCAL_API_KEY = os.getenv("LOCAL_API_KEY", "")
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+
+def _sqlalchemy_database_url(url: str) -> str:
+    """Pin Postgres URLs to psycopg2 (the installed driver).
+
+    SQLAlchemy 2.1 maps a bare postgresql:// URL to psycopg 3, and some hosts
+    hand out the legacy postgres:// scheme, which SQLAlchemy rejects.
+    """
+    url = url.strip()
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg2://" + url[len(prefix):]
+    return url
+
+
+DATABASE_URL = _sqlalchemy_database_url(os.getenv("DATABASE_URL", ""))
 
 # Model API base URLs. Blank means the provider's public endpoint. The desktop
 # local agent points these at the cloud relay (/agent-link/llm/<provider>/) so
