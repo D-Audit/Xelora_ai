@@ -6,9 +6,13 @@
   "author": "Xelora",
   "license": "MIT",
   "private": true,
+  "xelora": {
+    "webUrl": "https://YOUR-APP.vercel.app/dashboard"
+  },
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win"
+    "dist": "npm run bundle-agent && electron-builder --win",
+    "bundle-agent": "powershell -ExecutionPolicy Bypass -File scripts/bundle-agent.ps1"
   },
   "build": {
     "appId": "app.xelora.desktop",
@@ -35,7 +39,17 @@
     "files": [
       "main.js",
       "preload.js",
-      "assets/**"
+      "assets/**",
+      "agent.js"
+    ],
+    "extraResources": [
+      {
+        "from": "build/agent",
+        "to": "agent",
+        "filter": [
+          "**/*"
+        ]
+      }
     ]
   },
   "dependencies": {

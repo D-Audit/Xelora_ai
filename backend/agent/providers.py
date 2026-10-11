@@ -14,6 +14,7 @@ import json
 import time
 
 import config
+from codegen.executor import ALLOWED_IMPORTS
 from agent.tool_registry import (
     cua_act_and_verify_spec,
     file_tool_spec,
@@ -30,10 +31,15 @@ CODEGEN_TOOL_CLAUDE = {
         "Runs real Python (xlwings) only when no available skill or safe visible command "
         "covers the exact operation, for a large raw-data batch that cannot fit a tool payload, "
         "or for the exact goal of a skill result that explicitly requires codegen fallback. "
+        "This includes native Excel features no skill exposes (for example Goal Seek, Table "
+        "styles, outline/print settings, chart or shape details): reach them through the COM "
+        "object model with `.api` on the task workbook's sheets and ranges, e.g. "
+        "`sheet.range('B5').api.GoalSeek(Goal=0, ChangingCell=sheet.range('B2').api)`. "
         "The call must explain that decision and name the result range/chart source that Excel "
         "should visibly reveal. Must use native Excel features, never a "
-        "precomputed value. Allowed imports are xlwings, datetime, math, random, "
-        "re, json, and statistics. Never assign .formula or .formula2 here: use the "
+        f"precomputed value. Allowed imports are {', '.join(sorted(ALLOWED_IMPORTS))}; "
+        "pandas/numpy are for in-memory analysis of workbook data and cannot read or write "
+        "files. Never assign .formula or .formula2 here: use the "
         "insert_formula skill (with fill_to for a formula column) so formula writes are "
         "verified safely. Assign a JSON-serializable dictionary to `result`. Only set "
         "`verified: true` after reading back the changed workbook state, and include a "
@@ -735,6 +741,7 @@ def call_claude(task, system_prompt: str):
     # an availability failure, after preserving the workbook state safely.
     client = Anthropic(
         api_key=config.ANTHROPIC_API_KEY,
+        base_url=config.ANTHROPIC_BASE_URL or None,
         timeout=config.CLAUDE_TIMEOUT_SECONDS,
         max_retries=0,
     )
@@ -1207,7 +1214,8 @@ def call_gemini(task, system_prompt: str):
                 client = genai.Client(
                     api_key=config.GEMINI_API_KEY,
                     http_options=types.HttpOptions(
-                        timeout=max(1, int(min(config.GEMINI_TIMEOUT_SECONDS, remaining_seconds) * 1000))
+                        base_url=config.GEMINI_BASE_URL or None,
+                        timeout=max(1, int(min(config.GEMINI_TIMEOUT_SECONDS, remaining_seconds) * 1000)),
                     ),
                 )
                 response = client.models.generate_content(
@@ -1490,7 +1498,7 @@ def call_openrouter(task, system_prompt: str):
             
             try:
                 response = requests.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
+                    f"{config.OPENROUTER_BASE_URL}/chat/completions",
                     headers=headers,
                     json=payload,
                     timeout=max(1, min(timeout, remaining_seconds))

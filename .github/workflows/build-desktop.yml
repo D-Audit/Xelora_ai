@@ -1,4 +1,4 @@
-﻿name: Build Desktop Installer
+name: Build Desktop Installer
 
 on:
   push:
@@ -14,7 +14,7 @@ jobs:
     runs-on: windows-latest
     defaults:
       run:
-        working-directory: frontend/xelora-desktop
+        working-directory: desktop
 
     steps:
       - name: Check out repo
@@ -28,6 +28,13 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Bundle the local agent (Python runtime + backend)
+        shell: pwsh
+        run: ./scripts/bundle-agent.ps1
+
       - name: Build Windows installer (NSIS)
         run: npx electron-builder --win --publish never
         env:
@@ -38,8 +45,8 @@ jobs:
         with:
           name: xelora-windows-installer
           path: |
-            frontend/xelora-desktop/release/*.exe
-            frontend/xelora-desktop/release/latest.yml
+            desktop/release/*.exe
+            desktop/release/latest.yml
           if-no-files-found: error
 
       - name: Attach installer to the GitHub Release
@@ -47,5 +54,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            frontend/xelora-desktop/release/*.exe
-            frontend/xelora-desktop/release/latest.yml
+            desktop/release/*.exe
+            desktop/release/latest.yml

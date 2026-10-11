@@ -4,7 +4,7 @@ Used only by tests to exercise Xelora's Cua adapter over the genuine MCP
 transport. It performs no desktop input. Behaviour is selected with
 environment variables:
 
-FAKE_CUA_MODE   ok | verify_fails | verify_after_2 | click_error | hang | malformed
+FAKE_CUA_MODE   ok | verify_fails | verify_after_2 | verify_on_recheck | click_error | hang | malformed
 FAKE_CUA_STATE  path to a JSON file used to count actions across sessions
 """
 from __future__ import annotations
@@ -89,6 +89,10 @@ def verify_state(pid: int, window_id: int, expect: list[dict], timeout_ms: int =
             with open(STATE, encoding="utf-8") as handle:
                 clicks = json.load(handle).get("click", 0)
         return {"predicates": [{"status": "satisfied" if clicks >= 2 else "unknown"}]}
+    if MODE == "verify_on_recheck":
+        # The UI settles late: the first check is unsatisfied, later ones pass.
+        checks = _bump("verify_state")
+        return {"predicates": [{"status": "satisfied" if checks >= 2 else "unknown"}]}
     return {"predicates": [{"status": "satisfied"} for _ in expect]}
 
 

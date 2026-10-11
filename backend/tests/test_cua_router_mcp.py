@@ -136,6 +136,26 @@ class CuaVerificationFailureTests(FakeDriverCase):
         self.assertEqual(3, len(result["attempts"]))  # clamped to the hard maximum
         self.assertEqual(3, self.counts()["click"])
 
+    def test_typed_input_is_sent_once_and_only_rechecked(self):
+        result = cua_driver.act_and_verify(
+            "press_key", {"pid": 4242, "window_id": 7, "key": "enter"}, [{"x": 1}],
+            max_attempts=3, observed_targets={EXCEL},
+        )
+        self.assertEqual("verification_failed", result["status"])
+        self.assertEqual(3, len(result["attempts"]))
+        self.assertEqual(1, self.counts()["press_key"])  # Enter twice would move two rows
+
+    def test_typed_input_with_lost_connection_reports_unknown_delivery(self):
+        cua_driver.discover_tools()  # warm the tool cache before the transport breaks
+        with patch.object(cua_driver.mcp_client, "run_session", side_effect=ConnectionError("pipe closed")):
+            result = cua_driver.act_and_verify(
+                "press_key", {"pid": 4242, "window_id": 7, "key": "enter"}, [{"x": 1}],
+                max_attempts=3, observed_targets={EXCEL},
+            )
+        self.assertEqual("delivery_unknown", result["status"])
+        self.assertFalse(result["verified"])
+        self.assertEqual(3, len(result["attempts"]))
+
 
 class CuaRetryTests(FakeDriverCase):
     mode = "verify_after_2"
@@ -146,6 +166,19 @@ class CuaRetryTests(FakeDriverCase):
         )
         self.assertTrue(result["verified"], result)
         self.assertEqual(2, len(result["attempts"]))
+
+
+class CuaRecheckTests(FakeDriverCase):
+    mode = "verify_on_recheck"
+
+    def test_typed_input_is_verified_by_recheck_without_resending(self):
+        result = cua_driver.act_and_verify(
+            "press_key", {"pid": 4242, "window_id": 7, "key": "enter"}, [{"x": 1}],
+            max_attempts=3, observed_targets={EXCEL},
+        )
+        self.assertTrue(result["verified"], result)
+        self.assertEqual("not_resent", result["attempts"][1]["action_status"])
+        self.assertEqual(1, self.counts()["press_key"])
 
 
 class CuaActionFailureTests(FakeDriverCase):

@@ -1,0 +1,12 @@
+# Optional: OmniParser local mode (OMNIPARSER_LOCAL_MODE=true). Several GB;
+# not bundled with Xelora Desktop. See docs/OMNIPARSER.md.
+#   pip install -r requirements-omniparser.txt
+-r requirements-local.txt
+
+torch
+torchvision
+transformers
+huggingface_hub
+easyocr
+einops
+timm

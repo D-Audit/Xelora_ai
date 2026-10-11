@@ -83,7 +83,11 @@ def _submit_scheduled_run(schedule) -> dict[str, Any]:
     finally:
         db.close()
 
-    headers = {"Content-Type": "application/json"}
+    from auth import create_token
+
+    # server.py's plan guard requires a signed-in user on POST /task; acting as
+    # the schedule's owner also routes the run to their desktop agent when hosted.
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {create_token(schedule.user_id)[0]}"}
     if LOCAL_API_KEY:
         headers["X-API-Key"] = LOCAL_API_KEY
     try:

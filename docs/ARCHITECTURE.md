@@ -8,7 +8,7 @@ boundary.
 
 ```
 Browser / Electron window
-  └─ Next.js (frontend/xelora)  ── server-side only: BACKEND_URL + BACKEND_API_KEY
+  └─ Next.js (frontend)  ── server-side only: BACKEND_URL + BACKEND_API_KEY
        └─ FastAPI  server:app  (backend/server.py → main.py)
             ├─ auth / billing / plan guard / files / workflows / automations
             └─ POST /task → background worker (one Excel task at a time: _TASK_EXECUTION_LOCK)

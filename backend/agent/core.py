@@ -3052,13 +3052,16 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                     if observed is not None:
                         task.cua_observed_targets.add(observed)
                 if tool_name == "cua__verify_state" and isinstance(result, dict) and result.get("verified") is True:
-                    verify_target = {key: tool_input.get(key) for key in ("pid", "window_id", "target") if key in tool_input}
+                    from vision.cua_driver import target_of
+                    # Normalised (pid, window_id): the model may send ids as
+                    # numbers in one call and numeric strings in the next.
+                    verify_target = (target_of(tool_input), tool_input.get("target"))
                     for prior_step in reversed(task.structured_steps):
                         if prior_step.get("type") == "action" and str(prior_step.get("tool_name", "")).startswith("cua__") and prior_step.get("tool_name") not in _OBSERVATION_TOOL_NAMES:
                             prior_input = prior_step.get("input") if isinstance(prior_step.get("input"), dict) else {}
-                            prior_target = {key: prior_input.get(key) for key in ("pid", "window_id", "target") if key in prior_input}
+                            prior_target = (target_of(prior_input), prior_input.get("target"))
                             prior_result = prior_step.get("result")
-                            if isinstance(prior_result, dict) and prior_result.get("status") == "action_dispatched" and verify_target == prior_target and verify_target:
+                            if isinstance(prior_result, dict) and prior_result.get("status") == "action_dispatched" and verify_target == prior_target and any(verify_target):
                                 prior_result["verified"] = True
                                 prior_result["verification_note"] = "A subsequent Cua verify_state call confirmed predicates for the same target window."
                             break

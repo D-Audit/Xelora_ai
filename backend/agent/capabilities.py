@@ -275,6 +275,8 @@ def recovery_options(tool_name: str, execution_layer: str | None, result: dict |
             "automatic_retry": False,
             "next_steps": [
                 "Inspect the workbook to determine whether the attempted change partially applied.",
+                "If the error came from the code itself (exception or sandbox rejection), fix that "
+                "specific problem and retry run_excel_code once with corrected code.",
                 "Choose an existing verified skill if one covers the smaller remaining goal.",
                 "Use visible UI only when the remaining goal is genuinely UI-only.",
             ],

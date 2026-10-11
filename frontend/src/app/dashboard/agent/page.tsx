@@ -11,6 +11,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { XeloraLogo } from '@/components/ui/xelora-logo';
 import { isDesktopApp } from '@/lib/is-desktop';
+import { LocalAgentBadge } from '@/components/desktop/local-agent';
 import { useAuthStore } from '@/stores/auth-store';
 import {
   startTask, getTaskProgress, pauseTask, resumeTask, getTaskReveal,
@@ -424,7 +425,8 @@ export default function AgentPage() {
               What can we build together{user?.name ? `, ${user.name.split(' ')[0]}` : ''}?
             </h1>
           </div>
-          <div className="flex w-full max-w-5xl items-center justify-end">
+          <div className="flex w-full max-w-5xl items-center justify-end gap-2">
+            {desktop && <LocalAgentBadge />}
             {floatingModeButton}
           </div>
           {inputBar}
@@ -451,6 +453,7 @@ export default function AgentPage() {
             {currentTaskId !== null ? `Conversation #${currentTaskId}` : 'New task'}
           </span>
           <div className="ml-auto flex items-center gap-2">
+            {desktop && <LocalAgentBadge />}
             {floatingModeButton}
           </div>
         </header>

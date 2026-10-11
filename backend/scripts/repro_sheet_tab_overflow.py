@@ -2,7 +2,7 @@
 
 Run from ``backend`` on the Windows desktop where Excel is installed:
 
-    .\\venv\\Scripts\\python.exe repro_sheet_tab_overflow.py
+    .\\venv\\Scripts\\python.exe -m scripts.repro_sheet_tab_overflow
 
 The script launches its own unsaved Excel instance, adds 24 worksheets with
 the same Shift+F11 primitive used by ``create_sheet``, then records every UIA

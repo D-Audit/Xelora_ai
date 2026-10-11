@@ -22,7 +22,7 @@ from test_support.fake_excel import FakeBook
 from tools import filesystem as fs
 from tools import workspace_import as wi
 
-LIB = Path(__file__).with_name("skills") / "library"
+LIB = Path(__file__).resolve().parents[1] / "skills" / "library"
 
 
 def load_skill(name):

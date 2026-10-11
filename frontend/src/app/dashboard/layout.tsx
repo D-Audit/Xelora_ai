@@ -6,6 +6,7 @@ import { useAuthStore } from '@/stores/auth-store';
 import { useUIStore } from '@/stores/ui-store';
 import { Sidebar } from '@/components/dashboard/sidebar';
 import { Topbar } from '@/components/dashboard/topbar';
+import { LocalAgentBridge } from '@/components/desktop/local-agent';
 import { cn } from '@/lib/utils';
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
@@ -37,6 +38,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   return (
     <div className="flex h-screen overflow-hidden bg-xelora-bg-main">
+      <LocalAgentBridge />
       <div className="hidden lg:flex flex-shrink-0">
         <Sidebar collapsed={sidebarCollapsed} />
       </div>

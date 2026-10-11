@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+import agent_link
 import config
 import security
 from agent import providers
@@ -85,6 +86,12 @@ def on_startup():
     if config.ALLOW_NO_AUTH and not config.LOCAL_API_KEY:
         print("WARNING: running with ALLOW_NO_AUTH=true and no API key - every endpoint "
               "is open to anyone who can reach this server. Only use this for local testing.")
+    if config.TASK_EXECUTION not in {"server", "agent"}:
+        print(f"REFUSING TO START: TASK_EXECUTION must be 'server' or 'agent', not {config.TASK_EXECUTION!r}.")
+        raise SystemExit(1)
+    if config.TASK_EXECUTION == "agent" and not config.DATABASE_URL:
+        print("REFUSING TO START: TASK_EXECUTION=agent needs DATABASE_URL (desktop agent tokens are stored there).")
+        raise SystemExit(1)
     if config.OMNIPARSER_ONLY_MODE and not config.OMNIPARSER_URL:
         print("REFUSING TO START: OMNIPARSER_ONLY_MODE=true requires OMNIPARSER_URL to point "
               "to the separately running OmniParser /parse/ endpoint. Do not use this "
@@ -243,6 +250,11 @@ def quick_chat(req: ChatRequest):
 
 
 def _start_task_in_background(task, task_id, user_id, user_preferences):
+    if agent_link.routes_to_agent(task):
+        # Cloud deployment: the user's Xelora Desktop agent runs it next to Excel.
+        agent_link.dispatch(task, task_id)
+        return
+
     def _worker():
         import json
         from datetime import datetime, timezone
@@ -367,6 +379,7 @@ def pause_task(
         raise HTTPException(status_code=404, detail="Task not found.")
     _assert_task_owner(task.user_id, jwt_user_id)
     task.pause()
+    agent_link.request_pause(task_id)
     if db is not None:
         from models import Task
         db.query(Task).filter_by(id=task_id).update({"status": "paused"})
@@ -594,6 +607,7 @@ def delete_task(
     db.delete(task)
     db.commit()
     ACTIVE_TASKS.pop(task_id, None)
+    agent_link.forget(task_id)
     return {"id": task_id, "deleted": True}
 
 

@@ -1,0 +1,37 @@
+# Render Blueprint - backend API (free web service).
+# Render dashboard -> New -> Blueprint -> pick this repo.
+# Frontend goes on Vercel (root directory: frontend); see docs/DEPLOYMENT.md.
+services:
+  - type: web
+    name: xelora-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: LOCAL_API_KEY
+        generateValue: true
+      - key: ALLOW_NO_AUTH
+        value: "false"
+      - key: TASK_EXECUTION
+        value: agent   # tasks run on each user's Xelora Desktop, next to their Excel
+      - key: PUBLIC_API_URL
+        sync: false    # e.g. https://xelora-api.onrender.com (given to paired desktops)
+      - key: DATABASE_URL
+        sync: false   # paste your Neon/Supabase Postgres URL
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false   # e.g. https://your-app.vercel.app
+      - key: FRONTEND_URL
+        sync: false   # e.g. https://your-app.vercel.app
+      - key: STORAGE_DIR
+        value: /tmp/xelora-storage   # free tier disk is ephemeral

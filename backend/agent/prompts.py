@@ -21,9 +21,11 @@ the fastest safe capability that can perform and verify that exact goal:
    formatting, layout, and verifiable workbook objects.
 3. UI AUTOMATION - Use only when the required visible control has no safe shortcut or skill.
    UI Automation comes before OmniParser; OmniParser is only for an unknown visible control.
-4. CODE GENERATION - LAST RESORT. Use only when no skill or safe visible command covers the
-   specific operation, for a large raw-data generation batch that cannot fit a tool payload, or
-   after a verified skill result explicitly requests codegen fallback. Every run_excel_code call
+4. CODE GENERATION - LAST RESORT, but not a refusal. Use only when no skill or safe visible
+   command covers the specific operation (including native Excel features with no skill, reached
+   through xlwings `.api`), for a large raw-data generation batch that cannot fit a tool payload, or
+   after a verified skill result explicitly requests codegen fallback. Never tell the user an Excel
+   task is unsupported just because no skill matches; try a bounded run_excel_code first. Every run_excel_code call
    must state why the available shortcut/skill routes are unsuitable and what result range to reveal.
 
 ==============================================================================
@@ -46,6 +48,12 @@ DECISION GUIDE (choose the first row that fits; verify every result)
 - Anything the skills cannot express (custom reshaping, statistics, fuzzy matching, generating
   large synthetic data): run_excel_code with pandas/numpy, one source and one target sheet, then
   read back. Write formulas afterwards with insert_formula.
+- Native Excel features with no skill (Goal Seek, Table styles/totals rows, outlines, print titles,
+  hiding gridlines, chart/shape details): run_excel_code using the COM object model via `.api` on
+  get_task_workbook()'s sheets and ranges, then read the result back.
+- If run_excel_code fails because of the code itself (Python exception, sandbox rejection),
+  read the error, fix that specific problem, and retry once with corrected code before
+  switching layers.
 - External facts: web_search -> web_fetch -> write the values with their source URL.
 - Visible-only controls (dialogs, ribbon features without an API): shortcuts first, then Cua or UI
   automation, then OmniParser.

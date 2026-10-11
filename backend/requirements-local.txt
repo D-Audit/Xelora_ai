@@ -1,0 +1,9 @@
+# Local desktop agent - the Windows PC that runs Excel. This is what the
+# Xelora Desktop installer bundles (desktop/scripts/bundle-agent.ps1).
+#   pip install -r requirements-local.txt
+-r requirements.txt
+
+# Visual/UI control layer
+pyautogui
+pywinauto; sys_platform == "win32"
+pywin32; sys_platform == "win32"

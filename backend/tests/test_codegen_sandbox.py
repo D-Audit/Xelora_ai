@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from codegen.executor import CodeRejected, _check_ast, run_generated_code
 
-ROOT = str(Path(__file__).resolve().parent)
+ROOT = str(Path(__file__).resolve().parents[1])
 
 
 class SandboxPolicyTests(unittest.TestCase):

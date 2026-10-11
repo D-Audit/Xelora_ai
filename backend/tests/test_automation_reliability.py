@@ -33,7 +33,7 @@ from vision import ui_control
 from vision.excel_shortcuts import resolve_shortcut
 
 
-BACKEND_ROOT = os.path.dirname(os.path.abspath(__file__))
+BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class _Object:

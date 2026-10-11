@@ -12,4 +12,15 @@ contextBridge.exposeInMainWorld('xeloraDesktop', {
     ipcRenderer.on('floating:changed', handler);
     return () => ipcRenderer.removeListener('floating:changed', handler);
   },
+  agent: {
+    getStatus: () => ipcRenderer.invoke('agent:status'),
+    start: () => ipcRenderer.invoke('agent:start'),
+    pair: (details) => ipcRenderer.invoke('agent:pair', details),
+    unpair: () => ipcRenderer.invoke('agent:unpair'),
+    onChange: (callback) => {
+      const handler = (_event, status) => callback(status);
+      ipcRenderer.on('agent:changed', handler);
+      return () => ipcRenderer.removeListener('agent:changed', handler);
+    },
+  },
 });

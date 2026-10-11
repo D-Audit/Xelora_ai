@@ -5,11 +5,13 @@
 ```bash
 cd backend
 python -m venv .venv && . .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt -r requirements-auth.txt -r requirements-dev.txt
+pip install -r requirements.txt -r requirements-dev.txt
 python -m pytest -q -rs
 ```
 
 `conftest.py` supplies a throwaway `JWT_SECRET_KEY` for tests only.
+
+Tests live in `backend/tests/` (fakes in `backend/tests/test_support/`).
 
 | File | Covers |
 |---|---|
@@ -28,16 +30,14 @@ that the real Cua Driver or Excel behave the same way.
 Frontend:
 
 ```bash
-cd frontend/xelora && npm install
+cd frontend && npm install
 npx tsc --noEmit && npm run build          # production build
 npm run lint                               # see "Known lint findings" below
-cd apps/desktop && npm install && npm run typecheck && npm run build
 ```
 
 Known lint findings: React Compiler rules (`react-hooks/set-state-in-effect`)
 flag data-loading effects in several dashboard pages; they are not build
-errors. `apps/desktop` has no unit tests yet (`npm test` reports "No test
-files found").
+errors.
 
 ## Windows + Excel runtime validation (must be done on Windows)
 
@@ -50,7 +50,7 @@ procedure for the real acceptance test.
    ```powershell
    cd backend
    python -m venv .venv; .venv\Scripts\activate
-   pip install -r requirements.txt -r requirements-auth.txt -r requirements-dev.txt
+   pip install -r requirements-local.txt -r requirements-dev.txt
    copy .env.example .env      # then fill JWT_SECRET_KEY, LOCAL_API_KEY, DATABASE_URL, provider key
    python -m pytest -q -rs     # the 4 Windows-only tests must now RUN and pass
    uvicorn server:app --port 8000

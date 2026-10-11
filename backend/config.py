@@ -43,6 +43,21 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 LOCAL_API_KEY = os.getenv("LOCAL_API_KEY", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
+# Model API base URLs. Blank means the provider's public endpoint. The desktop
+# local agent points these at the cloud relay (/agent-link/llm/<provider>/) so
+# provider keys never leave the server.
+ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "")
+GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "")
+OPENROUTER_BASE_URL = (os.getenv("OPENROUTER_BASE_URL", "") or "https://openrouter.ai/api/v1").rstrip("/")
+
+# Where signed-in users' tasks run. "server": in this process (local install,
+# backend on the same PC as Excel). "agent": the cloud queues each task for the
+# user's own Xelora Desktop local agent (see agent_link.py, local_agent.py).
+TASK_EXECUTION = os.getenv("TASK_EXECUTION", "server").strip().lower()
+# Public URL of this API, given to paired desktop agents. Falls back to the
+# URL the pairing request arrived on.
+PUBLIC_API_URL = os.getenv("PUBLIC_API_URL", "").rstrip("/")
+
 # Complex dashboard work can legitimately need several planning, repair, and
 # verification turns. Keep a finite safety boundary, but do not stop a healthy
 # task at the old 60-turn default before its charts and final audit are done.

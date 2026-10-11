@@ -62,6 +62,10 @@ _TARGETED_INPUT_TOOLS = {
 }
 # Tools that act on the whole desktop by definition.
 _DESKTOP_INPUT_TOOLS = {"move_cursor"}
+# Input whose effect stacks when delivered twice (typing "abc" again gives
+# "abcabc", Enter moves another row). act_and_verify sends these once and only
+# re-checks the postcondition on later attempts.
+_NON_REPEATABLE_INPUT = {"type_text", "press_key", "hotkey", "invoke_menu", "drag", "scroll"}
 _HEALTH_CACHE: dict[str, Any] = {"expires": 0.0, "health": None}
 _HEALTH_CACHE_LOCK = threading.Lock()
 _HEALTH_CACHE_TTL_SECONDS = 10
@@ -392,9 +396,11 @@ def act_and_verify(
     """Observe-act-verify with bounded retries in one Driver session per attempt.
 
     Each attempt: send ``action`` then ``verify_state`` with ``expect`` on the
-    same pid/window_id. Stops at the first satisfied verification. The action
-    is re-sent only if verification failed *and* attempts remain; it never
-    loops beyond ``_MAX_ACT_ATTEMPTS``.
+    same pid/window_id. Stops at the first satisfied verification. A
+    repeatable action (click, set_value, ...) is re-sent only if verification
+    failed *and* attempts remain; input in ``_NON_REPEATABLE_INPUT`` is sent
+    at most once and later attempts only re-check. Never loops beyond
+    ``_MAX_ACT_ATTEMPTS``.
     """
     if not config.ENABLE_CUA_DRIVER:
         return {"verified": False, "status": "disabled", "error": "Cua Driver integration is disabled."}
@@ -418,31 +424,47 @@ def act_and_verify(
     verify_args = {"pid": target[0], "window_id": target[1], "expect": expect, "timeout_ms": max(100, min(int(timeout_ms), 30_000))}
     attempts = max(1, min(int(max_attempts), _MAX_ACT_ATTEMPTS))
     history: list[dict[str, Any]] = []
+    repeatable = driver_action not in _NON_REPEATABLE_INPUT
+    action_sent = False
+    action_delivered = False
     for attempt in range(1, attempts + 1):
+        # A transport error may hit after the input was delivered, so a
+        # non-repeatable action is never re-sent once a send was attempted.
+        send_action = repeatable or not action_sent
+        calls = [(driver_action, arguments)] if send_action else []
+        calls.append((verify_name, verify_args))
+        action_sent = action_sent or send_action
         try:
-            _, (action_raw, verify_raw) = mcp_client.run_session(
-                _server(), [(driver_action, arguments), (verify_name, verify_args)],
-                timeout_seconds=_CALL_TIMEOUT_SECONDS,
-            )
-            action_result = _result_for(driver_action, action_raw)
-            verify_result = _result_for(verify_name, verify_raw)
+            _, raw_results = mcp_client.run_session(_server(), calls, timeout_seconds=_CALL_TIMEOUT_SECONDS)
+            action_result = _result_for(driver_action, raw_results[0]) if send_action else None
+            verify_result = _result_for(verify_name, raw_results[-1])
         except BaseException as exc:  # noqa: BLE001
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
             history.append({"attempt": attempt, "status": "driver_error", "error": mcp_client.describe_error(exc)})
             continue
         history.append({
-            "attempt": attempt, "action_status": action_result["status"],
+            "attempt": attempt,
+            "action_status": action_result["status"] if action_result else "not_resent",
             "verify_status": verify_result["status"],
             "verify_detail": verify_result.get("structured_content"),
         })
-        if action_result["status"] == "driver_error":
+        if action_result and action_result["status"] == "driver_error":
             # The Driver rejected the action itself; repeating it unchanged won't help.
             return {"verified": False, "status": "action_failed", "attempts": history,
                     "error": action_result.get("error"), "retryable": False}
+        action_delivered = action_delivered or action_result is not None
         if verify_result["verified"] is True:
             return {"verified": True, "status": "verified", "attempts": history, "driver_tool": driver_action,
                     "verification_note": f"verify_state confirmed all predicates after attempt {attempt}."}
+    if not repeatable and not action_delivered:
+        # The single send hit a transport error, so whether the keystrokes
+        # landed is unknown; saying "verification failed" would hide that.
+        return {
+            "verified": False, "status": "delivery_unknown", "attempts": history, "retryable": False,
+            "error": (f"The Driver connection failed while sending {driver_action}, so it is unknown whether the input "
+                      "reached the window. It was not re-sent, to avoid typing twice. Re-observe the window before acting again."),
+        }
     return {
         "verified": False, "status": "verification_failed", "attempts": history, "retryable": False,
         "error": f"The postcondition was not confirmed after {attempts} bounded attempt(s). Re-observe the window before choosing another method.",

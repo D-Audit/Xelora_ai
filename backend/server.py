@@ -32,6 +32,7 @@ from oauth import router as oauth_router  # noqa: E402
 from billing import router as billing_router  # noqa: E402
 from files import router as files_router  # noqa: E402
 from devices import router as devices_router  # noqa: E402
+from agent_link import router as agent_link_router  # noqa: E402
 from team import router as team_router  # noqa: E402
 from notifications import router as notifications_router  # noqa: E402
 from workflows import router as workflows_router  # noqa: E402
@@ -46,6 +47,7 @@ app.include_router(oauth_router)
 app.include_router(billing_router)
 app.include_router(files_router)
 app.include_router(devices_router)
+app.include_router(agent_link_router)
 app.include_router(team_router)
 app.include_router(notifications_router)
 app.include_router(workflows_router)
