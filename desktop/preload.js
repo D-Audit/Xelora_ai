@@ -2,7 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('xeloraDesktop', {
   platform: process.platform,
-  version: '1.3.0',
+  version: '1.4.0',
   reload: () => ipcRenderer.send('reload'),
   isDesktopApp: true,
   setFloatingMode: (enabled) => ipcRenderer.invoke('floating:set', enabled),
