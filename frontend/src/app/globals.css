@@ -134,6 +134,20 @@ a[href], button:not(:disabled), [role="button"]:not([aria-disabled="true"]), sum
   background: #A1A1AA;
 }
 
+/* Landing page product walkthrough (components/marketing/hero-demo.tsx). */
+@keyframes xl-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes xl-pop { from { opacity: 0; transform: scale(0.5); } to { opacity: 1; transform: scale(1); } }
+@keyframes xl-fade-out { to { opacity: 0; } }
+@keyframes xl-grow { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+@keyframes xl-progress { from { width: 0; } to { width: 100%; } }
+@keyframes xl-blink { 50% { opacity: 0; } }
+.xl-enter { animation: xl-enter 0.5s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.xl-pop { animation: xl-pop 0.3s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.xl-fade-out { animation: xl-fade-out 0.2s ease forwards; }
+.xl-grow { transform-origin: bottom; animation: xl-grow 0.7s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.xl-progress { animation: xl-progress linear both; }
+.xl-caret { animation: xl-blink 1s step-end infinite; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

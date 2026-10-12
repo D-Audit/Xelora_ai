@@ -104,7 +104,9 @@ through the API; the key never ships in the app.
    Authorised redirect URI: `https://<your-vercel-app>/api/auth/google/callback`
    (exactly; add `http://localhost:3000/api/auth/google/callback` for local use).
 3. Put the client ID and secret on Render as `GOOGLE_CLIENT_ID` and
-   `GOOGLE_CLIENT_SECRET`, and set `XELORA_APP_URL` on Vercel.
+   `GOOGLE_CLIENT_SECRET`, and set `XELORA_APP_URL` on Vercel. Also set
+   `GOOGLE_CLIENT_ID` (the ID only, never the secret) on Vercel so the
+   Google screen opens without waiting for the backend to wake up.
 
 In Xelora Desktop, the button opens the user's normal browser (Google blocks
 sign-in inside app windows), and the session comes back to the app through a

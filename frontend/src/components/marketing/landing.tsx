@@ -1,11 +1,12 @@
 import Link from 'next/link';
 import {
-  ArrowRight, Check, CircleCheck, Cloud, Download, FolderSync, Globe, History, KeyRound,
+  ArrowRight, Check, Cloud, Download, FolderSync, Globe, History, KeyRound,
   ListChecks, Lock, Monitor, ShieldCheck, Table2, Workflow,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { planHighlights, plans } from '@/data/plans';
 import { site } from '@/lib/site';
+import { HeroDemo } from '@/components/marketing/hero-demo';
 
 function Eyebrow({ children }: { children: React.ReactNode }) {
   return <p className="text-sm font-medium text-xelora-green">{children}</p>;
@@ -25,7 +26,7 @@ function SectionTitle({ eyebrow, title, description, id }: { eyebrow: string; ti
 
 export function Hero() {
   return (
-    <section className="border-b border-xelora-border bg-white" aria-labelledby="hero-heading">
+    <section className="overflow-hidden border-b border-xelora-border bg-white" aria-labelledby="hero-heading">
       <div className="mx-auto max-w-6xl px-4 pb-20 pt-16 sm:px-6 lg:px-8 lg:pt-24">
         <div className="mx-auto max-w-3xl text-center">
           <p className="inline-flex items-center gap-2 rounded-full border border-xelora-border px-3 py-1 text-xs font-medium text-xelora-text-secondary">
@@ -51,95 +52,9 @@ export function Hero() {
             {site.trialDays}-day free trial · No credit card required · Needs Microsoft Excel for Windows
           </p>
         </div>
-        <ProductShot />
+        <HeroDemo />
       </div>
     </section>
-  );
-}
-
-/** A faithful sketch of the real app: the chat on the left, Excel on the right. */
-function ProductShot() {
-  const steps = [
-    'Read Sales (1,248 rows, 6 columns)',
-    'Created a PivotTable on a new Summary sheet',
-    'Added a clustered column chart',
-    'Checked the totals against the source data',
-  ];
-  const rows = [
-    ['North', '412,380', 92],
-    ['South', '298,145', 66],
-    ['East', '351,902', 78],
-    ['West', '187,604', 42],
-  ] as const;
-  return (
-    <div className="mt-16 overflow-hidden rounded-2xl border border-xelora-border bg-white shadow-[0_24px_60px_-24px_rgba(0,0,0,0.18)]" aria-hidden="true">
-      <div className="flex items-center gap-1.5 border-b border-xelora-border bg-xelora-surface-2 px-4 py-2.5">
-        <span className="h-2.5 w-2.5 rounded-full bg-xelora-border-strong" />
-        <span className="h-2.5 w-2.5 rounded-full bg-xelora-border-strong" />
-        <span className="h-2.5 w-2.5 rounded-full bg-xelora-border-strong" />
-        <span className="ml-3 text-xs text-xelora-text-muted">Xelora</span>
-      </div>
-      <div className="grid md:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
-        <div className="space-y-4 border-b border-xelora-border p-5 text-left md:border-b-0 md:border-r">
-          <div className="ml-auto w-fit max-w-[85%] rounded-2xl bg-xelora-surface-2 px-4 py-2.5 text-sm text-xelora-text">
-            Summarise sales by region and add a chart
-          </div>
-          <div className="space-y-2 text-sm">
-            <p className="text-xs font-medium text-xelora-text-muted">Worked in Excel · 4 steps</p>
-            <ul className="space-y-1.5">
-              {steps.map((step) => (
-                <li key={step} className="flex items-start gap-2 text-xelora-text-secondary">
-                  <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-xelora-green" />
-                  {step}
-                </li>
-              ))}
-            </ul>
-            <p className="pt-2 leading-relaxed text-xelora-text">
-              Done. North leads with 412,380, about 33% of total sales. The chart is next to the table on the
-              Summary sheet.
-            </p>
-            <p className="flex items-center gap-1.5 text-xs font-medium text-xelora-green">
-              <CircleCheck className="h-3.5 w-3.5" /> Completed and verified
-            </p>
-          </div>
-        </div>
-        <div className="p-5">
-          <div className="mb-3 flex items-center gap-2 text-xs text-xelora-text-muted">
-            <Table2 className="h-3.5 w-3.5" /> Sales.xlsx · Summary
-          </div>
-          <table className="w-full border-collapse text-left text-xs">
-            <thead>
-              <tr className="bg-xelora-surface-2 text-xelora-text-secondary">
-                <th className="border border-xelora-border px-2 py-1.5 font-medium">Region</th>
-                <th className="border border-xelora-border px-2 py-1.5 text-right font-medium">Sum of Revenue</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map(([region, total]) => (
-                <tr key={region} className="text-xelora-text">
-                  <td className="border border-xelora-border px-2 py-1.5">{region}</td>
-                  <td className="border border-xelora-border px-2 py-1.5 text-right tabular-nums">{total}</td>
-                </tr>
-              ))}
-              <tr className="font-semibold text-xelora-text">
-                <td className="border border-xelora-border px-2 py-1.5">Grand Total</td>
-                <td className="border border-xelora-border px-2 py-1.5 text-right tabular-nums">1,250,031</td>
-              </tr>
-            </tbody>
-          </table>
-          <div className="mt-5 flex h-28 items-end gap-4 border-b border-l border-xelora-border px-4">
-            {rows.map(([region, , height]) => (
-              <div key={region} className="flex h-full flex-1 items-end justify-center">
-                <div className="w-full max-w-10 rounded-t bg-xelora-green/80" style={{ height: `${height}%` }} />
-              </div>
-            ))}
-          </div>
-          <div className="mt-1 flex gap-4 px-4 text-[10px] text-xelora-text-muted">
-            {rows.map(([region]) => <span key={region} className="flex-1 text-center">{region}</span>)}
-          </div>
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -468,18 +383,22 @@ export function ClosingCta() {
   return (
     <section className="bg-white py-24" aria-labelledby="cta-heading">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
-        <div className="rounded-3xl bg-[#18181B] px-6 py-16 text-center ring-1 ring-transparent dark:bg-xelora-surface-2 dark:ring-xelora-border sm:px-12">
-          <h2 id="cta-heading" className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+        <div className="relative overflow-hidden rounded-3xl border border-xelora-green/20 bg-xelora-success-bg px-6 py-16 text-center sm:px-12">
+          <div
+            className="pointer-events-none absolute inset-x-0 -top-24 h-64 bg-[radial-gradient(ellipse_at_center,rgba(14,122,90,0.14),transparent_70%)]"
+            aria-hidden="true"
+          />
+          <h2 id="cta-heading" className="relative text-3xl font-semibold tracking-tight text-xelora-text sm:text-4xl">
             Hand Xelora your next spreadsheet task
           </h2>
-          <p className="mx-auto mt-4 max-w-xl text-base text-white/70">
+          <p className="relative mx-auto mt-4 max-w-xl text-base text-xelora-text-secondary">
             Free for {site.trialDays} days. Set up takes a few minutes.
           </p>
-          <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
-            <Button size="lg" className="bg-white text-xelora-text hover:bg-white/90" asChild>
-              <Link href="/register">Get started free</Link>
+          <div className="relative mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
+            <Button size="lg" asChild>
+              <Link href="/register">Get started free <ArrowRight className="h-4 w-4" /></Link>
             </Button>
-            <Button size="lg" variant="ghost" className="text-white hover:bg-white/10 hover:text-white" asChild>
+            <Button size="lg" variant="outline" asChild>
               <Link href="/download"><Download className="h-4 w-4" /> Download for Windows</Link>
             </Button>
           </div>

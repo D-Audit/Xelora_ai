@@ -1,8 +1,8 @@
 import 'server-only';
 
 import { randomUUID } from 'crypto';
-import { NextRequest, NextResponse } from 'next/server';
-import { backendFetch } from '@/lib/backend';
+import { NextRequest, NextResponse, after } from 'next/server';
+import { backendFetch, wakeBackend } from '@/lib/backend';
 import {
   applyDesktopHandoffCookie, clearDesktopHandoffCookie, desktopHandoffHash, desktopSecretFrom, sealHandoff,
 } from '@/lib/desktop-handoff';
@@ -23,20 +23,46 @@ function fail(origin: string, message: string) {
   return NextResponse.redirect(`${origin}/login?error=${encodeURIComponent(message)}`);
 }
 
+/**
+ * Google's consent URL needs only the public client ID, so when Vercel has
+ * GOOGLE_CLIENT_ID it is built here and Google opens without waiting on the
+ * backend. Must match backend/oauth.py google_login().
+ */
+function googleAuthorizeUrl(redirectUri: string, state: string): string | null {
+  const clientId = process.env.GOOGLE_CLIENT_ID?.trim();
+  if (!clientId) return null;
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    response_type: 'code',
+    scope: 'openid email profile',
+    access_type: 'online',
+    prompt: 'select_account',
+    state,
+  });
+  return `https://accounts.google.com/o/oauth2/v2/auth?${params}`;
+}
+
 /** GET /api/auth/<provider>/start: redirect to the provider's consent screen. */
 export async function startOAuth(req: NextRequest, provider: OAuthProvider) {
   const origin = getOAuthOrigin(req);
   const redirectUri = `${origin}/api/auth/${provider}/callback`;
   const state = randomUUID();
+  // The callback needs the backend; let it boot while the user signs in.
+  after(wakeBackend);
 
-  const result = await backendFetch<{ url: string }>(
-    `/auth/${provider}/login?redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}`
-  );
-  if (!result.ok || !('url' in result.data)) {
-    return fail(origin, oauthFailureMessage(result.data, `${LABEL[provider]} sign-in is not available right now.`));
+  let url = provider === 'google' ? googleAuthorizeUrl(redirectUri, state) : null;
+  if (!url) {
+    const result = await backendFetch<{ url: string }>(
+      `/auth/${provider}/login?redirect_uri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}`
+    );
+    if (!result.ok || !('url' in result.data)) {
+      return fail(origin, oauthFailureMessage(result.data, `${LABEL[provider]} sign-in is not available right now.`));
+    }
+    url = (result.data as { url: string }).url;
   }
 
-  const response = applyOAuthStateCookie(NextResponse.redirect((result.data as { url: string }).url), state);
+  const response = applyOAuthStateCookie(NextResponse.redirect(url), state);
   const desktopSecret = desktopSecretFrom(req);
   return desktopSecret ? applyDesktopHandoffCookie(response, desktopSecret) : clearDesktopHandoffCookie(response);
 }

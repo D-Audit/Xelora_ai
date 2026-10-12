@@ -1,6 +1,6 @@
 'use client';
 
-import { forwardRef, useState } from 'react';
+import { forwardRef, useEffect, useState } from 'react';
 import { Eye, EyeOff, Loader2 } from 'lucide-react';
 import { Input, type InputProps } from '@/components/ui/input';
 import { isDesktopApp } from '@/lib/is-desktop';
@@ -83,6 +83,11 @@ export function hasOAuthProviders() {
  */
 export function OAuthButtons() {
   const [pending, setPending] = useState<string | null>(null);
+
+  // Sign-in needs the backend; wake it now in case it is asleep.
+  useEffect(() => {
+    void fetch('/api/warm', { method: 'POST' }).catch(() => {});
+  }, []);
 
   const start = async (provider: 'google' | 'microsoft') => {
     setPending(provider);

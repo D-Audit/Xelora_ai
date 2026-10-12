@@ -31,6 +31,8 @@ AuthUser table.  The marker deliberately avoids bcrypt: no password
 is ever supplied by an OAuth provider, and hashing a placeholder made
 new Google/Microsoft sign-ins dependent on the local bcrypt runtime.
 """
+import base64
+import json
 import os
 import secrets
 import urllib.parse
@@ -119,6 +121,15 @@ def _issue_session(db: Session, user: User) -> dict:
 
 
 
+def _id_token_claims(id_token: str) -> dict:
+    """The payload of an ID token received directly from the provider."""
+    try:
+        payload = id_token.split(".")[1]
+        return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (IndexError, ValueError):
+        return {}
+
+
 @router.get("/google/login")
 def google_login(redirect_uri: str, state: str = ""):
     if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
@@ -155,12 +166,19 @@ def google_exchange(req: ExchangeRequest):
         raise HTTPException(status_code=502, detail="Could not reach Google to verify sign-in.")
     if not token_res.ok:
         raise HTTPException(status_code=401, detail="Google rejected this sign-in attempt. Please try again.")
-    access_token = token_res.json().get("access_token")
+    tokens = token_res.json()
 
-    userinfo_res = requests.get(GOOGLE_USERINFO_URL, headers={"Authorization": f"Bearer {access_token}"}, timeout=10)
-    if not userinfo_res.ok:
-        raise HTTPException(status_code=401, detail="Could not fetch your Google account details.")
-    info = userinfo_res.json()
+    # The ID token came straight from Google's token endpoint over TLS, so its
+    # claims can be read without a signature check (OpenID Connect Core
+    # 3.1.3.7), which saves a second round trip to Google.
+    info = _id_token_claims(tokens.get("id_token", ""))
+    if not info.get("email") or not info.get("email_verified", False):
+        userinfo_res = requests.get(
+            GOOGLE_USERINFO_URL, headers={"Authorization": f"Bearer {tokens.get('access_token')}"}, timeout=10,
+        )
+        if not userinfo_res.ok:
+            raise HTTPException(status_code=401, detail="Could not fetch your Google account details.")
+        info = userinfo_res.json()
     email = info.get("email")
     if not email:
         raise HTTPException(status_code=400, detail="This Google account has no email address to sign in with.")

@@ -75,3 +75,17 @@ export async function backendFetch<T = unknown>(
 
   return { ok: res.ok, status: res.status, data };
 }
+
+/**
+ * Wakes the backend without waiting for it. On a host that sleeps when idle
+ * (Render's free plan), the first request after a quiet spell waits for a
+ * cold start; sending this early lets it boot while the user is busy, e.g.
+ * choosing a Google account. Run it from after() so it never delays a reply.
+ */
+export async function wakeBackend(): Promise<void> {
+  try {
+    await fetch(backendUrl('/'), { cache: 'no-store', signal: AbortSignal.timeout(10_000) });
+  } catch {
+    // Waking is best effort; the request itself is what starts the boot.
+  }
+}
