@@ -31,20 +31,16 @@ files off the server's disk via `../../` or an absolute path elsewhere.
   it stops obviously dangerous code, it does not make arbitrary AI-written
   code execution fully safe. Don't expose `run_excel_code` to untrusted users.
 
-**Skill library integrity** (`skills/loader.py`) - new. Every skill in
-`skills/library/<name>/` is only loaded if it's listed in
-`skills/library/_manifest.json` with a matching SHA-256 hash of both
-`SKILL.md` and `impl.py`. A skill folder that exists on disk but isn't in
-the manifest, or whose files don't match their pinned hash, is refused and
-logged loudly at startup - not silently skipped, not silently loaded. This
-matters because `impl.py` is real, executable Python with full Excel/COM
-and file-system access - a skill folder is a code-execution surface, and
-this stops a dropped-in or tampered folder from running just by existing.
-
-**Run `tools/generate_skill_manifest.py` after every legitimate skill
-add/edit** - it re-hashes everything and rewrites the manifest. If you skip
-this, the loader will correctly refuse to load whatever you changed (this
-is the intended behavior, not a bug).
+**Skill library** (`skills/loader.py`). Every folder in
+`skills/library/<name>/` with a `SKILL.md` and `impl.py` is loaded at
+startup; a folder that fails to load is logged as an error and skipped.
+`impl.py` is real, executable Python with full Excel/COM and file-system
+access, so the skill folder must only be writable by trusted parties. The
+desktop agent installs it under Program Files, which standard users cannot
+modify. (An earlier SHA-256 manifest was removed: its hashes broke on
+Windows line endings and on every unregenerated edit, and the manifest sat
+in the same folder as the skills it protected, so it added no protection
+against anyone able to write there.)
 
 ## What's NOT covered (be aware of these)
 

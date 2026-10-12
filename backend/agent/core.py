@@ -1214,7 +1214,10 @@ def _capture_visual_checkpoint(task: AgentTask, tool_name: str) -> None:
         from datetime import datetime, timezone
         from vision import ui_control
 
-        checkpoint_dir = os.path.join(PROJECT_ROOT, "storage", "visual-checkpoints")
+        checkpoint_dir = os.path.join(
+            os.getenv("XELORA_DATA_DIR") or os.path.join(PROJECT_ROOT, "storage"),
+            "visual-checkpoints",
+        )
         os.makedirs(checkpoint_dir, exist_ok=True)
         sequence = len(task.visual_checkpoints) + 1
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -2190,9 +2193,18 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             r"|\buse\s+(the|this|my)\s+(excel\s+)?(workbook|spreadsheet|data)\b",
             instruction,
         ))
-        from skills.excel_shared import bind_workbook_context, start_task_workbook
+        from skills.excel_shared import (
+            ExcelUnavailableError, bind_workbook_context, start_task_workbook,
+        )
         if not use_existing and not task.workbook_name:
-            workbook = start_task_workbook()
+            try:
+                workbook = start_task_workbook()
+            except ExcelUnavailableError as exc:
+                task.is_done = True
+                task.final_response = f"INCOMPLETE: Xelora could not start Excel. Reason: {exc}"
+                task.chat_transcript.append({"role": "assistant", "text": task.final_response})
+                task.log_step(task.final_response)
+                return task
             task.workbook_name = workbook.name
             task.excel_app_pid = workbook.app.pid
             task.workbook_path = workbook.fullname

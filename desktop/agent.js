@@ -117,10 +117,20 @@ function start() {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child = proc;
+  // The agent prints whether Excel automation works before it connects; a
+  // connected agent that cannot drive Excel must not look ready.
+  let startupOutput = '';
+  let excelProblem = null;
   proc.stdout.on('data', (chunk) => {
     log.write(chunk);
-    if (status.state !== 'running' && String(chunk).includes('agent connected')) {
-      setStatus({ state: 'running', message: 'Ready to run tasks in Excel on this PC.' });
+    if (status.state === 'running' || status.state === 'unavailable') return;
+    startupOutput = (startupOutput + String(chunk)).slice(-8000);
+    const problem = startupOutput.match(/Excel automation unavailable: ([^\r\n]+)/);
+    if (problem) excelProblem = problem[1];
+    if (startupOutput.includes('agent connected')) {
+      setStatus(excelProblem
+        ? { state: 'unavailable', message: `Excel automation is unavailable on this PC: ${excelProblem}` }
+        : { state: 'running', message: 'Ready to run tasks in Excel on this PC.' });
     }
   });
   proc.stderr.on('data', (chunk) => log.write(chunk));

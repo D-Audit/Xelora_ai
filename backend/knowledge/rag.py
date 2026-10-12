@@ -13,8 +13,9 @@ DB or an embeddings API call. This means:
     (e.g. pgvector, Chroma) later - the KnowledgeBase interface below
     (add_document/search) is designed to be a drop-in replacement point.
 
-Persisted as a single file per user under knowledge/data/ so it survives
-restarts without needing its own database table.
+Persisted as a single file per user under knowledge/data/ (or
+XELORA_DATA_DIR/knowledge on the desktop agent, whose install directory is
+read-only) so it survives restarts without needing its own database table.
 """
 
 import contextvars
@@ -24,8 +25,13 @@ import pickle
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-os.makedirs(DATA_DIR, exist_ok=True)
+# Created lazily on first save: importing this module must never write to
+# disk, because a packaged agent may live under a read-only Program Files.
+DATA_DIR = (
+    os.path.join(os.environ["XELORA_DATA_DIR"], "knowledge")
+    if os.getenv("XELORA_DATA_DIR")
+    else os.path.join(os.path.dirname(__file__), "data")
+)
 
 _CURRENT_USER_ID = contextvars.ContextVar("current_user_id_for_kb", default=None)
 
@@ -63,6 +69,7 @@ class KnowledgeBase:
                 self.chunks = pickle.load(f)
 
     def _save(self):
+        os.makedirs(DATA_DIR, exist_ok=True)
         with open(self.path, "wb") as f:
             pickle.dump(self.chunks, f)
 

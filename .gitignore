@@ -29,6 +29,7 @@ desktop/build/agent/
 # Runtime data written by the backend
 backend/storage/
 backend/memory/store/
+backend/knowledge/data/
 *.log
 
 # Editor / OS

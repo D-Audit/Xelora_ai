@@ -309,7 +309,12 @@ ENABLE_DATA_PROFILING = _local_agent_setting("ENABLE_DATA_PROFILING", "true").lo
 ENABLE_PDF_REPORTS = _local_agent_setting("ENABLE_PDF_REPORTS", "true").lower() == "true"
 ENABLE_SSE_STREAMING = _local_agent_setting("ENABLE_SSE_STREAMING", "true").lower() == "true"
 ENABLE_MEMORY_STORAGE = _local_agent_setting("ENABLE_MEMORY_STORAGE", "true").lower() == "true"
-MEMORY_STORE_DIR = _local_agent_setting("MEMORY_STORE_DIR", str(Path(__file__).parent / "memory" / "store"))
+MEMORY_STORE_DIR = _local_agent_setting(
+    "MEMORY_STORE_DIR",
+    str(Path(os.environ["XELORA_DATA_DIR"]) / "memory")
+    if os.getenv("XELORA_DATA_DIR")
+    else str(Path(__file__).parent / "memory" / "store"),
+)
 # Newest entries kept per memory list; older ones are dropped on write so a
 # user's memory row stays small (Postgres row, desktop-agent sync payload).
 MEMORY_MAX_RECORDS = {

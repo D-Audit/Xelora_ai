@@ -25,6 +25,18 @@ jobs:
         with:
           node-version: "20"
 
+      # The auto-updater compares the version inside the app, not the tag:
+      # a v1.4.3 tag built from package.json 1.4.2 is never offered as an
+      # update. Refuse to release when they disagree.
+      - name: Check the tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} does not match desktop/package.json version $version. Bump the version before tagging."
+          }
+
       - name: Install dependencies
         run: npm install
 

@@ -20,7 +20,7 @@ Browser / Electron window
                            decide_action  (agent/permissions.py)   → blocked / held for approval / allowed
                            audit.record   (agent/audit.py, logger "xelora.audit", secrets redacted)
                            dispatch_action
-                             ├─ Excel skills      skills/library/* (74 manifest-hashed skills; COM/xlwings/openpyxl)
+                             ├─ Excel skills      skills/library/* (75 skills; COM/xlwings/openpyxl)
                              ├─ Excel codegen     codegen/executor.py (AST-restricted, isolated subprocess, timeout)
                              ├─ Excel visual/UIA  vision/ui_control.py (+ OmniParser via vision/omniparser_client.py)
                              ├─ web               tools/web.py + tools/web_guard.py
@@ -97,9 +97,9 @@ need visual parsing. It is only offered when `OMNIPARSER_URL` or
 
 ## Excel layer
 
-* **Skills** (75, `skills/library/<name>/{SKILL.md,impl.py}`, SHA-256 pinned in
-  `_manifest.json`; regenerate with `python tools/generate_skill_manifest.py`
-  after editing one). Each writes through xlwings, saves, reads the result back
+* **Skills** (75, `skills/library/<name>/{SKILL.md,impl.py}`; every folder
+  with both files is loaded, and one that fails to load is logged and
+  skipped). Each writes through xlwings, saves, reads the result back
   and returns `verified`.
 * **Argument guards** (`agent/excel_guards.py`, enforced by the policy layer):
   file types per path-taking skill and no hidden/system folders; read-only

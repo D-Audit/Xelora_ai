@@ -37,9 +37,20 @@ class TokenRejected(Exception):
     pass
 
 
-def default_workspace_dir() -> str:
+def _local_app_dir() -> str:
     base = os.getenv("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".local", "share")
-    return os.path.join(base, "Xelora", "workspace")
+    return os.path.join(base, "Xelora")
+
+
+def default_workspace_dir() -> str:
+    return os.path.join(_local_app_dir(), "workspace")
+
+
+def default_data_dir() -> str:
+    """Writable home for the agent's runtime data (knowledge index, memory,
+    reports, checkpoints). The install directory - typically under Program
+    Files - is read-only for the user, so nothing may be written next to the code."""
+    return os.path.join(_local_app_dir(), "data")
 
 
 def configure_environment(api_url: str, token: str, workspace_dir: str | None = None) -> None:
@@ -58,7 +69,18 @@ def configure_environment(api_url: str, token: str, workspace_dir: str | None = 
         # Local mirror of the user's cloud files (see agent_workspace.py).
         "STORAGE_DIR": workspace_dir or os.getenv("XELORA_WORKSPACE_DIR") or default_workspace_dir(),
     })
+    os.environ.setdefault("XELORA_DATA_DIR", default_data_dir())
     os.environ.setdefault("JWT_SECRET_KEY", "local-agent-does-not-issue-tokens")
+
+
+def excel_engine_status() -> str:
+    """One log line saying whether Excel automation is usable on this PC."""
+    try:
+        from skills.excel_shared import require_excel_engine
+        require_excel_engine()
+    except Exception as exc:
+        return f"Excel automation unavailable: {exc}"
+    return "Excel automation ready"
 
 
 class CloudClient:
@@ -239,6 +261,7 @@ def main(argv=None) -> int:
         return 2
 
     configure_environment(args.api_url, args.token)
+    print(excel_engine_status(), flush=True)
     cloud = CloudClient(args.api_url, args.token)
     from memory import _store
     _store.use_remote(cloud.read_memory, cloud.write_memory)  # learn into the user's cloud memory

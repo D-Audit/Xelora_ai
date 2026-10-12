@@ -19,7 +19,11 @@ import re
 from pathlib import Path
 from typing import Optional
 
-REPORTS_DIR = Path(__file__).parent.parent / "storage" / "reports"
+REPORTS_DIR = (
+    Path(os.environ["XELORA_DATA_DIR"]) / "reports"
+    if os.getenv("XELORA_DATA_DIR")
+    else Path(__file__).parent.parent / "storage" / "reports"
+)
 
 
 def _report_directory(user_id: int | None = None) -> Path:

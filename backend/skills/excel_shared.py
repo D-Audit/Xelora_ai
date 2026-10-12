@@ -31,6 +31,69 @@ _DYNAMIC_ARRAY_SUPPORT_CACHE = {}  # keyed by app.pid - avoids re-probing every 
 _EXCEL_CAPABILITY_CACHE = {}  # keyed by app.pid; safe to reuse for one Excel process
 
 
+_DLL_DIRECTORIES = []  # keep the AddDllDirectory handles alive for the process
+
+
+def _prepare_pywin32() -> None:
+    """Make pywin32 importable even if its .pth bootstrap did not run.
+
+    pip installs pywin32's modules under win32/, win32/lib/ and Pythonwin/
+    and its core DLLs under pywin32_system32/; a pywin32.pth file normally
+    wires these up at startup. Add them explicitly so a skipped bootstrap
+    cannot cost xlwings its Excel engine.
+    """
+    import sys
+    import sysconfig
+    from pathlib import Path
+
+    site_packages = Path(sysconfig.get_paths()["purelib"])
+    for name in ("win32", os.path.join("win32", "lib"), "Pythonwin"):
+        folder = site_packages / name
+        if folder.is_dir() and str(folder) not in sys.path:
+            sys.path.append(str(folder))
+    dll_folder = site_packages / "pywin32_system32"
+    if dll_folder.is_dir() and hasattr(os, "add_dll_directory"):
+        _DLL_DIRECTORIES.append(os.add_dll_directory(str(dll_folder)))
+        os.environ["PATH"] = str(dll_folder) + os.pathsep + os.environ.get("PATH", "")
+
+
+class ExcelUnavailableError(RuntimeError):
+    """Excel automation cannot run on this PC (no Excel engine in xlwings)."""
+
+
+def require_excel_engine() -> None:
+    """Make sure xlwings has its desktop Excel engine before any COM call.
+
+    xlwings registers the Excel engine only if its Windows backend imports
+    cleanly, and it swallows that ImportError.  Without the engine every
+    ``xw.App()`` dies with "'NoneType' object has no attribute 'apps'", which
+    says nothing about the real cause.  Wire up pywin32's paths, retry the
+    import once, and otherwise raise an error that names the failing
+    dependency.
+    """
+    if xw.engines.active is not None:
+        return
+    import sys
+
+    if not sys.platform.startswith("win"):
+        raise ExcelUnavailableError(
+            "Excel automation needs Microsoft Excel on Windows; this agent is running on "
+            f"{sys.platform}, where no Excel is available."
+        )
+    try:
+        _prepare_pywin32()
+        from xlwings import _xlwindows
+    except ImportError as exc:
+        raise ExcelUnavailableError(
+            "Excel automation is unavailable on this PC because the Windows COM support "
+            f"(pywin32) failed to load: {exc}. Reinstall Xelora Desktop; if that does not "
+            "help, install the Microsoft Visual C++ Redistributable (x64) and restart."
+        ) from exc
+    if "excel" not in [engine.name for engine in xw.engines]:
+        xw.engines.add(xw.main.Engine(impl=_xlwindows.engine))
+    xw.engines.active = xw.engines["excel"]
+
+
 def bind_workbook_context(workbook_name: str | None, excel_app_pid: int | None = None):
     """Bind all automation in this task to one workbook *and* Excel process.
 
@@ -88,6 +151,7 @@ def start_task_workbook():
     new workbook owns this one process and one startup workbook; existing
     user workbooks are left untouched.
     """
+    require_excel_engine()
     app = xw.App(visible=True)
     retain_owned_excel_app(app)
     _harden_app(app)
@@ -408,6 +472,7 @@ def reopen_owned_workbook(file_path: str) -> dict:
 
     app = None
     try:
+        require_excel_engine()
         app = xw.App(visible=True)
         retain_owned_excel_app(app)
         if not _wait_until_responsive(app):
@@ -481,6 +546,7 @@ def force_restart_excel_and_reopen():
         killed_note = f"killed Excel process PID {_LAST_KNOWN_APP_PID} (only that one process)."
         time.sleep(1)
 
+    require_excel_engine()
     app = xw.App(visible=True)
     retain_owned_excel_app(app)
 
@@ -515,6 +581,7 @@ def force_restart_excel_and_reopen():
 
 def get_active_workbook():
     global _LAST_KNOWN_WORKBOOK_PATH, _LAST_KNOWN_APP_PID
+    require_excel_engine()
     pinned_name = _CURRENT_WORKBOOK_NAME.get()
     pinned_pid = _CURRENT_EXCEL_PID.get()
 

@@ -31,13 +31,42 @@ if ($LASTEXITCODE -ne 0) { throw "ensurepip failed" }
 & $python -m pip install --no-warn-script-location --disable-pip-version-check -r (Join-Path $backend "requirements-local.txt")
 if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 
+# pywin32's core DLLs (pywintypes3XX.dll, pythoncom3XX.dll) must be loadable
+# or xlwings silently drops its Excel engine. Put them beside python.exe so
+# they load even if the pywin32.pth bootstrap is skipped.
+$pywin32Dlls = Join-Path $out "python\Lib\site-packages\pywin32_system32"
+if (-not (Test-Path $pywin32Dlls)) { throw "pywin32_system32 not found; pywin32 did not install" }
+Copy-Item (Join-Path $pywin32Dlls "*.dll") (Join-Path $out "python") -Force
+
 # 3. Backend source, without tests, runtime data or local secrets.
 robocopy $backend (Join-Path $out "backend") /E /NFL /NDL /NJH /NJS `
-    /XD __pycache__ tests scripts storage store .venv .venv-linux venv .pytest_cache `
+    /XD __pycache__ tests scripts storage store .venv .venv-linux venv .pytest_cache (Join-Path $backend "knowledge\data") `
     /XF .env *.log *.pyc
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed with $LASTEXITCODE" }
 $global:LASTEXITCODE = 0
 
-# 4. Smoke test: the agent imports cleanly with the bundled runtime.
-& $python -I -c "import sys; sys.path.insert(0, r'$out\backend'); import local_agent, agent.core; print('local agent bundle OK')"
-if ($LASTEXITCODE -ne 0) { throw "bundled agent failed to import" }
+# 4. Smoke test, run the way Xelora Desktop runs it (python -I): the agent
+#    imports cleanly, xlwings has its Excel engine (pywin32 loads), and
+#    importing the backend writes nothing into the install directory, which
+#    is read-only under Program Files.
+$smoke = @"
+import os, sys
+sys.path.insert(0, r'$out\backend')
+import local_agent
+local_agent.configure_environment('https://example.invalid', 'smoke-test')
+status = local_agent.excel_engine_status()
+assert status == 'Excel automation ready', status
+import pywintypes, pythoncom, win32api, win32com.client
+import agent.core, knowledge.rag, memory._store, reporting.pdf_generator
+from skills import loader
+from skills.base import SKILL_REGISTRY
+folders = {n for n in os.listdir(loader.LIBRARY_DIR) if os.path.isdir(os.path.join(loader.LIBRARY_DIR, n)) and not n.startswith(('_', '.'))}
+assert folders <= set(SKILL_REGISTRY), 'skills failed to load: ' + ', '.join(sorted(folders - set(SKILL_REGISTRY)))
+backend = os.path.normcase(os.path.abspath(r'$out\backend'))
+for name, path in [('knowledge', knowledge.rag.DATA_DIR), ('reports', str(reporting.pdf_generator.REPORTS_DIR))]:
+    assert not os.path.normcase(os.path.abspath(path)).startswith(backend), name + ' data would be written into the install directory: ' + path
+assert not os.path.exists(os.path.join(backend, 'knowledge', 'data')), 'importing the agent created knowledge/data'
+print('local agent bundle OK')
+"@
+& $python -I -c $smoke
+if ($LASTEXITCODE -ne 0) { throw "bundled agent smoke test failed" }

@@ -9,6 +9,8 @@ from skills.excel_shared import (
     get_active_workbook,
     mark_task_bootstrap_workbook_used,
     normalize_workbook_path,
+    require_excel_engine,
+    ExcelUnavailableError,
     retain_owned_excel_app,
     _active_or_new_workbook,
     use_task_bootstrap_workbook,
@@ -20,6 +22,10 @@ def run(file_path: str):
         file_path = normalize_workbook_path(file_path)
     except ValueError as exc:
         return {"error": str(exc), "verified": False, "status": "invalid_path"}
+    try:
+        require_excel_engine()
+    except ExcelUnavailableError as exc:
+        return {"error": str(exc), "verified": False, "status": "excel_unavailable"}
     if not file_path.lower().endswith((".xlsx", ".xlsm")):
         file_path += ".xlsx"
     parent_directory = os.path.dirname(file_path)

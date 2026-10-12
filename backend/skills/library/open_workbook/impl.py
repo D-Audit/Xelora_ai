@@ -9,6 +9,8 @@ from skills.excel_shared import (
     get_active_workbook,
     mark_task_bootstrap_workbook_used,
     normalize_workbook_path,
+    require_excel_engine,
+    ExcelUnavailableError,
     retain_owned_excel_app,
     _close_startup_books,
     use_task_bootstrap_workbook,
@@ -22,6 +24,10 @@ def run(file_path: str):
         return {"error": str(exc), "verified": False, "status": "invalid_path"}
     if not os.path.isfile(file_path):
         return {"error": f"File not found: {file_path}", "verified": False, "status": "file_not_found"}
+    try:
+        require_excel_engine()
+    except ExcelUnavailableError as exc:
+        return {"error": str(exc), "verified": False, "status": "excel_unavailable"}
 
     normalized_target = os.path.normcase(os.path.abspath(file_path))
     bootstrap_book = None
