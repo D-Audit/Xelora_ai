@@ -2,7 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { Menu, X } from 'lucide-react';
+import { Menu, Moon, Sun, X } from 'lucide-react';
+import { useTheme } from 'next-themes';
 import { XeloraLogo } from '@/components/ui/xelora-logo';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -42,7 +43,7 @@ export function MarketingNav() {
       <header
         className={cn(
           'sticky top-0 z-50 w-full border-b transition-colors duration-150',
-          scrolled ? 'border-xelora-border bg-white/90 backdrop-blur' : 'border-transparent bg-white'
+          scrolled ? 'border-xelora-border bg-xelora-surface/90 backdrop-blur' : 'border-transparent bg-xelora-surface'
         )}
       >
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
@@ -64,6 +65,7 @@ export function MarketingNav() {
             </nav>
 
             <div className="hidden lg:flex items-center gap-2 flex-shrink-0">
+              <ThemeToggle />
               <Button variant="ghost" size="sm" asChild>
                 <Link href="/login">Sign in</Link>
               </Button>
@@ -72,6 +74,8 @@ export function MarketingNav() {
               </Button>
             </div>
 
+            <div className="flex items-center gap-1 lg:hidden">
+            <ThemeToggle />
             <button
               type="button"
               aria-label={mobileOpen ? 'Close menu' : 'Open menu'}
@@ -82,6 +86,7 @@ export function MarketingNav() {
             >
               {mobileOpen ? <X size={20} /> : <Menu size={20} />}
             </button>
+            </div>
           </div>
         </div>
       </header>
@@ -156,5 +161,21 @@ export function MarketingNav() {
         </div>
       </div>
     </>
+  );
+}
+
+/** Switches the whole app between dark and light; the choice is shared with the dashboard. */
+function ThemeToggle() {
+  const { resolvedTheme, setTheme } = useTheme();
+  return (
+    <button
+      type="button"
+      aria-label="Toggle dark mode"
+      onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}
+      className="inline-flex items-center justify-center rounded-md p-2 text-xelora-text-secondary transition-colors duration-150 hover:bg-xelora-surface-2 hover:text-xelora-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-xelora-border-focus"
+    >
+      <Sun size={18} className="hidden dark:block" />
+      <Moon size={18} className="dark:hidden" />
+    </button>
   );
 }

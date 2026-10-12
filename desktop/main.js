@@ -1,5 +1,6 @@
 const { app, BrowserWindow, shell, Menu, ipcMain, screen } = require('electron');
 const crypto = require('crypto');
+const fs = require('fs');
 const path = require('path');
 const { autoUpdater } = require('electron-updater');
 const localAgent = require('./agent');
@@ -41,19 +42,52 @@ function startBrowserSignIn(provider) {
   return true;
 }
 
+// xelora://open?path=/dashboard/... comes from the website's "Open Xelora
+// Desktop" page. Only paths on the Xelora web app are loaded.
+function openLinkTarget(parsed) {
+  const origin = new URL(WEB_APP_URL).origin;
+  const requested = parsed.searchParams.get('path') || '';
+  if (!requested.startsWith('/') || requested.startsWith('//') || requested.includes('\\')) return WEB_APP_URL;
+  try {
+    const target = new URL(requested, origin);
+    return target.origin === origin ? target.href : WEB_APP_URL;
+  } catch {
+    return WEB_APP_URL;
+  }
+}
+
+function parseDeepLink(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === `${PROTOCOL}:` ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function showMainWindow() {
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
 function handleDeepLink(url) {
-  let parsed;
-  try { parsed = new URL(url); } catch { return; }
-  if (parsed.protocol !== `${PROTOCOL}:` || parsed.hostname !== 'auth') return;
+  const parsed = parseDeepLink(url);
+  if (!parsed) return;
+  if (parsed.hostname === 'open') {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    showMainWindow();
+    mainWindow.loadURL(openLinkTarget(parsed));
+    return;
+  }
+  if (parsed.hostname !== 'auth') return;
   const code = parsed.searchParams.get('code');
   const handoff = pendingHandoff;
   pendingHandoff = null;
   if (!code || !handoff || Date.now() - handoff.createdAt > HANDOFF_TTL_MS || !mainWindow || mainWindow.isDestroyed()) return;
   const origin = new URL(WEB_APP_URL).origin;
   const complete = `${origin}/api/auth/desktop/complete?code=${encodeURIComponent(code)}&secret=${encodeURIComponent(handoff.secret)}`;
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show();
-  mainWindow.focus();
+  showMainWindow();
   mainWindow.loadURL(complete);
 }
 
@@ -68,14 +102,41 @@ app.on('second-instance', (_event, argv) => {
 app.on('open-url', (event, url) => { event.preventDefault(); handleDeepLink(url); });
 let windowBeforeFloating = null;
 
-function createWindow() {
+// ── Window colours follow the app theme (dark unless the user picks light) ─
+const THEMES = {
+  dark: { background: '#0F0F10', symbol: '#F4F4F5' },
+  light: { background: '#FAFAFA', symbol: '#18181B' },
+};
+const themeFile = () => path.join(app.getPath('userData'), 'theme.json');
+
+function savedTheme() {
+  try {
+    const { theme } = JSON.parse(fs.readFileSync(themeFile(), 'utf8'));
+    return THEMES[theme] ? theme : 'dark';
+  } catch {
+    return 'dark';
+  }
+}
+
+function applyTheme(theme) {
+  if (!THEMES[theme] || !mainWindow || mainWindow.isDestroyed()) return;
+  const colors = THEMES[theme];
+  mainWindow.setBackgroundColor(colors.background);
+  if (process.platform !== 'darwin') {
+    mainWindow.setTitleBarOverlay({ color: colors.background, symbolColor: colors.symbol, height: 36 });
+  }
+  try { fs.writeFileSync(themeFile(), JSON.stringify({ theme })); } catch { /* not critical */ }
+}
+
+function createWindow(startUrl = WEB_APP_URL) {
+  const colors = THEMES[savedTheme()];
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 1100,
     minHeight: 700,
     title: 'Xelora',
-    backgroundColor: '#FAFAFA',
+    backgroundColor: colors.background,
     icon: path.join(__dirname, 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -86,8 +147,8 @@ function createWindow() {
     },
     titleBarStyle: 'hidden',
     titleBarOverlay: {
-      color: '#FAFAFA',
-      symbolColor: '#18181B',
+      color: colors.background,
+      symbolColor: colors.symbol,
       height: 36,
     },
     show: false,
@@ -97,7 +158,7 @@ function createWindow() {
     mainWindow.show();
   });
 
-  mainWindow.loadURL(WEB_APP_URL).catch(() => {
+  mainWindow.loadURL(startUrl).catch(() => {
     mainWindow.loadFile(path.join(__dirname, 'assets', 'offline.html'));
   });
 
@@ -151,7 +212,9 @@ function setFloatingMode(enabled) {
 }
 
 app.whenReady().then(() => {
-  createWindow();
+  // Launched by a xelora://open link (Windows passes it on the command line).
+  const launchLink = parseDeepLink(process.argv.find((arg) => arg.startsWith(`${PROTOCOL}://`)) || '');
+  createWindow(launchLink && launchLink.hostname === 'open' ? openLinkTarget(launchLink) : WEB_APP_URL);
   localAgent.init((status) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('agent:changed', status);
   });
@@ -181,6 +244,10 @@ ipcMain.handle('auth:browser-sign-in', (event, provider) => {
   return startBrowserSignIn(provider);
 });
 ipcMain.handle('floating:get', () => floatingModeEnabled);
+ipcMain.handle('theme:set', (event, theme) => {
+  if (!fromWebApp(event)) throw new Error('Not allowed.');
+  applyTheme(theme);
+});
 
 // Only the Xelora web app loaded in this window may pair or control the agent.
 const WEB_APP_ORIGIN = new URL(WEB_APP_URL).origin;

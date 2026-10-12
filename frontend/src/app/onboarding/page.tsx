@@ -3,11 +3,11 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { ArrowRight, Check, Download, FolderOpen, ShieldCheck, Table2 } from 'lucide-react';
+import { ArrowRight, FolderOpen, ShieldCheck, Table2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { XeloraLogo } from '@/components/ui/xelora-logo';
 import { useAuthStore } from '@/stores/auth-store';
-import { useIsDesktop } from '@/lib/is-desktop';
+import { isDesktopApp, useIsDesktop, webAppEnabled } from '@/lib/is-desktop';
 import { site } from '@/lib/site';
 import { cn } from '@/lib/utils';
 
@@ -26,23 +26,27 @@ const firstPrompts = [
 export default function OnboardingPage() {
   const router = useRouter();
   const { user, isAuthenticated, isLoading, initialize } = useAuthStore();
-  const desktop = useIsDesktop();
+  const inApp = useIsDesktop() || webAppEnabled;
   const [step, setStep] = useState(0);
-  const steps = desktop ? ['Welcome', 'Get started'] : ['Welcome', 'Xelora Desktop', 'Get started'];
+  const steps = ['Welcome', 'Get started'];
   const current = steps[step];
 
   useEffect(() => {
-    void initialize();
-  }, [initialize]);
+    // Backstop for src/proxy.ts: onboarding happens in Xelora Desktop.
+    if (!isDesktopApp() && !webAppEnabled) router.replace('/open?welcome=1');
+    else void initialize();
+  }, [initialize, router]);
 
   useEffect(() => {
-    if (!isLoading && !isAuthenticated) router.push('/login');
-  }, [isLoading, isAuthenticated, router]);
+    if (inApp && !isLoading && !isAuthenticated) router.push('/login');
+  }, [inApp, isLoading, isAuthenticated, router]);
 
   const next = () => setStep((value) => Math.min(value + 1, steps.length - 1));
   const startChat = (prompt?: string) => {
     router.push(prompt ? `/dashboard/agent?prompt=${encodeURIComponent(prompt)}` : '/dashboard/agent');
   };
+
+  if (!inApp || isLoading) return null;
 
   return (
     <div className="flex min-h-dvh flex-col bg-white">
@@ -81,30 +85,6 @@ export default function OnboardingPage() {
                 ))}
               </ul>
               <Button size="lg" className="mt-10 w-full" onClick={next}>Continue <ArrowRight className="h-4 w-4" /></Button>
-            </section>
-          )}
-
-          {current === 'Xelora Desktop' && (
-            <section aria-labelledby="desktop-title" className="text-center">
-              <Download className="mx-auto h-8 w-8 text-xelora-text" strokeWidth={1.5} aria-hidden="true" />
-              <h1 id="desktop-title" className="mt-5 text-3xl font-semibold tracking-tight text-xelora-text">Install Xelora Desktop</h1>
-              <p className="mx-auto mt-3 max-w-md text-xelora-text-secondary">
-                To let Xelora work in Excel, install the Windows app and sign in with this account. You can still chat and ask
-                questions in the browser without it.
-              </p>
-              <ul className="mx-auto mt-8 max-w-sm space-y-2 text-left text-sm text-xelora-text-secondary">
-                {['Windows 10 or 11', 'Microsoft Excel for Windows', 'Connects to your account automatically'].map((item) => (
-                  <li key={item} className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-xelora-green" />{item}</li>
-                ))}
-              </ul>
-              <div className="mt-10 flex flex-col gap-3">
-                <Button size="lg" asChild>
-                  <a href="/api/download/windows" onClick={() => window.setTimeout(next, 300)}>
-                    <Download className="h-4 w-4" /> Download for Windows
-                  </a>
-                </Button>
-                <Button size="lg" variant="ghost" onClick={next}>I will do this later</Button>
-              </div>
             </section>
           )}
 

@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* dark: follows the theme chosen in the app (next-themes sets .dark), not the OS. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   /* Neutral, product-grade palette. Green is the brand accent, used for
      primary actions and success, never as a background wash. */

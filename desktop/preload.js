@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('xeloraDesktop', {
   setFloatingMode: (enabled) => ipcRenderer.invoke('floating:set', enabled),
   getFloatingMode: () => ipcRenderer.invoke('floating:get'),
   signInWithBrowser: (provider) => ipcRenderer.invoke('auth:browser-sign-in', provider),
+  setTheme: (theme) => ipcRenderer.invoke('theme:set', theme),
   onFloatingModeChange: (callback) => {
     const handler = (_event, enabled) => callback(enabled);
     ipcRenderer.on('floating:changed', handler);

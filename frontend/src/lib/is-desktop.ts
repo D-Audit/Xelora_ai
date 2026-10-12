@@ -37,6 +37,8 @@ declare global {
       onFloatingModeChange: (callback: (enabled: boolean) => void) => () => void;
       /** Opens Google/Microsoft sign-in in the system browser (desktop/main.js). */
       signInWithBrowser?: (provider: 'google' | 'microsoft') => Promise<boolean>;
+      /** Matches the window's title bar to the app theme (desktop/main.js). */
+      setTheme?: (theme: 'light' | 'dark') => Promise<void>;
       /** Local agent that runs this user's tasks in Excel (desktop/agent.js). */
       agent?: {
         getStatus: () => Promise<LocalAgentStatus>;
@@ -53,6 +55,13 @@ export function isDesktopApp(): boolean {
   if (typeof window === 'undefined') return false;
   return Boolean(window.xeloraDesktop?.isDesktopApp || window.xelora);
 }
+
+/**
+ * Xelora is a desktop app: in a regular browser the workspace pages ask the
+ * user to open Xelora Desktop instead. Set NEXT_PUBLIC_ENABLE_WEB_APP=true to
+ * use the workspace in a browser (local development and testing).
+ */
+export const webAppEnabled = process.env.NEXT_PUBLIC_ENABLE_WEB_APP === 'true';
 
 const noSubscription = () => () => {};
 

@@ -468,7 +468,7 @@ export function ClosingCta() {
   return (
     <section className="bg-white py-24" aria-labelledby="cta-heading">
       <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
-        <div className="rounded-3xl bg-xelora-text px-6 py-16 text-center sm:px-12">
+        <div className="rounded-3xl bg-[#18181B] px-6 py-16 text-center ring-1 ring-transparent dark:bg-xelora-surface-2 dark:ring-xelora-border sm:px-12">
           <h2 id="cta-heading" className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
             Hand Xelora your next spreadsheet task
           </h2>

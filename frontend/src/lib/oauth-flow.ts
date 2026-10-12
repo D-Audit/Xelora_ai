@@ -72,7 +72,8 @@ export async function finishOAuth(req: NextRequest, provider: OAuthProvider) {
     }
   }
 
-  const response = NextResponse.redirect(`${origin}${result.data.is_new_user ? '/onboarding' : '/dashboard/agent'}`);
+  // Signed in on the website: hand off to Xelora Desktop (the workspace is desktop-only).
+  const response = NextResponse.redirect(`${origin}/open${result.data.is_new_user ? '?welcome=1' : ''}`);
   clearOAuthStateCookie(response);
   return applySessionCookie(response, result.data.token, result.data.expires_at);
 }

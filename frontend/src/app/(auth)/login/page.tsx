@@ -10,6 +10,7 @@ import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { login } from '@/services/auth';
+import { isDesktopApp, webAppEnabled } from '@/lib/is-desktop';
 import { useAuthStore } from '@/stores/auth-store';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -45,7 +46,9 @@ export default function LoginPage() {
       const session = await login(values.email, values.password, rememberMe);
       setUser(session.user);
       const next = new URLSearchParams(window.location.search).get('next');
-      router.push(next && next.startsWith('/') && !next.startsWith('//') ? next : '/dashboard/agent');
+      const target = next && next.startsWith('/') && !next.startsWith('//') ? next : '/dashboard/agent';
+      // On the website, sign-in ends with handing off to Xelora Desktop.
+      router.push(isDesktopApp() || webAppEnabled ? target : `/open?path=${encodeURIComponent(target)}`);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Sign in failed. Please try again.');
     }

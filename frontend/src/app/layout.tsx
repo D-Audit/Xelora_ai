@@ -3,6 +3,7 @@ import { Inter } from 'next/font/google';
 import './globals.css';
 import { Toaster } from 'sonner';
 import { ThemeProvider } from '@/components/theme-provider';
+import { DesktopShell } from '@/components/desktop/desktop-shell';
 
 const inter = Inter({
   subsets: ['latin'],
@@ -29,7 +30,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className={inter.variable} suppressHydrationWarning>
       <body>
-        <ThemeProvider defaultTheme="light" enableSystem>
+        <ThemeProvider defaultTheme="dark" enableSystem>
+          <DesktopShell />
           {children}
           <Toaster position="bottom-right" richColors closeButton />
         </ThemeProvider>

@@ -7,6 +7,7 @@ import { useUIStore } from '@/stores/ui-store';
 import { Sidebar } from '@/components/dashboard/sidebar';
 import { Topbar } from '@/components/dashboard/topbar';
 import { LocalAgentBridge } from '@/components/desktop/local-agent';
+import { isDesktopApp, useIsDesktop, webAppEnabled } from '@/lib/is-desktop';
 import { cn } from '@/lib/utils';
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
@@ -15,18 +16,22 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const router = useRouter();
   const pathname = usePathname();
   const isChatWorkspace = pathname === '/dashboard/agent';
+  const inApp = useIsDesktop() || webAppEnabled;
 
   useEffect(() => {
-    initialize();
-  }, [initialize]);
+    // Backstop for src/proxy.ts: the workspace only runs in Xelora Desktop.
+    // Reads isDesktopApp() directly: the hook value is false during hydration.
+    if (!isDesktopApp() && !webAppEnabled) router.replace(`/open?path=${encodeURIComponent(window.location.pathname + window.location.search)}`);
+    else initialize();
+  }, [initialize, router]);
 
   useEffect(() => {
-    if (!isLoading && !isAuthenticated) {
+    if (inApp && !isLoading && !isAuthenticated) {
       router.push(`/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
     }
-  }, [isLoading, isAuthenticated, router]);
+  }, [inApp, isLoading, isAuthenticated, router]);
 
-  if (isLoading) {
+  if (!inApp || isLoading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-xelora-bg-main">
         <div className="h-5 w-5 animate-spin rounded-full border-2 border-xelora-border-strong border-t-xelora-text" aria-label="Loading" />

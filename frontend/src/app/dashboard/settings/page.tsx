@@ -17,6 +17,7 @@ import { changePassword, sendVerificationEmail, updateProfile } from '@/services
 import { useAuthStore } from '@/stores/auth-store';
 import { site } from '@/lib/site';
 import { cn } from '@/lib/utils';
+import { useIsDesktop } from '@/lib/is-desktop';
 
 function Section({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
   return (
@@ -180,6 +181,12 @@ function AppearanceSection() {
   );
 }
 
+function AppVersion() {
+  const desktop = useIsDesktop();
+  const version = desktop ? window.xeloraDesktop?.version : '';
+  return version ? <span className="text-sm text-xelora-text-muted">Version {version}</span> : null;
+}
+
 export default function SettingsPage() {
   const user = useAuthStore((state) => state.user);
   return (
@@ -190,9 +197,9 @@ export default function SettingsPage() {
         <PasswordSection />
         <AppearanceSection />
         <Section title="Xelora Desktop" description="The Windows app that carries out tasks in Excel on your PC.">
-          <div className="flex flex-wrap gap-3">
+          <div className="flex flex-wrap items-center gap-4">
             <Button variant="outline" asChild><Link href="/dashboard/devices">Manage devices</Link></Button>
-            <Button variant="outline" asChild><Link href="/download">Download for Windows</Link></Button>
+            <AppVersion />
           </div>
         </Section>
         <Section title="Your data" description="Delete conversations and files at any time from Chat and Files. For a copy of your data or to close your account, contact us.">

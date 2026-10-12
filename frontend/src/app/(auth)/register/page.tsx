@@ -9,6 +9,7 @@ import Link from 'next/link';
 import { Check, Loader2 } from 'lucide-react';
 
 import { register as registerUser } from '@/services/auth';
+import { isDesktopApp, webAppEnabled } from '@/lib/is-desktop';
 import { useAuthStore } from '@/stores/auth-store';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -36,7 +37,7 @@ export default function RegisterPage() {
     try {
       const session = await registerUser({ ...values, country: '', primaryUse: '' });
       setUser(session.user);
-      router.push('/onboarding');
+      router.push(isDesktopApp() || webAppEnabled ? '/onboarding' : '/open?welcome=1');
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'We could not create your account. Please try again.');
     }
