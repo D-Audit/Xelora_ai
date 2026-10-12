@@ -219,10 +219,12 @@ def validate_local_omniparser_configuration() -> None:
             "and configure OMNIPARSER_URL."
         ) from exc
 
+# Excel tasks are multi-step tool use: lead with the most capable model and
+# fail over to the lighter ones. Quick chat uses QUICK_CHAT_GEMINI_MODEL.
 GEMINI_MODEL_CHAIN = [
     m.strip() for m in os.getenv(
         "GEMINI_MODEL_CHAIN",
-        "gemini-2.5-flash-lite,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite"
+        "gemini-3.5-flash,gemini-3.5-flash-lite,gemini-2.5-flash-lite,gemini-3.1-flash-lite"
     ).split(",") if m.strip()
 ]
 GEMINI_RATE_LIMIT_WAIT_SECONDS = int(os.getenv("GEMINI_RATE_LIMIT_WAIT_SECONDS", "0"))
@@ -308,3 +310,40 @@ ENABLE_PDF_REPORTS = _local_agent_setting("ENABLE_PDF_REPORTS", "true").lower() 
 ENABLE_SSE_STREAMING = _local_agent_setting("ENABLE_SSE_STREAMING", "true").lower() == "true"
 ENABLE_MEMORY_STORAGE = _local_agent_setting("ENABLE_MEMORY_STORAGE", "true").lower() == "true"
 MEMORY_STORE_DIR = _local_agent_setting("MEMORY_STORE_DIR", str(Path(__file__).parent / "memory" / "store"))
+# Newest entries kept per memory list; older ones are dropped on write so a
+# user's memory row stays small (Postgres row, desktop-agent sync payload).
+MEMORY_MAX_RECORDS = {
+    "chat_memory": int(os.getenv("MEMORY_MAX_CHAT_RECORDS", "200")),
+    "task_history": int(os.getenv("MEMORY_MAX_TASK_RECORDS", "300")),
+    "skills": int(os.getenv("MEMORY_MAX_SKILLS", "200")),
+}
+# Past tasks/skills shown to the agent as context for a new request.
+MEMORY_CONTEXT_ITEMS = int(os.getenv("MEMORY_CONTEXT_ITEMS", "3"))
+
+# Quick chat (the fast, tool-free conversation route in quick_chat.py).
+FAST_CHAT_TIMEOUT_SECONDS = int(os.getenv("FAST_CHAT_TIMEOUT_SECONDS", "25"))
+FAST_CHAT_MAX_OUTPUT_TOKENS = int(os.getenv("FAST_CHAT_MAX_OUTPUT_TOKENS", "1200"))
+QUICK_CHAT_CLAUDE_MODEL = os.getenv("QUICK_CHAT_CLAUDE_MODEL", "claude-sonnet-4-6")
+# Fast model for conversation; on failure quick chat tries GEMINI_MODEL_CHAIN next.
+QUICK_CHAT_GEMINI_MODEL = os.getenv("QUICK_CHAT_GEMINI_MODEL", "gemini-2.5-flash-lite")
+
+# Web search. Keyed providers are tried in this order, then DuckDuckGo (no
+# key; often blocked from cloud hosts). SEARCH_PROVIDER pins a single one.
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+BRAVE_SEARCH_API_KEY = os.getenv("BRAVE_SEARCH_API_KEY", "")
+SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
+SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER", "").strip().lower()
+# Quick chat may search the web when a question needs current or unfamiliar facts.
+QUICK_CHAT_WEB_SEARCH = os.getenv("QUICK_CHAT_WEB_SEARCH", "true").lower() == "true"
+QUICK_CHAT_MAX_TOOL_ROUNDS = int(os.getenv("QUICK_CHAT_MAX_TOOL_ROUNDS", "3"))
+
+# Where uploaded file contents live (see blob_store.py): "local" disk under
+# STORAGE_DIR, "database" (Postgres; survives restarts on hosts with an
+# ephemeral disk), or "s3" (any S3-compatible bucket: AWS, Cloudflare R2, ...).
+FILE_STORAGE = os.getenv("FILE_STORAGE", "local").strip().lower()
+S3_BUCKET = os.getenv("S3_BUCKET", "")
+S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "")  # e.g. https://<account>.r2.cloudflarestorage.com
+S3_REGION = os.getenv("S3_REGION", "auto")
+S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "")
+S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "")
+S3_PREFIX = os.getenv("S3_PREFIX", "xelora/")

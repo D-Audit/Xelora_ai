@@ -5,39 +5,48 @@ from __future__ import annotations
 import time
 from uuid import uuid4
 
-from memory._store import read_records, write_records
+from memory._store import keywords, read_records, update_records
 
 
 def log_task_start(instruction: str, plan: list | None = None, *, user_id: int | None = None) -> str:
-    history = read_records("task_history", user_id)
     task_id = f"task_{uuid4().hex}"
-    history.append({
+    entry = {
         "id": task_id, "instruction": instruction, "plan": plan or [], "actions": [],
         "outcome": None, "success": None, "duration_seconds": None,
         "sheet_count": None, "sheets_created": [], "start_time": time.time(),
         "end_time": None, "error": None,
-    })
-    write_records("task_history", user_id, history)
+    }
+    update_records("task_history", user_id, lambda history: history.append(entry))
     return task_id
 
 
+def _update_entry(task_id: str, user_id, change) -> None:
+    def mutate(history):
+        for entry in history:
+            if entry.get("id") == task_id:
+                change(entry)
+                break
+    update_records("task_history", user_id, mutate)
+
+
 def log_task_action(task_id: str, action_name: str, action_input: dict, result: dict, *, user_id: int | None = None) -> None:
-    history = read_records("task_history", user_id)
-    for entry in history:
-        if entry.get("id") == task_id:
-            entry["actions"].append({"name": action_name, "input": action_input, "result": result, "timestamp": time.time()})
-            break
-    write_records("task_history", user_id, history)
+    log_task_actions(task_id, [{"name": action_name, "input": action_input, "result": result}], user_id=user_id)
+
+
+def log_task_actions(task_id: str, actions: list[dict], *, user_id: int | None = None) -> None:
+    """Append several actions in one write (a task can have dozens)."""
+    now = time.time()
+    _update_entry(task_id, user_id, lambda entry: entry["actions"].extend(
+        {"name": action.get("name"), "input": action.get("input", {}), "result": action.get("result", {}), "timestamp": now}
+        for action in actions
+    ))
 
 
 def log_task_complete(task_id: str, outcome: str, success: bool, sheet_count: int | None = None, sheets_created: list | None = None, error: str | None = None, *, user_id: int | None = None) -> None:
-    history = read_records("task_history", user_id)
-    for entry in history:
-        if entry.get("id") == task_id:
-            entry.update({"outcome": outcome, "success": bool(success), "end_time": time.time(), "sheet_count": sheet_count, "sheets_created": sheets_created or [], "error": error})
-            entry["duration_seconds"] = entry["end_time"] - entry["start_time"]
-            break
-    write_records("task_history", user_id, history)
+    def change(entry):
+        entry.update({"outcome": outcome, "success": bool(success), "end_time": time.time(), "sheet_count": sheet_count, "sheets_created": sheets_created or [], "error": error})
+        entry["duration_seconds"] = entry["end_time"] - entry["start_time"]
+    _update_entry(task_id, user_id, change)
 
 
 def get_successful_tasks(max_results: int = 10, *, user_id: int | None = None) -> list[dict]:
@@ -46,10 +55,10 @@ def get_successful_tasks(max_results: int = 10, *, user_id: int | None = None) -
 
 
 def get_similar_tasks(instruction: str, max_results: int = 5, *, user_id: int | None = None) -> list[dict]:
-    words = set(instruction.lower().split())
+    words = keywords(instruction)
     scored = []
     for entry in read_records("task_history", user_id):
-        overlap = len(words & set(str(entry.get("instruction", "")).lower().split()))
+        overlap = len(words & keywords(entry.get("instruction", "")))
         if overlap:
             scored.append((overlap, entry))
     return [entry for _, entry in sorted(scored, key=lambda item: item[0], reverse=True)[:max_results]]

@@ -51,6 +51,11 @@ On Windows with [uv](https://docs.astral.sh/uv/) installed, this first runs
 builds load that URL, while `npm start` loads `http://localhost:3000/dashboard`.
 `XELORA_WEB_URL` still overrides both.
 
+**Signing:** unsigned installers show "Unknown publisher" in Windows. Set
+`XELORA_SIGN_PROVIDER` (and a certificate) to sign; see
+[docs/CODE_SIGNING.md](../docs/CODE_SIGNING.md). The icon (`build/icon.ico`,
+rendered from the web app's logo) and the "Xelora" product details are always set.
+
 Releases are built by `.github/workflows/build-desktop.yml` whenever a
 `v*.*.*` tag is pushed; the installer is attached to the GitHub Release and
 installed copies auto-update from there.

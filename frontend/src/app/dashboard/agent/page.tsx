@@ -14,7 +14,7 @@ import { isDesktopApp } from '@/lib/is-desktop';
 import { LocalAgentBadge } from '@/components/desktop/local-agent';
 import { useAuthStore } from '@/stores/auth-store';
 import {
-  startTask, getTaskProgress, pauseTask, resumeTask, getTaskReveal,
+  startTask, quickChat, getTaskProgress, pauseTask, resumeTask, getTaskReveal,
   getChat,
 } from '@/services/agent';
 import { uploadFile } from '@/services/workspace';
@@ -123,6 +123,7 @@ export default function AgentPage() {
             status: 'done',
             response: data.final_response ?? undefined,
             completionStatus: data.status,
+            ...(data.status === 'answered' ? { kind: 'chat' as const, sources: data.sources ?? [] } : {}),
           });
           refreshChatList(); // this conversation just changed - refresh its entry (title/status) in the sidebar
         }
@@ -179,6 +180,7 @@ export default function AgentPage() {
           : {
               id: `${chatId}-${i}-a`, role: 'agent', taskId: chatId, steps: [],
               response: turn.text, status: 'done', completionStatus: chat.status,
+              ...(turn.kind === 'chat' ? { kind: 'chat' as const, sources: turn.sources ?? [] } : {}),
             }
       ));
       if (requestId !== chatRequestRef.current) return;
@@ -262,6 +264,34 @@ export default function AgentPage() {
     setAttachedFile(null);
 
     try {
+      // Questions get a quick answer (searching the web when needed); only
+      // workbook requests start an Excel task. If quick chat is unreachable,
+      // fall through to the task flow as before.
+      const quick = await quickChat(requestedText, {
+        workbookName: workbookHint,
+        hasWorkbookContext: currentTaskId !== null,
+        taskId: currentTaskId,
+        history: messages.slice(-12).flatMap((m): { role: 'user' | 'assistant'; text: string }[] =>
+          m.role === 'user'
+            ? [{ role: 'user', text: m.text }]
+            : m.response ? [{ role: 'assistant', text: m.response }] : []),
+      }).catch(() => null);
+      if (quick?.route === 'chat' && quick.reply) {
+        updateAgentMessage(agentMsgId, {
+          status: 'done', kind: 'chat', response: quick.reply, sources: quick.sources ?? [],
+        });
+        if (quick.task_id) {
+          // Saved to chat history: keep this conversation open so follow-ups continue it.
+          if (currentTaskId !== quick.task_id) {
+            setCurrentTaskId(quick.task_id);
+            hydratedRouteRef.current = `chat:${quick.task_id}`;
+            router.replace(`/dashboard/agent?chat=${quick.task_id}`);
+          }
+          refreshChatList();
+        }
+        return;
+      }
+
       if (currentTaskId !== null) {
         try {
           await resumeTask(currentTaskId, instruction);
@@ -519,8 +549,28 @@ export default function AgentPage() {
                         )}
                         {msg.status === 'done' && (
                           <>
-                            {msg.response && <p className="mt-3 whitespace-pre-wrap text-xelora-text">{msg.response}</p>}
-                            <p className={`mt-2 text-xs font-medium ${
+                            {msg.response && (
+                              <p className={`${msg.kind === 'chat' ? '' : 'mt-3 '}whitespace-pre-wrap text-xelora-text`}>{msg.response}</p>
+                            )}
+                            {msg.sources && msg.sources.length > 0 && (
+                              <ol className="mt-3 space-y-1 border-t border-xelora-border pt-2 text-xs text-xelora-text-muted">
+                                {msg.sources.map((source) => (
+                                  <li key={source.n} className="flex gap-1.5">
+                                    <span className="flex-shrink-0">[{source.n}]</span>
+                                    <a
+                                      href={source.url}
+                                      target="_blank"
+                                      rel="noopener noreferrer nofollow"
+                                      className="truncate text-xelora-green hover:underline"
+                                      title={source.url}
+                                    >
+                                      {source.title}
+                                    </a>
+                                  </li>
+                                ))}
+                              </ol>
+                            )}
+                            {msg.kind !== 'chat' && <p className={`mt-2 text-xs font-medium ${
                               msg.completionStatus === 'completed'
                                 ? 'text-xelora-success'
                                 : msg.completionStatus === 'awaiting_approval'
@@ -536,7 +586,7 @@ export default function AgentPage() {
                                     : msg.completionStatus === 'failed'
                                       ? 'Not completed — no unverified work is marked as done.'
                                       : 'Task finished.'}
-                            </p>
+                            </p>}
                           </>
                         )}
                         {msg.status === 'paused' && (
@@ -544,7 +594,7 @@ export default function AgentPage() {
                         )}
                       </div>
                     )}
-                    {(msg.status === 'running' || msg.status === 'paused') && (
+                    {msg.taskId > 0 && (msg.status === 'running' || msg.status === 'paused') && (
                       <Button size="sm" variant="outline" onClick={() => handlePauseResume(msg)}>
                         {msg.status === 'running' ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
                         {msg.status === 'running' ? 'Pause' : 'Resume'}

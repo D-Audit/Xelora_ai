@@ -17,7 +17,14 @@ export interface ChatDetail {
   status: string;
   created_at: string | null;
   completed_at: string | null;
-  transcript: { role: 'user' | 'assistant'; text: string; timestamp: string }[];
+  transcript: {
+    role: 'user' | 'assistant';
+    text: string;
+    timestamp?: string;
+    /** 'chat' marks a quick answer (not an Excel task result). */
+    kind?: 'chat';
+    sources?: { n: number; title: string; url: string }[];
+  }[];
   resumable: boolean;
 }
 
@@ -25,7 +32,9 @@ export interface TaskProgressResponse {
   task_id: number;
   is_done: boolean;
   is_paused: boolean;
-  status: 'running' | 'paused' | 'awaiting_approval' | 'completed' | 'completed_with_warnings' | 'failed';
+  /** 'answered' = replied directly (greeting or question), no Excel work. */
+  status: 'running' | 'paused' | 'awaiting_approval' | 'completed' | 'completed_with_warnings' | 'failed' | 'answered';
+  sources?: { n: number; title: string; url: string }[];
   current_task?: string;
   completed_actions?: { tool_name: string }[];
   visual_checkpoints?: { after_tool: string; filename: string }[];
@@ -58,6 +67,36 @@ export const markChatRead = (taskId: number) =>
   });
 export const deleteChat = (taskId: number) =>
   request<{ id: number; deleted: boolean }>(`/api/tasks/${taskId}`, { method: 'DELETE' });
+
+export interface QuickChatResponse {
+  route: 'chat' | 'task';
+  reason: string;
+  reply: string | null;
+  sources: { n: number; title: string; url: string }[];
+  /** The conversation the answer was saved to (null when not signed in / no database). */
+  task_id?: number | null;
+}
+
+/** Quick answers (may search the web) for questions; route "task" means: start a workbook task instead. */
+export const quickChat = (
+  instruction: string,
+  options: {
+    workbookName?: string;
+    hasWorkbookContext?: boolean;
+    history?: { role: 'user' | 'assistant'; text: string }[];
+    taskId?: number | null;
+  } = {},
+) =>
+  request<QuickChatResponse>('/api/chat', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      instruction,
+      workbookName: options.workbookName ?? null,
+      hasWorkbookContext: Boolean(options.hasWorkbookContext),
+      history: options.history ?? [],
+      taskId: options.taskId ?? null,
+    }),
+  });
 
 export const startTask = (instruction: string, workbookName?: string) =>
   request<{ task_id: number; status: string }>('/api/task', {

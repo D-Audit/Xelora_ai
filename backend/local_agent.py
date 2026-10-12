@@ -8,9 +8,11 @@ can also be run by hand) and executes that user's tasks from the cloud API:
 or with XELORA_API_URL / XELORA_AGENT_TOKEN in the environment.
 
 Loop: claim a job (long poll) -> rebuild the AgentTask from the job's state ->
-run_task() locally against Excel -> push progress every second -> push the
-final state. Model calls go through the cloud's relay with this agent's
-token, so no provider key is needed (or stored) on this PC.
+sync the user's cloud files into the local workspace -> run_task() locally
+against Excel -> push progress every second -> upload changed files, record
+what the task learned (in the user's cloud memory) -> push the final state.
+Model calls go through the cloud's relay with this agent's token, so no
+provider key is needed (or stored) on this PC.
 
 Exit codes: 0 stopped, 2 bad arguments, 3 token rejected (pair again).
 """
@@ -35,7 +37,12 @@ class TokenRejected(Exception):
     pass
 
 
-def configure_environment(api_url: str, token: str) -> None:
+def default_workspace_dir() -> str:
+    base = os.getenv("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    return os.path.join(base, "Xelora", "workspace")
+
+
+def configure_environment(api_url: str, token: str, workspace_dir: str | None = None) -> None:
     """Point the backend's config at the relay. Must run before importing config."""
     relay = f"{api_url.rstrip('/')}/agent-link/llm"
     os.environ.update({
@@ -48,6 +55,8 @@ def configure_environment(api_url: str, token: str) -> None:
         # Tasks run right here; nothing local is persisted to a database.
         "TASK_EXECUTION": "server",
         "DATABASE_URL": "",
+        # Local mirror of the user's cloud files (see agent_workspace.py).
+        "STORAGE_DIR": workspace_dir or os.getenv("XELORA_WORKSPACE_DIR") or default_workspace_dir(),
     })
     os.environ.setdefault("JWT_SECRET_KEY", "local-agent-does-not-issue-tokens")
 
@@ -62,18 +71,47 @@ class CloudClient:
         self.headers = {"X-Agent-Token": token}
         self.http = http or requests.Session()
 
-    def _post(self, path: str, *, json=None, timeout: float = 30):
-        response = self.http.post(self.base + path, json=json, headers=self.headers, timeout=timeout)
+    def _send(self, method: str, path: str, *, timeout: float = 30, **kwargs):
+        response = getattr(self.http, method)(self.base + path, headers=self.headers, timeout=timeout, **kwargs)
         if response.status_code == 401:
             raise TokenRejected(response.text)
         response.raise_for_status()
-        return response.json()
+        return response
+
+    def _post(self, path: str, *, json=None, timeout: float = 30):
+        return self._send("post", path, json=json, timeout=timeout).json()
 
     def claim(self, wait: float = 20) -> dict | None:
         return self._post(f"/agent-link/claim?wait={wait}", timeout=wait + CLAIM_HTTP_TIMEOUT_SECONDS - 20)["job"]
 
     def push(self, task_id: int, state: dict, final: bool = False) -> dict:
         return self._post(f"/agent-link/tasks/{task_id}/push", json={"state": state, "final": final})
+
+    # Learning memory (memory/_store.py remote backend).
+    def read_memory(self, kind: str) -> list:
+        return self._send("get", f"/agent-link/memory/{kind}").json()["records"]
+
+    def write_memory(self, kind: str, records: list) -> None:
+        self._send("put", f"/agent-link/memory/{kind}", json={"records": records})
+
+    # Web search through the cloud's search API keys (tools/web.py remote hook).
+    def web_search(self, query: str, max_results: int) -> dict:
+        return self._post("/agent-link/web-search", json={"query": query, "max_results": max_results})
+
+    # Workspace files (agent_workspace.py).
+    def list_files(self) -> list[dict]:
+        return self._send("get", "/agent-link/files").json()["files"]
+
+    def download_file(self, file_id: str, destination) -> None:
+        response = self._send("get", f"/agent-link/files/{file_id}/download", timeout=300)
+        with open(destination, "wb") as handle:
+            handle.write(response.content)
+
+    def upload_file(self, path, file_id: str | None = None) -> dict:
+        data = {"file_id": str(file_id)} if file_id else {}
+        with open(path, "rb") as handle:
+            return self._send("post", "/agent-link/files", files={"upload": (Path(path).name, handle)},
+                              data=data, timeout=300).json()
 
 
 def run_job(job: dict, cloud: CloudClient, *, run=None, log=print) -> None:
@@ -88,8 +126,6 @@ def run_job(job: dict, cloud: CloudClient, *, run=None, log=print) -> None:
     state = job.get("state") or {}
     task = AgentTask(str(state.get("instruction") or ""), user_id=state.get("user_id"))
     apply_state(task, state)
-    # Cloud-uploaded files are not on this PC; keep the cloud file tools off.
-    task.has_authenticated_user = False
     # Use only providers the cloud relay holds keys for.
     providers = job.get("providers") or [task.active_provider]
     if task.active_provider not in providers:
@@ -97,6 +133,7 @@ def run_job(job: dict, cloud: CloudClient, *, run=None, log=print) -> None:
     config.AI_PROVIDER = task.active_provider
     config.AI_PROVIDER_FALLBACK_CHAIN = [name for name in providers if name != task.active_provider]
     log(f"task {task_id}: started - {task.instruction[:120]}")
+    workspace = _sync_files(cloud, task, "pull", log)
 
     def _work():
         try:
@@ -127,6 +164,15 @@ def run_job(job: dict, cloud: CloudClient, *, run=None, log=print) -> None:
             log(f"task {task_id}: pause requested")
             task.pause()
 
+    if workspace is not None:
+        _sync_files(cloud, task, "push", log, workspace)
+    try:
+        from memory.outcome import record_task_outcome
+        record_task_outcome(task, task.user_id)
+    except TokenRejected:
+        raise
+    except Exception as exc:
+        task.log_step(f"Task learning was unavailable: {exc}")
     final_state = export_state(task)
     for attempt in range(5):
         try:
@@ -138,6 +184,27 @@ def run_job(job: dict, cloud: CloudClient, *, run=None, log=print) -> None:
             log(f"task {task_id}: final push failed ({exc}); retrying")
             time.sleep(min(2 ** attempt, MAX_BACKOFF_SECONDS))
     log(f"task {task_id}: finished ({'paused' if task.is_paused else 'done'})")
+
+
+def _sync_files(cloud: CloudClient, task, direction: str, log, workspace=None):
+    """Mirror the user's cloud files before a task ("pull") and send changes after ("push")."""
+    from agent_workspace import WorkspaceSync
+
+    if task.user_id is None:
+        return None
+    try:
+        workspace = workspace or WorkspaceSync(cloud, os.environ["STORAGE_DIR"], task.user_id, log=log)
+        counts = workspace.pull() if direction == "pull" else workspace.push()
+    except TokenRejected:
+        raise
+    except Exception as exc:  # files are a convenience; the Excel task still runs
+        task.log_step(f"Your Xelora files could not be synced ({type(exc).__name__}: {exc}).")
+        return workspace
+    changed = {key: value for key, value in counts.items() if value}
+    if changed:
+        task.log_step(f"Files {'synced from' if direction == 'pull' else 'saved to'} Xelora: "
+                      + ", ".join(f"{value} {key}" for key, value in changed.items()))
+    return workspace
 
 
 def serve(cloud: CloudClient, *, stop: threading.Event | None = None, run=None, log=print) -> None:
@@ -173,6 +240,10 @@ def main(argv=None) -> int:
 
     configure_environment(args.api_url, args.token)
     cloud = CloudClient(args.api_url, args.token)
+    from memory import _store
+    _store.use_remote(cloud.read_memory, cloud.write_memory)  # learn into the user's cloud memory
+    from tools import web
+    web.use_remote(cloud.web_search)  # search with the cloud's keys; falls back to this PC
     try:
         serve(cloud, log=lambda message: print(message, flush=True))
     except TokenRejected:

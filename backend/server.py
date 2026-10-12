@@ -32,7 +32,7 @@ from oauth import router as oauth_router  # noqa: E402
 from billing import router as billing_router  # noqa: E402
 from files import router as files_router  # noqa: E402
 from devices import router as devices_router  # noqa: E402
-from agent_link import router as agent_link_router  # noqa: E402
+from agent_link import restore_pending as restore_pending_agent_jobs, router as agent_link_router  # noqa: E402
 from team import router as team_router  # noqa: E402
 from notifications import router as notifications_router  # noqa: E402
 from workflows import router as workflows_router  # noqa: E402
@@ -63,6 +63,7 @@ def _set_header(request, name: str, value: str) -> None:
 def _seed_on_startup():
     if SessionLocal is None:
         return
+    restore_pending_agent_jobs()
     db = SessionLocal()
     try:
         seed_default_templates(db)

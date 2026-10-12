@@ -133,6 +133,9 @@ class AgentTask:
         self.provider_failover_history = []
         self.final_response = None
         self.chat_transcript = [{"role": "user", "text": instruction}]
+        # True when the latest message was answered directly (a greeting or a
+        # question needing no workbook) instead of by an Excel run.
+        self.answered_conversationally = False
         self.excel_version_info = None  # filled in once at task start, see run_task()
         self.workbook_state = None  # semantic, read-only state used for tool selection
         self.execution_capabilities = None
@@ -212,6 +215,7 @@ class AgentTask:
         self.is_paused = False
         self.is_done = False
         self.final_response = None
+        self.answered_conversationally = False
         if correction:
             # A bare confirmation approves the plan already proposed; it is
             # not a replacement task. Keeping the original instruction is
@@ -263,7 +267,9 @@ class AgentTask:
                     or not _is_direct_action_instruction(correction)
                 )
                 self.started_in_execution_mode = not self.awaiting_approval
-                self.messages = [{"role": "user", "content": correction}]
+                # Fresh tool history, but the model still sees what was said
+                # before, so "make it bold" or "do the same for March" work.
+                self.messages = [{"role": "user", "content": conversation_context(self.chat_transcript) + correction}]
             # These values describe a completed attempt.  They must not leak
             # into a corrected run, otherwise a previous visual/API failure
             # can make the next response look failed even after it succeeds.
@@ -2057,6 +2063,26 @@ def _mark_codegen_fallback_recovered(task: AgentTask, fallback: dict | None) -> 
             return
 
 
+def conversation_context(transcript: list[dict], limit: int = 8, chars: int = 700) -> str:
+    """The recent conversation, rendered as context to prefix a new request.
+
+    A follow-up starts a fresh tool history (an earlier failure must not
+    poison it), so this is how the model knows what "it" or "that rate" means.
+    """
+    turns = [turn for turn in (transcript or []) if isinstance(turn, dict) and str(turn.get("text") or "").strip()]
+    turns = turns[-limit:]
+    if not turns:
+        return ""
+    lines = []
+    for turn in turns:
+        text = " ".join(str(turn["text"]).split())
+        if len(text) > chars:
+            text = text[: chars - 1] + "…"
+        lines.append(f"{'User' if turn.get('role') == 'user' else 'Xelora'}: {text}")
+    return ("Conversation so far (context for the request below; the workbook may have changed since, "
+            "so re-check it before relying on earlier results):\n" + "\n".join(lines) + "\n\nCurrent request: ")
+
+
 def get_task_completion_status(task: AgentTask) -> str:
     """Return the truthful lifecycle state for a task.
 
@@ -2071,6 +2097,8 @@ def get_task_completion_status(task: AgentTask) -> str:
         return "awaiting_approval"
     if not task.is_done:
         return "running"
+    if getattr(task, "answered_conversationally", False):
+        return "answered"
 
     actions = [step for step in task.structured_steps if step.get("type") == "action"]
     verified_actions = [
@@ -2101,12 +2129,27 @@ def get_task_completion_status(task: AgentTask) -> str:
     return "completed"
 
 
+def _route_needs_workbook(task: AgentTask) -> bool:
+    """Only open or create a workbook when the request is Excel work.
+
+    "Research today's EUR/USD rate" or "summarise my uploaded notes.txt" must
+    not start Excel and a blank Book1 before the model has even read it.
+    """
+    try:
+        from agent.router import route_instruction
+        route = route_instruction(task.instruction, file_access=bool(getattr(task, "has_authenticated_user", False)))
+    except Exception:
+        return True
+    task.route_requires_workbook = bool(set(route.capabilities()) & _WORKBOOK_CAPABILITIES)
+    return task.route_requires_workbook
+
+
 def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences: dict = None):
     if task.is_paused:
         return task
     can_start_excel_session = not (
         task.awaiting_approval and task.defer_excel_until_approval
-    )
+    ) and _route_needs_workbook(task)
     if config.VISUAL_ONLY_MODE and can_start_excel_session:
         task.required_visual_sheet_names = _required_visual_sheet_names(task.instruction)
         if (
@@ -2186,6 +2229,12 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
         except Exception as exc:
             task.log_step(f"Planning preflight unavailable; continuing with the verified core workflow. ({exc})")
     system_prompt += planning_context(workbook_state, excel_version_info)
+    if task.user_id is not None:
+        try:
+            from memory.context import memory_context
+            system_prompt += memory_context(task.user_id, task.instruction)
+        except Exception as exc:
+            task.log_step(f"Memory of earlier tasks was unavailable; continuing without it. ({exc})")
     try:
         from agent.router import route_instruction, routing_context
         route = route_instruction(

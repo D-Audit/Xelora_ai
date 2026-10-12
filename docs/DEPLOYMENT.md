@@ -47,9 +47,31 @@ Optional: Stripe (`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_*`
 and OAuth (`GOOGLE_CLIENT_ID`, …). Without Stripe keys, billing runs in dev mode
 and activates plans instantly without payment. See `backend/.env.example` for every variable.
 
-**Uploaded files:** `STORAGE_DIR` is `/tmp/xelora-storage`, which is wiped
-on every restart and sleep. That's fine for a demo. For real users, move uploads to
-object storage (Cloudflare R2, Supabase Storage) or a paid plan with a persistent disk.
+**Uploaded files:** Render's disk (`STORAGE_DIR=/tmp/xelora-storage`) is wiped on
+every restart and sleep, so `render.yaml` sets `FILE_STORAGE=database`: every upload
+is also saved in Postgres and restored to disk on demand. Neon's free tier is small
+(0.5 GB), so for many or large files use an S3-compatible bucket instead, e.g.
+Cloudflare R2 (10 GB free):
+
+| Variable | Value |
+|---|---|
+| `FILE_STORAGE` | `s3` |
+| `S3_BUCKET` | your bucket name |
+| `S3_ENDPOINT_URL` | `https://<account-id>.r2.cloudflarestorage.com` |
+| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | an R2 API token with read/write on that bucket |
+
+Files uploaded before switching backends stay where they were saved; re-upload them
+if they show "The stored copy of this file is missing".
+
+**Memory:** learned skills, task history and chat memory are stored in Postgres
+(`memory_records`) whenever `DATABASE_URL` is set, so they survive restarts too.
+The desktop agent reads and writes the same memory through the API.
+
+**Web search:** set `TAVILY_API_KEY` (free tier at tavily.com), or
+`BRAVE_SEARCH_API_KEY` / `SERPER_API_KEY`. Without a key Xelora falls back to
+DuckDuckGo, which usually blocks requests from cloud servers, so answers that need
+current facts will say they could not search. Desktop agents use the server's key
+through the API; the key never ships in the app.
 
 ## 3. Web app: Vercel
 

@@ -16,9 +16,8 @@ the agent authenticates with its own token, and the relay adds the server's
 provider key. Provider keys never ship inside the desktop app, and the relay
 only serves a user while one of their tasks is running on their agent.
 
-Queued jobs live in memory. A restart of the cloud process drops jobs that no
-agent has claimed yet (the task row then stays "running"); claimed jobs carry
-their full state, so the agent's next push re-creates the cloud mirror.
+Jobs are stored in the agent_jobs table, so a cloud restart (or a free-tier
+sleep) loses nothing; open jobs' mirrors are rebuilt at startup.
 """
 from __future__ import annotations
 
@@ -28,14 +27,13 @@ import re
 import secrets
 import threading
 import time
-import uuid
-from collections import deque
 from datetime import datetime, timezone
 
 import requests
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, Header, HTTPException, Request, Response, UploadFile
+from fastapi import File as FastAPIFile
 from pydantic import BaseModel
-from sqlalchemy import Boolean, Column, DateTime, Integer, String
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text
 
 import config
 import database
@@ -181,12 +179,41 @@ def _jwt_user(authorization: str = Header(default="")) -> int:
 
 
 # ── Queue ───────────────────────────────────────────────────────────────────
+# Jobs live in agent_jobs, so a cloud restart loses nothing: queued jobs are
+# claimed later, and their web-UI mirrors are rebuilt at startup.
 
-_cond = threading.Condition()
-_queues: dict[int, deque] = {}       # user_id -> pending jobs
-_jobs: dict[int, dict] = {}          # task_id -> {"user_id", "pause_requested", "claimed"}
-_last_poll: dict[int, float] = {}    # user_id -> monotonic time of last claim
-_running: dict[int, int] = {}        # user_id -> number of claimed, unfinished jobs
+QUEUED, CLAIMED, DONE, CANCELLED, ABANDONED = "queued", "claimed", "done", "cancelled", "abandoned"
+OPEN_STATES = (QUEUED, CLAIMED)
+# A claimed job whose agent has not pushed for this long is given up (PC off,
+# network gone). Agents push every second while a task runs.
+STALE_AFTER_SECONDS = 10 * 60
+ABANDONED_MESSAGE = (
+    "INCOMPLETE: Xelora Desktop stopped responding while running this task "
+    "(the PC may have gone to sleep or lost its connection). Check the workbook, then send the request again."
+)
+
+
+def _db_now() -> datetime:
+    """Naive UTC, comparable on both Postgres and SQLite DateTime columns."""
+    return _now().replace(tzinfo=None)
+
+
+class AgentJob(Base):
+    __tablename__ = "agent_jobs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    task_id = Column(Integer, nullable=False, index=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    status = Column(String, nullable=False, default=QUEUED, index=True)
+    pause_requested = Column(Boolean, nullable=False, default=False)
+    payload = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=_db_now)
+    claimed_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=_db_now)
+
+
+_wake = threading.Condition()        # wakes long-polls when this process queues a job
+_last_poll: dict[int, float] = {}    # user_id -> monotonic time the agent last called in
 
 
 def configured_providers() -> list[str]:
@@ -209,61 +236,121 @@ def agent_online(user_id: int) -> bool:
     return last is not None and time.monotonic() - last < ONLINE_WINDOW_SECONDS
 
 
+def _open_job(db, task_id: int):
+    return (db.query(AgentJob).filter(AgentJob.task_id == task_id, AgentJob.status.in_(OPEN_STATES))
+            .order_by(AgentJob.id.desc()).first())
+
+
 def dispatch(task, task_id: int) -> None:
     """Queue ``task`` (fresh, or just resumed by /resume) for the user's agent."""
-    job = {
-        "job_id": uuid.uuid4().hex,
-        "task_id": task_id,
-        "state": export_state(task),
-        "providers": configured_providers(),
-    }
-    with _cond:
-        _jobs[task_id] = {"user_id": task.user_id, "pause_requested": False, "claimed": False}
-        _queues.setdefault(task.user_id, deque()).append(job)
-        _cond.notify_all()
+    payload = {"task_id": task_id, "state": export_state(task), "providers": configured_providers()}
+    db = _session()
+    try:
+        db.query(AgentJob).filter(AgentJob.task_id == task_id, AgentJob.status.in_(OPEN_STATES)) \
+            .update({"status": CANCELLED}, synchronize_session=False)
+        db.add(AgentJob(task_id=task_id, user_id=task.user_id, status=QUEUED, payload=json.dumps(payload)))
+        db.commit()
+    finally:
+        db.close()
+    with _wake:
+        _wake.notify_all()
     if not agent_online(task.user_id):
         task.set_recovery_state("waiting_for_agent", WAITING_MESSAGE, safe_to_continue=False)
 
 
 def request_pause(task_id: int) -> None:
-    with _cond:
-        if task_id in _jobs:
-            _jobs[task_id]["pause_requested"] = True
+    db = _session()
+    try:
+        db.query(AgentJob).filter(AgentJob.task_id == task_id, AgentJob.status.in_(OPEN_STATES)) \
+            .update({"pause_requested": True}, synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
 
 
 def forget(task_id: int) -> None:
     """Drop a deleted task: unqueue it, and stop relaying for it."""
-    with _cond:
-        info = _jobs.pop(task_id, None)
-        if info is None:
-            return
-        queue = _queues.get(info["user_id"])
-        if queue:
-            for job in list(queue):
-                if job["task_id"] == task_id:
-                    queue.remove(job)
-        if info["claimed"]:
-            _running[info["user_id"]] = max(0, _running.get(info["user_id"], 0) - 1)
+    db = _session()
+    try:
+        db.query(AgentJob).filter(AgentJob.task_id == task_id, AgentJob.status.in_(OPEN_STATES)) \
+            .update({"status": CANCELLED}, synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
+
+
+def running_jobs(user_id: int) -> int:
+    db = _session()
+    try:
+        return db.query(AgentJob).filter(AgentJob.user_id == user_id, AgentJob.status == CLAIMED).count()
+    finally:
+        db.close()
+
+
+def _expire_stale(db, user_id: int) -> None:
+    from main import ACTIVE_TASKS
+
+    cutoff = datetime.fromtimestamp(time.time() - STALE_AFTER_SECONDS, timezone.utc).replace(tzinfo=None)
+    stale = db.query(AgentJob).filter(AgentJob.user_id == user_id, AgentJob.status == CLAIMED,
+                                      AgentJob.updated_at < cutoff).all()
+    for job in stale:
+        job.status = ABANDONED
+        task = ACTIVE_TASKS.get(job.task_id)
+        if task is not None and not task.is_done:
+            task.is_done = True
+            task.final_response = ABANDONED_MESSAGE
+            task.chat_transcript.append({"role": "assistant", "text": ABANDONED_MESSAGE})
+            _persist(job.task_id, task, "failed")
+    if stale:
+        db.commit()
 
 
 def _claim(user_id: int, wait_seconds: float) -> dict | None:
     deadline = time.monotonic() + wait_seconds
-    with _cond:
-        while True:
-            _last_poll[user_id] = time.monotonic()
-            queue = _queues.get(user_id)
-            if queue:
-                job = queue.popleft()
-                info = _jobs.get(job["task_id"])
-                if info is None:
-                    continue  # deleted while queued
-                info["claimed"] = True
-                _running[user_id] = _running.get(user_id, 0) + 1
-                return job
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return None
-            _cond.wait(timeout=min(remaining, 5))
+    while True:
+        _last_poll[user_id] = time.monotonic()
+        db = _session()
+        try:
+            _expire_stale(db, user_id)
+            for job in (db.query(AgentJob).filter(AgentJob.user_id == user_id, AgentJob.status == QUEUED)
+                        .order_by(AgentJob.id).limit(5).all()):
+                # Conditional update: exactly one claimer wins, even across processes.
+                won = db.query(AgentJob).filter(AgentJob.id == job.id, AgentJob.status == QUEUED).update(
+                    {"status": CLAIMED, "claimed_at": _db_now(), "updated_at": _db_now()}, synchronize_session=False)
+                db.commit()
+                if won:
+                    return {"job_id": job.id, **json.loads(job.payload)}
+        finally:
+            db.close()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        with _wake:
+            # Short waits also pick up jobs queued by another process or before a restart.
+            _wake.wait(timeout=min(remaining, 2))
+
+
+def restore_pending() -> None:
+    """After a restart, rebuild web-UI mirrors for jobs that are still open."""
+    if config.TASK_EXECUTION != "agent" or database.SessionLocal is None:
+        return
+    from agent.core import AgentTask
+    from main import ACTIVE_TASKS
+
+    db = database.SessionLocal()
+    try:
+        for job in db.query(AgentJob).filter(AgentJob.status.in_(OPEN_STATES)).order_by(AgentJob.id).all():
+            if job.task_id in ACTIVE_TASKS:
+                continue
+            state = json.loads(job.payload).get("state") or {}
+            task = AgentTask(str(state.get("instruction") or ""), user_id=job.user_id)
+            apply_state(task, state, skip=CLOUD_OWNED)
+            task.has_authenticated_user = True
+            if job.status == QUEUED:
+                task.set_recovery_state("waiting_for_agent", WAITING_MESSAGE, safe_to_continue=False)
+            ACTIVE_TASKS[job.task_id] = task
+    finally:
+        db.close()
 
 
 # ── Agent endpoints ─────────────────────────────────────────────────────────
@@ -302,14 +389,23 @@ def revoke(token_id: int, user_id: int = Depends(_jwt_user)):
         db.close()
 
 
+def _job_counts(user_id: int) -> dict:
+    db = _session()
+    try:
+        base = db.query(AgentJob).filter(AgentJob.user_id == user_id)
+        return {"queued": base.filter(AgentJob.status == QUEUED).count(),
+                "running": base.filter(AgentJob.status == CLAIMED).count()}
+    finally:
+        db.close()
+
+
 @router.get("/status")
 def status(user_id: int = Depends(_jwt_user)):
     return {
         "user_id": user_id,
         "execution": config.TASK_EXECUTION,
         "online": agent_online(user_id),
-        "queued": len(_queues.get(user_id, ())),
-        "running": _running.get(user_id, 0),
+        **_job_counts(user_id),
     }
 
 
@@ -337,12 +433,20 @@ def push(task_id: int, req: PushRequest, user_id: int = Depends(require_agent)):
     from agent.core import AgentTask, get_task_completion_status
     from main import ACTIVE_TASKS
 
-    with _cond:
-        info = _jobs.get(task_id)
-        if info is not None and info["user_id"] != user_id:
+    _last_poll[user_id] = time.monotonic()  # a busy agent is still online
+    db = _session()
+    try:
+        job = _open_job(db, task_id)
+        if job is not None and job.user_id != user_id:
             raise HTTPException(status_code=403, detail="This task belongs to a different user.")
-        pause_requested = bool(info and info["pause_requested"])
-        _last_poll[user_id] = time.monotonic()  # a busy agent is still online
+        pause_requested = bool(job and job.pause_requested)
+        if job is not None:
+            job.updated_at = _db_now()
+            if req.final:
+                job.status = DONE
+            db.commit()
+    finally:
+        db.close()
 
     task = ACTIVE_TASKS.get(task_id)
     if task is None:
@@ -359,9 +463,6 @@ def push(task_id: int, req: PushRequest, user_id: int = Depends(require_agent)):
         task.is_paused = True  # keep showing the user's pause until the agent stops
 
     if req.final:
-        with _cond:
-            if _jobs.pop(task_id, None) is not None:
-                _running[user_id] = max(0, _running.get(user_id, 0) - 1)
         _persist(task_id, task, get_task_completion_status(task))
     return {"pause_requested": pause_requested}
 
@@ -383,6 +484,104 @@ def _persist(task_id: int, task, status_value: str) -> None:
         db.commit()
     finally:
         db.close()
+
+
+# ── Memory and files for the agent ─────────────────────────────────────────
+# The agent reads/writes its user's learning memory here (memory/_store.py's
+# remote backend) and mirrors the user's cloud files into a local workspace.
+
+_MEMORY_KIND = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+MAX_MEMORY_BYTES = 5 * 1024 * 1024
+
+
+def _memory_kind(kind: str) -> str:
+    if not _MEMORY_KIND.fullmatch(kind):
+        raise HTTPException(status_code=400, detail="Invalid memory kind.")
+    return kind
+
+
+@router.get("/memory/{kind}")
+def read_memory(kind: str, user_id: int = Depends(require_agent)):
+    from memory._store import read_stored
+    return {"records": read_stored(_memory_kind(kind), user_id)}
+
+
+@router.put("/memory/{kind}")
+async def write_memory(kind: str, request: Request, user_id: int = Depends(require_agent)):
+    from starlette.concurrency import run_in_threadpool
+
+    from memory._store import write_stored
+
+    body = await request.body()
+    if len(body) > MAX_MEMORY_BYTES:
+        raise HTTPException(status_code=413, detail="Memory payload too large.")
+    try:
+        records = json.loads(body).get("records")
+    except (ValueError, AttributeError):
+        records = None
+    if not isinstance(records, list):
+        raise HTTPException(status_code=400, detail="Send {\"records\": [...]}.")
+    await run_in_threadpool(write_stored, _memory_kind(kind), user_id, records)
+    return {"stored": len(records)}
+
+
+@router.get("/files")
+def list_user_files(user_id: int = Depends(require_agent)):
+    import files
+
+    db = _session()
+    try:
+        return files.list_files(user_id=user_id, db=db)
+    finally:
+        db.close()
+
+
+@router.get("/files/{file_id}/download")
+def download_user_file(file_id: int, user_id: int = Depends(require_agent)):
+    import files
+
+    db = _session()
+    try:
+        return files.download_file(file_id, user_id=user_id, db=db)
+    finally:
+        db.close()
+
+
+@router.post("/files")
+async def upload_user_file(
+    background_tasks: BackgroundTasks,
+    upload: UploadFile = FastAPIFile(...),
+    file_id: int | None = Form(default=None),
+    user_id: int = Depends(require_agent),
+):
+    """Store a file the agent created (new file) or changed (new version of file_id)."""
+    import files
+
+    db = _session()
+    try:
+        if file_id is None:
+            return await files.upload_file(background_tasks, upload, user_id=user_id, db=db)
+        return await files.upload_new_version(file_id, background_tasks, upload, user_id=user_id, db=db)
+    finally:
+        db.close()
+
+
+class SearchRequest(BaseModel):
+    query: str
+    max_results: int = 5
+
+
+@router.post("/web-search")
+def agent_web_search(req: SearchRequest, user_id: int = Depends(require_agent)):
+    """Web search for a running desktop task, with the server's search API keys."""
+    if running_jobs(user_id) <= 0:
+        raise HTTPException(status_code=403, detail="Search is relayed only while one of your tasks is running.")
+    from tools.web import search_providers, web_search
+
+    if search_providers() == ["duckduckgo"]:
+        # No keyed provider here; the desktop's own connection does DuckDuckGo better than a cloud IP.
+        return {"verified": False, "status": "no_keyed_provider", "error": "The server has no search API key."}
+    return web_search(req.query[:400], max(1, min(int(req.max_results), 10)))
 
 
 # ── Model relay ─────────────────────────────────────────────────────────────
@@ -424,7 +623,7 @@ async def llm_relay(provider: str, path: str, request: Request):
     user_id = user_for_token(_relay_token(provider, request))
     if user_id is None:
         return _relay_error(401, "Unknown or revoked agent token.")
-    if _running.get(user_id, 0) <= 0:
+    if running_jobs(user_id) <= 0:
         return _relay_error(403, "Model calls are relayed only while one of your tasks is running.")
     key = _server_key(provider)
     if not key:

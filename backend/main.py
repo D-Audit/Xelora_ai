@@ -28,6 +28,7 @@ from agent.reveal import reveal_workflow, progress_snapshot
 from auth import decode_token
 from database import init_db, get_db
 from learning.memory import set_preference, get_all_preferences
+from memory.outcome import record_task_outcome, start_task_history, task_actions
 from learning.pattern_miner import mine_patterns, promotable_patterns
 
 if config.ENABLE_SSE_STREAMING:
@@ -227,29 +228,138 @@ class ChatRequest(BaseModel):
     workbook_name: str | None = None
     has_workbook_context: bool = False
     history: list[dict] = []
+    # The open conversation, so a quick answer is saved into it.
+    task_id: int | None = None
 
 
 @app.post("/chat", dependencies=_AUTH)
-def quick_chat(req: ChatRequest):
-    """Route one composer message: a quick tool-free answer, or the Excel task flow.
+def quick_chat(
+    req: ChatRequest,
+    db: Session = Depends(_get_db_optional),
+    jwt_user_id: int | None = Depends(_current_user_id_from_jwt),
+):
+    """Route one composer message: a quick answer, or the Excel task flow.
 
     Called by the frontend's /api/chat proxy. When the route is "task" no
     reply is generated; the client submits POST /task instead, so workbook
-    changes always go through the governed agent loop.
+    changes always go through the governed agent loop. Quick answers may use
+    web search and cite "sources"; a signed-in user's memory adds context.
+    A signed-in user's exchange is saved to their chat history (``task_id``).
     """
-    from quick_chat import classify_message, quick_reply
+    from quick_chat import classify_message, has_agent_work, quick_answer
 
+    has_context = req.has_workbook_context
+    if req.task_id is not None and db is not None and jwt_user_id is not None:
+        # The saved conversation decides: replies in an Excel conversation go to the agent.
+        has_context = _conversation_has_agent_work(db, req.task_id, jwt_user_id, has_agent_work)
     route = classify_message(
         req.instruction,
         workbook_name=req.workbook_name,
-        has_workbook_context=req.has_workbook_context,
+        has_workbook_context=has_context,
     )
     if route.kind == "task":
-        return {"route": "task", "reason": route.reason, "reply": None}
-    return {"route": "chat", "reason": route.reason, "reply": quick_reply(req.instruction, req.history[-12:])}
+        return {"route": "task", "reason": route.reason, "reply": None, "sources": []}
+    answer = quick_answer(req.instruction, req.history[-12:], user_id=jwt_user_id)
+    task_id = None
+    if db is not None and jwt_user_id is not None:
+        task_id = _save_quick_exchange(db, jwt_user_id, req.task_id, req.instruction, answer)
+    return {"route": "chat", "reason": route.reason, "task_id": task_id, **answer}
 
 
-def _start_task_in_background(task, task_id, user_id, user_preferences):
+def _conversation_has_agent_work(db: Session, task_id: int, user_id: int, has_agent_work) -> bool:
+    import json
+
+    live = ACTIVE_TASKS.get(task_id)
+    row = _owned_conversation(db, task_id, user_id)  # 403 before spending a model call
+    if live is not None:
+        _assert_task_owner(live.user_id, user_id)
+        return has_agent_work(live.chat_transcript)
+    return bool(row and row.transcript and has_agent_work(json.loads(row.transcript)))
+
+
+def _owned_conversation(db: Session, task_id: int, user_id: int):
+    from models import Task
+    row = db.query(Task).filter(Task.id == task_id).first()
+    if row is not None:
+        _assert_task_owner(row.user_id, user_id)
+    return row
+
+
+def _save_quick_exchange(db: Session, user_id: int, task_id: int | None, question: str, answer: dict) -> int:
+    """Append a quick question and its answer to the conversation, or start one.
+
+    Turns are tagged ``kind: "chat"`` so the UI shows them as answers (not
+    task results) and a later Excel request in the same conversation can see them.
+    """
+    import json
+    from datetime import datetime, timezone
+    from models import Task
+
+    now = datetime.now(timezone.utc)
+    turns = [
+        {"role": "user", "text": question, "kind": "chat", "timestamp": now.isoformat()},
+        {"role": "assistant", "text": answer["reply"], "kind": "chat", "sources": answer.get("sources") or [],
+         "timestamp": now.isoformat()},
+    ]
+    row = _owned_conversation(db, task_id, user_id) if task_id is not None else None
+    if row is None:
+        row = Task(user_id=user_id, instruction=question, status="completed", completed_at=now,
+                   transcript=json.dumps(turns, default=str), is_read=True)
+        db.add(row)
+    else:
+        live = ACTIVE_TASKS.get(row.id)
+        if live is not None:
+            # The in-memory task writes its transcript back to this row; keep both in step.
+            live.chat_transcript.extend(turns)
+            transcript = live.chat_transcript
+        else:
+            transcript = (json.loads(row.transcript) if row.transcript else []) + turns
+        row.transcript = json.dumps(transcript, default=str)
+        row.is_read = True
+    db.commit()
+    db.refresh(row)
+    return row.id
+
+
+def _answer_directly(task, task_id, user_id) -> bool:
+    """Answer a greeting or a question that needs no workbook, without Excel.
+
+    Clients that send everything to /task (older web builds, the API) would
+    otherwise open Excel, or wait for Xelora Desktop, just to reply to "hi".
+    The answer uses the conversation so far and may search the web.
+    """
+    from quick_chat import classify_message, has_agent_work, quick_answer
+
+    earlier = task.chat_transcript[:-1]
+    route = classify_message(
+        task.instruction,
+        # A first message names an attachment; later ones inherit the conversation's workbook.
+        workbook_name=None if earlier else task.workbook_name,
+        has_workbook_context=has_agent_work(earlier),
+    )
+    if route.kind != "chat":
+        return False
+    history = [{"role": turn.get("role"), "text": turn.get("text")} for turn in earlier]
+    answer = quick_answer(task.instruction, history, user_id=user_id)
+    task.chat_transcript[-1]["kind"] = "chat"
+    task.chat_transcript.append({"role": "assistant", "text": answer["reply"], "kind": "chat",
+                                 "sources": answer.get("sources") or []})
+    task.final_response = answer["reply"]
+    task.answered_conversationally = True
+    task.awaiting_approval = False  # there was no plan to approve
+    task.defer_excel_until_approval = False
+    task.is_done = True
+    task.log_step(f"Answered directly ({route.reason})")
+    try:
+        agent_link._persist(task_id, task, get_task_completion_status(task))
+    except Exception as exc:
+        task.log_step(f"Could not save this answer to history: {exc}")
+    return True
+
+
+def _start_task_in_background(task, task_id, user_id, user_preferences, *, allow_direct_answer=True):
+    if allow_direct_answer and _answer_directly(task, task_id, user_id):
+        return
     if agent_link.routes_to_agent(task):
         # Cloud deployment: the user's Xelora Desktop agent runs it next to Excel.
         agent_link.dispatch(task, task_id)
@@ -272,12 +382,10 @@ def _start_task_in_background(task, task_id, user_id, user_preferences):
             task.clear_recovery_state("The workbook is available; starting this task now.")
 
         history_task_id = None
-        if config.ENABLE_MEMORY_STORAGE:
-            try:
-                from memory.task_history import log_task_start
-                history_task_id = log_task_start(task.instruction, user_id=user_id)
-            except Exception as exc:
-                task.log_step(f"Task history was unavailable: {exc}")
+        try:
+            history_task_id = start_task_history(task, user_id)
+        except Exception as exc:
+            task.log_step(f"Task history was unavailable: {exc}")
 
         if config.ENABLE_SSE_STREAMING:
             streamer.emit_step(task_id, "start", f"Task started: {task.instruction[:160]}")
@@ -299,34 +407,10 @@ def _start_task_in_background(task, task_id, user_id, user_preferences):
         finally:
             status = get_task_completion_status(task)
             success = status == "completed"
-            actions = _task_actions(task)
-            if config.ENABLE_MEMORY_STORAGE:
-                try:
-                    from memory.chat_memory import store_conversation
-                    from memory.task_history import log_task_action, log_task_complete
-
-                    if history_task_id:
-                        for action in actions:
-                            log_task_action(
-                                history_task_id,
-                                action["name"],
-                                action.get("input", {}),
-                                action.get("result", {}),
-                                user_id=user_id,
-                            )
-                        log_task_complete(
-                            history_task_id,
-                            task.final_response or status,
-                            success,
-                            error=None if success else task.final_response,
-                            user_id=user_id,
-                        )
-                    store_conversation(user_id, task.instruction, actions, task.final_response or status, success)
-                    if config.ENABLE_SKILL_EXTRACTION:
-                        from agent.skills import extract_skills_from_task
-                        extract_skills_from_task(task.instruction, actions, success, user_id=user_id)
-                except Exception as exc:
-                    task.log_step(f"Task learning was unavailable: {exc}")
+            try:
+                record_task_outcome(task, user_id, history_task_id)
+            except Exception as exc:
+                task.log_step(f"Task learning was unavailable: {exc}")
             if config.ENABLE_SSE_STREAMING:
                 streamer.emit_completion(task_id, success, task.final_response or status)
             try:
@@ -350,22 +434,6 @@ def _start_task_in_background(task, task_id, user_id, user_preferences):
 
     thread = threading.Thread(target=_worker, daemon=True)
     thread.start()
-
-
-def _task_actions(task: AgentTask) -> list[dict]:
-    """Normalize the core executor's action steps for reports and memory."""
-    actions = []
-    for step in task.structured_steps:
-        if step.get("type") != "action":
-            continue
-        result = step.get("result")
-        actions.append({
-            "name": step.get("tool_name", "unknown"),
-            "input": step.get("input", step.get("tool_input", {})) or {},
-            "result": result if isinstance(result, dict) else {"result": result},
-            "status": step.get("status"),
-        })
-    return actions
 
 
 @app.post("/task/{task_id}/pause", dependencies=_AUTH)
@@ -399,12 +467,14 @@ def _reconstruct_task_from_db(task_id: int, db: Session):
         return None
     from models import Task
     row = db.query(Task).filter(Task.id == task_id).first()
-    if row is None or not row.raw_messages:
+    # A conversation of quick answers only has a transcript and no model history;
+    # its next message simply starts a fresh run in the same conversation.
+    if row is None or not (row.raw_messages or row.transcript):
         return None
 
     import json
     task = AgentTask(row.instruction, user_id=row.user_id, workbook_name=row.workbook_name)
-    task.messages = json.loads(row.raw_messages)
+    task.messages = json.loads(row.raw_messages) if row.raw_messages else []
     if row.transcript:
         task.chat_transcript = json.loads(row.transcript)
     task.is_done = True
@@ -444,12 +514,14 @@ def resume_task(
         raise HTTPException(status_code=400, detail="Send a message to continue a completed conversation.")
 
     user_prefs = get_all_preferences(db, task.user_id) if (db and task.user_id) else {}
+    # A reply to a proposed plan ("Confirm", "Continue") always goes to the agent.
+    replying_to_plan = bool(task.awaiting_approval)
     task.resume(correction=req.correction)
     if db is not None:
         from models import Task
         db.query(Task).filter_by(id=task_id).update({"status": "running"})
         db.commit()
-    _start_task_in_background(task, task_id, task.user_id, user_prefs)
+    _start_task_in_background(task, task_id, task.user_id, user_prefs, allow_direct_answer=not replying_to_plan)
 
     return {"task_id": task_id, "status": "resumed",
             "message": f"Poll GET /task/{task_id}/progress or /task/{task_id}/reveal to watch it continue."}
@@ -504,6 +576,8 @@ def get_progress(task_id: int, jwt_user_id: int | None = Depends(_current_user_i
     snapshot["is_paused"] = task.is_paused
     snapshot["status"] = get_task_completion_status(task)
     snapshot["progress_log"] = task.progress_log
+    if task.answered_conversationally and task.chat_transcript:
+        snapshot["sources"] = task.chat_transcript[-1].get("sources") or []
     return snapshot
 
 
@@ -564,7 +638,7 @@ def get_task_detail(
         "created_at": task.created_at.isoformat() if task.created_at else None,
         "completed_at": task.completed_at.isoformat() if task.completed_at else None,
         "transcript": transcript,
-        "resumable": (task_id in ACTIVE_TASKS) or bool(task.raw_messages),
+        "resumable": (task_id in ACTIVE_TASKS) or bool(task.raw_messages or task.transcript),
     }
 
 

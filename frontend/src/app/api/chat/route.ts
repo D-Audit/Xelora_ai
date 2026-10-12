@@ -20,6 +20,7 @@ export async function POST(req: NextRequest) {
       workbook_name: body.workbookName ?? null,
       has_workbook_context: Boolean(body.hasWorkbookContext),
       history: Array.isArray(body.history) ? body.history : [],
+      task_id: typeof body.taskId === 'number' ? body.taskId : null,
     },
   });
 

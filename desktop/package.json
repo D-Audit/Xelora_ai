@@ -1,10 +1,11 @@
-
 {
   "name": "xelora-desktop",
-  "version": "1.4.0",
-  "description": "Xelora Desktop - AI-powered spreadsheet automation",
+  "version": "1.4.1",
+  "description": "Xelora - AI assistant for Excel",
   "main": "main.js",
-  "author": "Xelora",
+  "author": {
+    "name": "Xelora"
+  },
   "license": "MIT",
   "private": true,
   "xelora": {
@@ -25,17 +26,29 @@
       "repo": "Xelora_ai"
     },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "build/icon.ico",
+      "artifactName": "Xelora-Setup-${version}.${ext}",
+      "legalTrademarks": "Xelora",
+      "sign": "./scripts/sign.js",
+      "signingHashAlgorithms": [
+        "sha256"
+      ]
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Xelora"
+      "shortcutName": "Xelora",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "uninstallDisplayName": "Xelora"
     },
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
     "files": [
       "main.js",

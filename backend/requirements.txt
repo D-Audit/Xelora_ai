@@ -48,4 +48,7 @@ watchdog
 # mcp_server/server.py uses.
 mcp==1.29.0
 
+# Durable upload storage when FILE_STORAGE=s3 (AWS S3, Cloudflare R2, ...).
+boto3
+
 # Database/ERP connectors - add the driver you need, e.g. pymysql, pyodbc.

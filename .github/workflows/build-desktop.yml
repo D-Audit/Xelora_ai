@@ -35,10 +35,31 @@ jobs:
         shell: pwsh
         run: ./scripts/bundle-agent.ps1
 
+      # Code signing (docs/CODE_SIGNING.md). Set the repository variable
+      # XELORA_SIGN_PROVIDER=azure and the AZURE_* secrets to sign releases;
+      # set XELORA_REQUIRE_SIGNING=true to refuse to publish unsigned builds.
+      - name: Install Azure Trusted Signing client
+        if: vars.XELORA_SIGN_PROVIDER == 'azure'
+        shell: pwsh
+        run: |
+          nuget install Microsoft.Trusted.Signing.Client -OutputDirectory "$env:RUNNER_TEMP\trusted-signing" -NonInteractive
+          $dlib = Get-ChildItem "$env:RUNNER_TEMP\trusted-signing" -Recurse -Filter Azure.CodeSigning.Dlib.dll |
+            Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1
+          if (-not $dlib) { throw "Azure.CodeSigning.Dlib.dll was not found in the NuGet package." }
+          "AZURE_SIGN_DLIB=$($dlib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Build Windows installer (NSIS)
         run: npx electron-builder --win --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          XELORA_SIGN_PROVIDER: ${{ vars.XELORA_SIGN_PROVIDER }}
+          XELORA_REQUIRE_SIGNING: ${{ vars.XELORA_REQUIRE_SIGNING }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGN_ENDPOINT: ${{ vars.AZURE_SIGN_ENDPOINT }}
+          AZURE_SIGN_ACCOUNT: ${{ vars.AZURE_SIGN_ACCOUNT }}
+          AZURE_SIGN_PROFILE: ${{ vars.AZURE_SIGN_PROFILE }}
 
       - name: Upload installer as a workflow artifact
         uses: actions/upload-artifact@v4

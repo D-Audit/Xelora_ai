@@ -1,8 +1,9 @@
 """Authenticated spreadsheet storage, version history, and bounded metadata extraction.
 
-Files are stored locally under ``STORAGE_DIR/{user_id}``. The database only
-ever returns IDs and metadata; disk paths remain an internal implementation
-detail. Processing runs after the upload response so a slow workbook does not
+Files are stored locally under ``STORAGE_DIR/{user_id}`` and, when
+FILE_STORAGE is "database" or "s3", also in that durable store (blob_store.py),
+so they survive hosts that wipe local disk on restart. The database only ever
+returns IDs and metadata; disk paths remain an internal implementation detail. Processing runs after the upload response so a slow workbook does not
 hold the browser request open, but it uses the same process and database as the
 rest of this small single-server deployment.
 """
@@ -22,6 +23,7 @@ from fastapi.responses import FileResponse
 from openpyxl import load_workbook
 from sqlalchemy.orm import Session
 
+import blob_store
 from auth import get_current_user_id, get_db_or_503, _require_db
 from database import SessionLocal
 from workspace_models import FileAsset, FileVersion
@@ -125,10 +127,15 @@ async def _store_upload(upload: UploadFile, user_id: int) -> tuple[str, str, str
                 target.write(chunk)
         _validate_stored_file(temporary_destination, file_type, size_bytes)
         os.replace(temporary_destination, destination)
+        blob_store.save(destination)
     except HTTPException:
         with suppress(OSError):
             os.remove(temporary_destination)
         raise
+    except blob_store.BlobStoreError as error:
+        with suppress(OSError):
+            os.remove(destination)
+        raise HTTPException(status_code=503, detail=f"{error} Please try the upload again.") from error
     except OSError as error:
         with suppress(OSError):
             os.remove(temporary_destination)
@@ -324,7 +331,7 @@ def _process_version(file_id: int, version_id: int) -> None:
     try:
         version = db.query(FileVersion).filter(FileVersion.id == version_id, FileVersion.file_id == file_id).first()
         file = db.query(FileAsset).filter(FileAsset.id == file_id).first()
-        if not version or not file or not os.path.exists(version.storage_path):
+        if not version or not file or not blob_store.ensure_local(version.storage_path):
             logger.warning("file_processing_skipped file_id=%s version_id=%s", file_id, version_id)
             return
 
@@ -459,8 +466,7 @@ async def upload_file(
         db.refresh(version)
     except Exception as error:
         db.rollback()
-        with suppress(OSError):
-            os.remove(destination)
+        blob_store.delete(destination)
         logger.exception("file_upload_database_failure user_id=%s", user_id)
         raise HTTPException(status_code=500, detail="Could not save file metadata. The upload was not completed.") from error
 
@@ -530,13 +536,11 @@ async def upload_new_version(
         db.refresh(version)
     except HTTPException:
         db.rollback()
-        with suppress(OSError):
-            os.remove(destination)
+        blob_store.delete(destination)
         raise
     except Exception as error:
         db.rollback()
-        with suppress(OSError):
-            os.remove(destination)
+        blob_store.delete(destination)
         logger.exception("file_version_database_failure file_id=%s user_id=%s", file_id, user_id)
         raise HTTPException(status_code=500, detail="Could not save the new file version.") from error
 
@@ -568,8 +572,8 @@ def reprocess_file(
 def download_file(file_id: int, user_id: int = Depends(get_current_user_id), db: Session | None = Depends(get_db_or_503)):
     db = _require_db(db)
     file = _get_owned_file(db, file_id, user_id)
-    if not os.path.exists(file.storage_path):
-        raise HTTPException(status_code=404, detail="File not found.")
+    if not blob_store.ensure_local(file.storage_path):
+        raise HTTPException(status_code=404, detail="The stored copy of this file is missing. Upload it again.")
     return FileResponse(file.storage_path, filename=file.name, media_type=file.mime_type or MIME_TYPES.get(file.file_type))
 
 
@@ -583,7 +587,7 @@ def download_version(
     db = _require_db(db)
     _get_owned_file(db, file_id, user_id)
     version = db.query(FileVersion).filter(FileVersion.id == version_id, FileVersion.file_id == file_id).first()
-    if not version or not os.path.exists(version.storage_path):
+    if not version or not blob_store.ensure_local(version.storage_path):
         raise HTTPException(status_code=404, detail="File version not found.")
     return FileResponse(version.storage_path, filename=version.original_filename, media_type=version.mime_type or MIME_TYPES.get(version.file_type))
 
@@ -611,8 +615,7 @@ def delete_version(
         _apply_version_to_file(file, replacement)
     db.delete(version)
     db.commit()
-    with suppress(OSError):
-        os.remove(removed_path)
+    blob_store.delete(removed_path)
     logger.info("file_version_deleted file_id=%s version_id=%s user_id=%s", file_id, version_id, user_id)
     return {"deleted": True, "currentVersionNumber": file.current_version_number}
 
@@ -631,7 +634,6 @@ def delete_file(file_id: int, user_id: int = Depends(get_current_user_id), db: S
         logger.exception("file_delete_database_failure file_id=%s user_id=%s", file_id, user_id)
         raise HTTPException(status_code=409, detail="This file cannot be deleted while it is still in use.") from error
     for path in paths:
-        with suppress(OSError):
-            os.remove(path)
+        blob_store.delete(path)
     logger.info("file_deleted file_id=%s user_id=%s", file_id, user_id)
     return {"deleted": True}

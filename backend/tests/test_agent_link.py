@@ -7,6 +7,7 @@ routes. Only the Excel work (run_task) and the agent token store are faked.
 from __future__ import annotations
 
 import os
+import tempfile
 import threading
 import time
 import unittest
@@ -34,6 +35,19 @@ def _verified_step(text="Wrote the totals row"):
             "input": {"range": "A1"}, "result": {"verified": True, "message": text}}
 
 
+def _sqlite_sessions():
+    """A throwaway SQLite database with every table (agent jobs, tokens, tasks, ...)."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from database import Base
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)
+
+
 class AgentLinkCase(unittest.TestCase):
     def setUp(self):
         patches = [
@@ -47,8 +61,21 @@ class AgentLinkCase(unittest.TestCase):
         for item in patches:
             item.start()
             self.addCleanup(item.stop)
-        for store in (agent_link._queues, agent_link._jobs, agent_link._last_poll, agent_link._running):
-            store.clear()
+        self.Session = _sqlite_sessions()
+        self._dirs = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dirs.cleanup)
+        self.cloud_storage = os.path.join(self._dirs.name, "cloud")
+        self.workspace = os.path.join(self._dirs.name, "pc")
+        import auth
+        import files
+        for item in (patch.object(agent_link.database, "SessionLocal", self.Session),
+                     patch.object(auth, "SessionLocal", self.Session),
+                     patch.object(files, "SessionLocal", self.Session),
+                     patch.object(files, "STORAGE_DIR", self.cloud_storage),
+                     patch.dict(os.environ, {"STORAGE_DIR": self.workspace})):
+            item.start()
+            self.addCleanup(item.stop)
+        agent_link._last_poll.clear()
         self.client = TestClient(server.app)
         self.jwt = create_token(USER)[0]
         self.web_headers = {"X-API-Key": "test-api-key", "Authorization": f"Bearer {self.jwt}"}
@@ -121,15 +148,14 @@ class RunJobTests(AgentLinkCase):
 
         local_agent.run_job(self.cloud.claim(wait=0), self.cloud, run=fake_run, log=lambda _m: None)
 
-        self.assertFalse(seen["auth_files"])  # cloud-only file tools stay off locally
+        self.assertTrue(seen["auth_files"])  # file tools work on the synced local workspace
         self.assertEqual("gemini", seen["provider"])
         snapshot = self.progress()
         self.assertEqual("completed", snapshot["status"])
         self.assertEqual("Added the totals row in A1.", snapshot["final_response"])
         status = self.client.get("/task/7/status", headers=self.web_headers).json()
         self.assertTrue(status["is_done"])
-        self.assertEqual({}, agent_link._jobs)
-        self.assertEqual(0, agent_link._running[USER])
+        self.assertEqual(0, agent_link.running_jobs(USER))
 
     def test_crash_in_run_task_reports_incomplete(self):
         self.start_task()
@@ -184,9 +210,10 @@ class RunJobTests(AgentLinkCase):
         self.assertTrue(job["state"]["has_authenticated_user"])  # agent's local override stays local
 
     def test_push_after_cloud_restart_rebuilds_the_mirror(self):
-        with agent_link._cond:
-            agent_link._jobs[9] = {"user_id": USER, "pause_requested": False, "claimed": True}
-            agent_link._running[USER] = 1
+        db = self.Session()
+        db.add(agent_link.AgentJob(task_id=9, user_id=USER, status=agent_link.CLAIMED, payload="{}"))
+        db.commit()
+        db.close()
         state = agent_link.export_state(AgentTask("Format the header", user_id=USER))
         state["final_response"] = "Done."
         state["is_done"] = True
@@ -206,6 +233,114 @@ class RunJobTests(AgentLinkCase):
         self.start_task()
         agent_link.forget(7)
         self.assertIsNone(self.cloud.claim(wait=0))
+
+
+class PersistenceTests(AgentLinkCase):
+    def test_queued_task_survives_a_cloud_restart(self):
+        self.start_task()
+        main.ACTIVE_TASKS.clear()  # the process restarted; only the database remains
+        agent_link.restore_pending()
+        self.assertEqual("Add a totals row", main.ACTIVE_TASKS[7].instruction)
+        self.assertEqual("waiting_for_agent", main.ACTIVE_TASKS[7].recovery_state["phase"])
+        self.assertEqual(7, self.cloud.claim(wait=0)["task_id"])
+
+    def test_a_job_is_claimed_only_once(self):
+        self.start_task()
+        self.assertIsNotNone(self.cloud.claim(wait=0))
+        self.assertIsNone(self.cloud.claim(wait=0))
+
+    def test_silent_desktop_abandons_the_task_honestly(self):
+        self.start_task()
+        self.cloud.claim(wait=0)
+        db = self.Session()
+        db.query(agent_link.AgentJob).update({"updated_at": agent_link._db_now().replace(year=2000)})
+        db.commit()
+        db.close()
+        self.cloud.claim(wait=0)  # the next poll sweeps stale jobs
+        task = main.ACTIVE_TASKS[7]
+        self.assertTrue(task.is_done)
+        self.assertTrue(task.final_response.startswith("INCOMPLETE"))
+        self.assertEqual(0, agent_link.running_jobs(USER))
+
+    def test_resume_replaces_the_previous_job(self):
+        self.start_task()
+        agent_link.dispatch(main.ACTIVE_TASKS[7], 7)
+        db = self.Session()
+        statuses = [job.status for job in db.query(agent_link.AgentJob).order_by(agent_link.AgentJob.id)]
+        db.close()
+        self.assertEqual([agent_link.CANCELLED, agent_link.QUEUED], statuses)
+
+
+class FilesAndLearningTests(AgentLinkCase):
+    def upload_on_the_web(self, name: str, data: bytes) -> dict:
+        response = self.client.post("/files", files={"upload": (name, data)},
+                                    headers={"Authorization": f"Bearer {self.jwt}"})
+        self.assertEqual(200, response.status_code, response.text)
+        return response.json()
+
+    def test_web_upload_reaches_the_desktop_and_new_files_come_back(self):
+        self.upload_on_the_web("Sales.csv", b"region,total\nNorth,10\n")
+        self.start_task("Summarise Sales.csv into a new sheet")
+        seen = {}
+
+        def run(task, **_kwargs):
+            root = os.path.join(self.workspace, str(USER))
+            seen["local"] = open(os.path.join(root, "Sales.csv"), "rb").read()
+            with open(os.path.join(root, "Summary.csv"), "w") as handle:
+                handle.write("region,total\nAll,10\n")
+            task.structured_steps.append(_verified_step())
+            task.final_response = "Saved Summary.csv."
+            task.is_done = True
+
+        local_agent.run_job(self.cloud.claim(wait=0), self.cloud, run=run, log=lambda _m: None)
+
+        self.assertEqual(b"region,total\nNorth,10\n", seen["local"])
+        names = [f["name"] for f in self.client.get("/files", headers={"Authorization": f"Bearer {self.jwt}"}).json()["files"]]
+        self.assertIn("Summary.csv", names)
+        steps = " ".join(main.ACTIVE_TASKS[7].progress_log)
+        self.assertIn("1 downloaded", steps)
+        self.assertIn("1 new", steps)
+
+    def test_desktop_edit_becomes_a_new_version_on_the_web(self):
+        uploaded = self.upload_on_the_web("Budget.csv", b"a,b\n1,2\n")
+        self.start_task()
+
+        def run(task, **_kwargs):
+            with open(os.path.join(self.workspace, str(USER), "Budget.csv"), "w") as handle:
+                handle.write("a,b\n1,2\n3,4\n")
+            task.is_done = True
+
+        local_agent.run_job(self.cloud.claim(wait=0), self.cloud, run=run, log=lambda _m: None)
+        detail = self.client.get(f"/files/{uploaded['id']}", headers={"Authorization": f"Bearer {self.jwt}"}).json()
+        self.assertEqual(2, detail["currentVersionNumber"])
+
+    def test_desktop_runs_learn_into_the_users_cloud_memory(self):
+        from memory import _store, records
+
+        _store.use_remote(self.cloud.read_memory, self.cloud.write_memory)
+        self.addCleanup(_store.use_remote, None, None)
+        self.start_task()
+
+        def run(task, **_kwargs):
+            task.structured_steps.append(_verified_step())
+            task.final_response = "Added the totals row."
+            task.is_done = True
+
+        with patch.object(config, "ENABLE_MEMORY_STORAGE", True):
+            local_agent.run_job(self.cloud.claim(wait=0), self.cloud, run=run, log=lambda _m: None)
+        _store.use_remote(None, None)
+        history = records.read("task_history", str(USER))
+        self.assertEqual(1, len(history))
+        self.assertEqual("Add a totals row", history[0]["instruction"])
+        self.assertTrue(history[0]["success"])
+
+    def test_memory_endpoints_are_scoped_to_the_token_user(self):
+        self.cloud.write_memory("skills", [{"name": "mine"}])
+        other = local_agent.CloudClient("http://testserver", "xa_other", http=self.client)
+        self.assertEqual([], other.read_memory("skills"))
+        self.assertEqual([{"name": "mine"}], self.cloud.read_memory("skills"))
+        bad = self.client.get("/agent-link/memory/..%2Fsecrets", headers=self.cloud.headers)
+        self.assertIn(bad.status_code, (400, 404))
 
 
 class StateTests(unittest.TestCase):
@@ -259,6 +394,29 @@ class RelayTests(AgentLinkCase):
         self.start_task()
         self.cloud.claim(wait=0)
         self.assertEqual(401, self.relay(token="xa_nope").status_code)
+
+
+class SearchRelayTests(AgentLinkCase):
+    def search(self):
+        return self.client.post("/agent-link/web-search", json={"query": "eur usd rate"}, headers=self.cloud.headers)
+
+    def test_search_relay_needs_a_running_task(self):
+        self.assertEqual(403, self.search().status_code)
+
+    def test_search_relay_uses_the_servers_keyed_provider(self):
+        self.start_task()
+        self.cloud.claim(wait=0)
+        hit = {"verified": True, "provider": "tavily", "results": [{"title": "t", "url": "https://x"}]}
+        with patch("tools.web.search_providers", return_value=["tavily", "duckduckgo"]), \
+                patch("tools.web.web_search", return_value=hit):
+            self.assertEqual(hit, self.cloud.web_search("eur usd rate", 3))
+
+    def test_without_keys_the_desktop_searches_itself(self):
+        self.start_task()
+        self.cloud.claim(wait=0)
+        with patch("tools.web.search_providers", return_value=["duckduckgo"]):
+            body = self.search().json()
+        self.assertEqual("no_keyed_provider", body["status"])
 
 
 class PairTests(AgentLinkCase):

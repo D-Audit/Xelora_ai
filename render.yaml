@@ -34,4 +34,8 @@ services:
       - key: FRONTEND_URL
         sync: false   # e.g. https://your-app.vercel.app
       - key: STORAGE_DIR
-        value: /tmp/xelora-storage   # free tier disk is ephemeral
+        value: /tmp/xelora-storage   # free tier disk is ephemeral: only a cache
+      - key: FILE_STORAGE
+        value: database   # uploads live in Postgres; switch to s3 (R2) for many/large files
+      - key: TAVILY_API_KEY
+        sync: false   # web search (or BRAVE_SEARCH_API_KEY / SERPER_API_KEY); see .env.example

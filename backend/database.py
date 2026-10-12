@@ -77,6 +77,8 @@ def get_db():
 
 def init_db():
     import models  # noqa: F401
+    import memory.records  # noqa: F401  (memory_records table)
+    import blob_store  # noqa: F401  (file_blob_chunks table)
     if engine is None:
         raise RuntimeError(
             "DATABASE_URL is not set. Copy .env.example to .env and fill in a real "
