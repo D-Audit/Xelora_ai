@@ -1,3 +1,5 @@
+import { useSyncExternalStore } from 'react';
+
 /**
  * Detects whether the app is running inside the Xelora Desktop
  * Electron wrapper (desktop/), as opposed to a
@@ -33,6 +35,8 @@ declare global {
       setFloatingMode: (enabled: boolean) => Promise<boolean>;
       getFloatingMode: () => Promise<boolean>;
       onFloatingModeChange: (callback: (enabled: boolean) => void) => () => void;
+      /** Opens Google/Microsoft sign-in in the system browser (desktop/main.js). */
+      signInWithBrowser?: (provider: 'google' | 'microsoft') => Promise<boolean>;
       /** Local agent that runs this user's tasks in Excel (desktop/agent.js). */
       agent?: {
         getStatus: () => Promise<LocalAgentStatus>;
@@ -48,4 +52,11 @@ declare global {
 export function isDesktopApp(): boolean {
   if (typeof window === 'undefined') return false;
   return Boolean(window.xeloraDesktop?.isDesktopApp || window.xelora);
+}
+
+const noSubscription = () => () => {};
+
+/** React hook form of isDesktopApp(): false during server rendering, then the real value. */
+export function useIsDesktop(): boolean {
+  return useSyncExternalStore(noSubscription, isDesktopApp, () => false);
 }

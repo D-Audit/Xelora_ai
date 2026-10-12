@@ -27,14 +27,15 @@ function mapBackendUser(raw: Record<string, unknown>): User {
     isVerified: Boolean(raw.isVerified),
     onboardingCompleted: Boolean(raw.onboardingCompleted),
     isAdmin: Boolean(raw.isAdmin),
+    hasPassword: raw.hasPassword !== false,
   };
 }
 
-export async function login(email: string, password: string): Promise<AuthSession> {
+export async function login(email: string, password: string, rememberMe = true): Promise<AuthSession> {
   const res = await fetch('/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, rememberMe }),
   });
   const data = await res.json();
   if (!res.ok) {
@@ -82,4 +83,27 @@ export async function logout(): Promise<void> {
  * yet. See INTEGRATION.md if you want to add those columns.
  */
 export function updateSession(_updates: Partial<User>): void {
+}
+
+async function postJson<T>(url: string, body: unknown, method = 'POST'): Promise<T> {
+  const res = await fetch(url, {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body ?? {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data as { error?: string }).error || 'Something went wrong. Please try again.');
+  return data as T;
+}
+
+export const requestPasswordReset = (email: string) => postJson<{ sent: boolean }>('/api/auth/forgot-password', { email });
+export const resetPassword = (token: string, password: string) =>
+  postJson<{ reset: boolean }>('/api/auth/reset-password', { token, password });
+export const verifyEmail = (token: string) => postJson<{ verified: boolean }>('/api/auth/verify-email', { token });
+export const sendVerificationEmail = () =>
+  postJson<{ sent: boolean; alreadyVerified?: boolean }>('/api/auth/send-verification', {});
+export const changePassword = (currentPassword: string | null, newPassword: string) =>
+  postJson<{ changed: boolean }>('/api/auth/change-password', { currentPassword, newPassword });
+export async function updateProfile(name: string): Promise<User> {
+  return mapBackendUser(await postJson<Record<string, unknown>>('/api/auth/me', { name }, 'PATCH'));
 }

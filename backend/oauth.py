@@ -44,7 +44,7 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import User
 from auth_billing_models import AuthUser, Subscription
-from auth import create_token, TRIAL_DAYS
+from auth import OAUTH_ONLY_PREFIX, TRIAL_DAYS, create_token
 
 router = APIRouter(prefix="/auth", tags=["oauth"])
 
@@ -81,7 +81,7 @@ def _get_or_create_user(db: Session, email: str, name: str) -> tuple[User, bool]
     now = datetime.now(timezone.utc)
     db.add(AuthUser(
         id=user.id,
-        password_hash=f"!oauth-only:{secrets.token_urlsafe(32)}",
+        password_hash=f"{OAUTH_ONLY_PREFIX}{secrets.token_urlsafe(32)}",
         plan_tier="trial",
         is_verified=True,  # the provider already verified this email
     ))

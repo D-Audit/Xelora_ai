@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { backendFetch } from '@/lib/backend';
+import { backendErrorMessage } from '@/lib/relay';
 import { setSessionCookie } from '@/lib/session';
 
 interface RegisterBackendResponse {
@@ -23,10 +24,7 @@ export async function POST(req: NextRequest) {
   });
 
   if (!result.ok) {
-    const detail =
-      (result.data as { detail?: string })?.detail ||
-      (result.data as { error?: string })?.error ||
-      'Registration failed.';
+    const detail = backendErrorMessage(result.data, 'Registration failed.');
     return NextResponse.json({ error: detail }, { status: result.status || 500 });
   }
 

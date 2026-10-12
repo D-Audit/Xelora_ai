@@ -22,14 +22,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
-      router.push('/login');
+      router.push(`/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`);
     }
   }, [isLoading, isAuthenticated, router]);
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-xelora-bg-main flex items-center justify-center">
-        <div className="h-6 w-6 rounded-full border-2 border-xelora-green border-t-transparent animate-spin" aria-label="Loading" />
+      <div className="flex min-h-screen items-center justify-center bg-xelora-bg-main">
+        <div className="h-5 w-5 animate-spin rounded-full border-2 border-xelora-border-strong border-t-xelora-text" aria-label="Loading" />
       </div>
     );
   }
@@ -50,7 +50,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             onClick={() => setSidebarOpen(false)}
             aria-hidden="true"
           />
-          <div className="relative w-60 flex-shrink-0">
+          <div className="relative flex-shrink-0">
             <Sidebar collapsed={false} />
           </div>
         </div>
@@ -59,7 +59,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       <div className="flex flex-1 flex-col overflow-hidden">
         {!isChatWorkspace && <Topbar />}
         <main
-          className={cn('flex-1 overflow-y-auto', isChatWorkspace ? 'bg-xelora-surface' : 'bg-xelora-bg-main p-4 sm:p-6')}
+          className={cn('flex-1 overflow-y-auto', isChatWorkspace ? 'bg-xelora-surface' : 'bg-xelora-bg-main px-4 py-6 sm:px-8 sm:py-8')}
           id="main-content"
         >
           {children}

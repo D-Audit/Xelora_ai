@@ -2,138 +2,76 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { BarChart3, LineChart, ShoppingCart, Zap } from 'lucide-react';
-import {
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-  LineChart as ReLineChart,
-  Line,
-  BarChart as ReBarChart,
-  Bar,
-} from 'recharts';
-import { Card } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
 import { DashboardPageHeader } from '@/components/dashboard/page-header';
 import { StatePanel } from '@/components/site/state-panel';
-import { getUsage } from '@/services/dashboard';
-import { mockUsageByOperation } from '@/data/mock-usage';
+import { Button } from '@/components/ui/button';
+import { getSubscription, type SubscriptionSummary, type UsageSummary } from '@/services/billing';
+import { getPlanByTier } from '@/data/plans';
 import { formatDate } from '@/lib/utils';
-import type { UsageLimits } from '@/types';
+import { cn } from '@/lib/utils';
 
-type UsageSummary = UsageLimits;
+function Meter({ label, used, limit, help }: { label: string; used: number; limit: number | 'unlimited'; help: string }) {
+  const pct = typeof limit === 'number' && limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+  return (
+    <div className="rounded-xl border border-xelora-border bg-xelora-surface p-5">
+      <p className="text-sm text-xelora-text-secondary">{label}</p>
+      <p className="mt-2 text-2xl font-semibold tabular-nums text-xelora-text">
+        {used.toLocaleString()}
+        <span className="text-sm font-normal text-xelora-text-muted"> / {typeof limit === 'number' ? limit.toLocaleString() : 'Unlimited'}</span>
+      </p>
+      {typeof limit === 'number' && (
+        <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-xelora-surface-2" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label={label}>
+          <div className={cn('h-full rounded-full', pct >= 90 ? 'bg-xelora-error' : pct >= 75 ? 'bg-xelora-warning' : 'bg-xelora-green')} style={{ width: `${pct}%` }} />
+        </div>
+      )}
+      <p className="mt-3 text-xs text-xelora-text-muted">{help}</p>
+    </div>
+  );
+}
 
 export default function UsagePage() {
-  const [loading, setLoading] = useState(true);
-  const [daily, setDaily] = useState<{ date: string; aiActions: number; workflowRuns: number; fileOperations: number }[]>([]);
-  const [summary, setSummary] = useState<UsageSummary | null>(null);
+  const [data, setData] = useState<{ subscription: SubscriptionSummary; usage: UsageSummary } | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    getUsage().then((data) => {
-      setSummary(data.summary);
-      setDaily(data.daily);
-      setLoading(false);
-    });
+    getSubscription().then(setData).catch((err) => setError(err instanceof Error ? err.message : 'Could not load usage.'));
   }, []);
 
-  if (loading) {
-    return <StatePanel kind="loading" title="Loading usage" description="Preparing chart data and summary metrics." />;
-  }
+  if (error) return <StatePanel kind="error" title="Could not load usage" description={error} />;
+  if (!data) return <StatePanel kind="loading" title="Loading usage" description="" />;
+
+  const plan = getPlanByTier(data.subscription.planTier);
+  const resets = data.usage.resetDate ? formatDate(data.usage.resetDate) : null;
 
   return (
-    <div className="space-y-6">
+    <div className="mx-auto max-w-5xl space-y-8">
       <DashboardPageHeader
-        eyebrow="Usage"
-        title="Track Xelora usage"
-        description="Charts and summaries stay restrained so the monthly pattern is easy to scan."
-        actions={<Button variant="outline" asChild><Link href="/dashboard/billing">Buy additional usage</Link></Button>}
+        title="Usage"
+        description={`You are on the ${plan.name} plan.${resets ? ` Usage resets on ${resets}.` : ''}`}
+        actions={<Button variant="outline" asChild><Link href="/dashboard/billing/plans">Change plan</Link></Button>}
       />
-
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {[
-          { label: 'AI actions', value: `${summary?.aiActionsUsed ?? 0} / ${summary?.aiActionsLimit ?? 0}`, icon: Zap },
-          { label: 'Workflow runs', value: `${summary?.workflowRunsUsed ?? 0} / ${summary?.workflowRunsLimit ?? 0}`, icon: BarChart3 },
-          { label: 'Storage', value: `${summary?.storageUsedGB?.toFixed(1) ?? '0.0'} / ${summary?.storageLimitGB ?? 0} GB`, icon: LineChart },
-          { label: 'Devices', value: `${summary?.devicesUsed ?? 0} / ${summary?.devicesLimit ?? 0}`, icon: ShoppingCart },
-        ].map((item) => {
-          const Icon = item.icon;
-          return (
-            <Card key={item.label} className="p-5">
-              <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-md bg-xelora-surface-2">
-                  <Icon className="h-5 w-5 text-xelora-green" />
-                </div>
-                <div>
-                  <p className="text-sm font-medium text-xelora-text">{item.label}</p>
-                  <p className="text-sm text-xelora-text-secondary">{item.value}</p>
-                </div>
-              </div>
-            </Card>
-          );
-        })}
+      <div className="grid gap-4 md:grid-cols-2">
+        <Meter label="AI actions" used={data.usage.aiActionsUsed} limit={data.usage.aiActionsLimit} help="Each new task you start counts as one. Quick answers and follow-ups in the same chat do not." />
+        <Meter label="Workflow runs" used={data.usage.workflowRunsUsed} limit={data.usage.workflowRunsLimit} help="Each time you run a saved workflow counts as one run." />
       </div>
-
-      <div className="grid gap-6 lg:grid-cols-2">
-        <Card className="p-5">
-          <h2 className="text-base font-semibold text-xelora-text">Daily usage</h2>
-          <div className="mt-4 h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <ReLineChart data={daily}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#DDE5E2" />
-                <XAxis dataKey="date" tick={{ fontSize: 12, fill: '#5C6C75' }} />
-                <YAxis tick={{ fontSize: 12, fill: '#5C6C75' }} />
-                <Tooltip />
-                <Line type="monotone" dataKey="aiActions" stroke="#00684A" strokeWidth={2} dot={false} />
-              </ReLineChart>
-            </ResponsiveContainer>
-          </div>
-        </Card>
-
-        <Card className="p-5">
-          <h2 className="text-base font-semibold text-xelora-text">Usage by operation</h2>
-          <div className="mt-4 h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <ReBarChart data={mockUsageByOperation}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#DDE5E2" />
-                <XAxis dataKey="operation" tick={{ fontSize: 12, fill: '#5C6C75' }} />
-                <YAxis tick={{ fontSize: 12, fill: '#5C6C75' }} />
-                <Tooltip />
-                <Bar dataKey="aiActions" fill="#00ED64" radius={[4, 4, 0, 0]} />
-              </ReBarChart>
-            </ResponsiveContainer>
-          </div>
-        </Card>
-      </div>
-
-      <Card className="overflow-hidden">
-        <div className="border-b border-xelora-border px-5 py-4">
-          <h2 className="text-base font-semibold text-xelora-text">Recent usage</h2>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-xelora-surface-2">
-              <tr className="border-b border-xelora-border text-left">
-                <th className="px-5 py-3 font-medium text-xelora-text-secondary">Date</th>
-                <th className="px-4 py-3 font-medium text-xelora-text-secondary">AI actions</th>
-                <th className="px-4 py-3 font-medium text-xelora-text-secondary">Workflow runs</th>
-                <th className="px-4 py-3 font-medium text-xelora-text-secondary">File operations</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-xelora-border bg-white">
-              {daily.slice(-7).map((item) => (
-                <tr key={item.date}>
-                  <td className="px-5 py-3 text-xelora-text-secondary">{formatDate(`${item.date}T00:00:00Z`)}</td>
-                  <td className="px-4 py-3 text-xelora-text-secondary">{item.aiActions}</td>
-                  <td className="px-4 py-3 text-xelora-text-secondary">{item.workflowRuns}</td>
-                  <td className="px-4 py-3 text-xelora-text-secondary">{item.fileOperations}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Card>
+      <section className="rounded-xl border border-xelora-border bg-xelora-surface">
+        <h2 className="border-b border-xelora-border px-5 py-3.5 text-sm font-semibold text-xelora-text">Plan limits</h2>
+        <dl className="grid gap-x-8 gap-y-4 p-5 text-sm sm:grid-cols-2 lg:grid-cols-3">
+          {[
+            ['Maximum file size', plan.limits.maxFileSizeMB === 'custom' ? 'Custom' : `${plan.limits.maxFileSizeMB} MB`],
+            ['Saved workflows', String(plan.limits.savedWorkflows)],
+            ['File storage', plan.limits.cloudStorageGB === 0 ? 'Not included' : `${plan.limits.cloudStorageGB} GB`],
+            ['Connected devices', String(plan.limits.devices)],
+            ['History kept', `${plan.limits.historyDays} days`],
+            ['Team members', String(plan.limits.teamMembers)],
+          ].map(([label, value]) => (
+            <div key={label}>
+              <dt className="text-xelora-text-secondary">{label}</dt>
+              <dd className="mt-0.5 font-medium text-xelora-text">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
     </div>
   );
 }

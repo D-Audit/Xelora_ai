@@ -83,12 +83,40 @@ through the API; the key never ships in the app.
    |---|---|
    | `BACKEND_URL` | `https://xelora-api.onrender.com` |
    | `BACKEND_API_KEY` | the `LOCAL_API_KEY` from Render |
+   | `XELORA_APP_URL` | this Vercel URL, e.g. `https://xelora.vercel.app` (needed for Google sign-in) |
+   | `NEXT_PUBLIC_LEGAL_NAME` | your registered business name (shown in the Terms and Privacy Policy) |
+   | `NEXT_PUBLIC_CONTACT_EMAIL` | the support address shown on the site |
+   | `NEXT_PUBLIC_GOVERNING_LAW` | e.g. `the Republic of Rwanda` (Terms of Service) |
+   | `NEXT_PUBLIC_LEGAL_ADDRESS` | optional business address for the legal pages |
 
 4. Deploy. Then go back to Render and set `ALLOWED_ORIGINS` / `FRONTEND_URL` to
    the Vercel URL.
 5. Register an account. To make yourself admin, follow
    `docs/reports/INTEGRATION.md` → "Making your first admin" (run the SQL in
    Neon's SQL editor).
+
+### Sign in with Google
+
+1. console.cloud.google.com → create a project → **APIs & Services → OAuth consent
+   screen**: User type *External*, app name *Xelora*, your support email, the
+   logo, and links to `/privacy` and `/terms`. Publish the app when ready.
+2. **Credentials → Create credentials → OAuth client ID → Web application**.
+   Authorised redirect URI: `https://<your-vercel-app>/api/auth/google/callback`
+   (exactly; add `http://localhost:3000/api/auth/google/callback` for local use).
+3. Put the client ID and secret on Render as `GOOGLE_CLIENT_ID` and
+   `GOOGLE_CLIENT_SECRET`, and set `XELORA_APP_URL` on Vercel.
+
+In Xelora Desktop, the button opens the user's normal browser (Google blocks
+sign-in inside app windows), and the session comes back to the app through a
+`xelora://` link that the installer registers.
+
+### Email (password reset and email confirmation)
+
+Create a free account at resend.com, verify your domain, and set
+`RESEND_API_KEY` and `EMAIL_FROM` (e.g. `Xelora <no-reply@yourdomain.com>`) on
+Render, plus `FRONTEND_URL` = your Vercel URL so links point to the site.
+Any SMTP server works instead (`SMTP_HOST`, `SMTP_USER`, ...). Until one is set,
+"Forgot password" emails are only printed in the Render logs.
 
 **Cold starts:** while Render is asleep, the first login can time out. Open the
 backend URL once to wake it, or use a free uptime pinger (e.g. UptimeRobot,
@@ -98,8 +126,7 @@ every 10 min) to keep it awake.
 
 1. In `desktop/package.json`, set `"xelora": { "webUrl": "https://<your-vercel-app>/dashboard" }`.
    Installed builds load this URL.
-2. Bump `"version"` in `desktop/package.json` (and the `version` string in
-   `desktop/preload.js`).
+2. Bump `"version"` in `desktop/package.json` (the app reads it from there).
 3. Commit, then tag and push:
    ```bash
    git tag v1.3.1

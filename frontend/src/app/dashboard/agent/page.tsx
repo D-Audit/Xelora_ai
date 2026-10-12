@@ -5,16 +5,17 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { toast } from 'sonner';
 import {
-  ArrowUp, Loader2, Pause, Play, Bot, User, AlertTriangle, ArrowUpRight,
-  MonitorSpeaker, Plus, Paperclip, X, Sparkles,
+  ArrowUp, Check, ChevronDown, CircleAlert, CircleCheck, FileSpreadsheet, Filter, Loader2, ListChecks, Maximize2,
+  Menu, Paintbrush, Pause, Paperclip, PictureInPicture2, Play, Sigma, Table2, TriangleAlert, X,
 } from 'lucide-react';
-import { Button } from '@/components/ui/button';
 import { XeloraLogo } from '@/components/ui/xelora-logo';
-import { isDesktopApp } from '@/lib/is-desktop';
+import { useIsDesktop } from '@/lib/is-desktop';
 import { LocalAgentBadge } from '@/components/desktop/local-agent';
 import { useAuthStore } from '@/stores/auth-store';
+import { useUIStore } from '@/stores/ui-store';
+import { Markdown } from '@/components/chat/markdown';
 import {
-  startTask, quickChat, getTaskProgress, pauseTask, resumeTask, getTaskReveal,
+  startTask, quickChat, getTaskProgress, pauseTask, resumeTask,
   getChat,
 } from '@/services/agent';
 import { uploadFile } from '@/services/workspace';
@@ -53,21 +54,21 @@ function actionLabel(toolName: string) {
 }
 
 const QUICK_ACTIONS = [
-  { label: 'Clean up data', instruction: 'Remove blank rows, trim whitespace, and delete duplicate rows in the active sheet.' },
-  { label: 'Build a pivot table', instruction: 'Build a pivot table summarising the data by the most relevant category, then add a chart.' },
-  { label: 'Add formulas', instruction: 'Add formulas to calculate totals and averages for the numeric columns.' },
-  { label: 'Format the sheet', instruction: 'Apply consistent number, currency, and date formatting across the sheet.' },
+  { icon: Filter, label: 'Clean up my data', instruction: 'Remove blank rows, trim extra spaces and delete duplicate rows in the active sheet.' },
+  { icon: Table2, label: 'Summarise with a pivot table', instruction: 'Build a pivot table that summarises the data by the most useful category, then add a chart.' },
+  { icon: Sigma, label: 'Add totals and averages', instruction: 'Add formulas that calculate totals and averages for the numeric columns.' },
+  { icon: Paintbrush, label: 'Format it as a report', instruction: 'Format the sheet as a clean report: bold headers, consistent number, currency and date formats, and fitted columns.' },
 ];
 
 export default function AgentPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [desktop, setDesktop] = useState<boolean | null>(null);
-  useEffect(() => setDesktop(isDesktopApp()), []);
+  const desktop = useIsDesktop();
 
   const user = useAuthStore((s) => s.user);
 
-  const [input, setInput] = useState('');
+  // Onboarding links here with ?prompt= to start from an example request.
+  const [input, setInput] = useState(() => searchParams.get('prompt') ?? '');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [attachedFile, setAttachedFile] = useState<FileItem | null>(null);
@@ -354,82 +355,62 @@ export default function AgentPage() {
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
   };
 
-  if (desktop === false) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
-        <div className="flex h-14 w-14 items-center justify-center rounded-full bg-xelora-surface-2">
-          <MonitorSpeaker className="h-7 w-7 text-xelora-text-secondary" />
-        </div>
-        <h1 className="text-lg font-semibold text-xelora-text">AI Agent is a desktop feature</h1>
-        <p className="max-w-md text-sm text-xelora-text-secondary">
-          Running instructions against a live workbook needs the Xelora Desktop app, which talks
-          to Excel directly on your machine. The web dashboard covers everything else - Workflows,
-          Files, Billing, and more.
-        </p>
-        <Button asChild variant="outline">
-          <Link href="/dashboard">
-            Back to dashboard <ArrowUpRight className="h-4 w-4" />
-          </Link>
-        </Button>
-      </div>
-    );
-  }
-
-  if (desktop === null) {
-    return null;
-  }
-
   const hasMessages = messages.length > 0;
-  const welcomeComposer = !hasMessages;
   const conversationBusy = messages.some(
     (message) => message.role === 'agent' && (message.status === 'running' || message.status === 'paused')
   );
+  const firstUserText = messages.find((message) => message.role === 'user')?.text;
+  const greetingName = user?.name?.split(' ')[0];
 
-  const attachmentChip = attachedFile && (
-    <div className="mb-2 flex w-fit items-center gap-2 rounded-lg border border-xelora-border bg-xelora-surface-2 px-3 py-1.5 text-xs text-xelora-text">
-      <Paperclip className="h-3.5 w-3.5 text-xelora-text-muted" />
-      {attachedFile.name}
-      <button onClick={() => setAttachedFile(null)} className="text-xelora-text-muted hover:text-xelora-text" aria-label="Remove attachment">
-        <X className="h-3.5 w-3.5" />
-      </button>
-    </div>
-  );
-
-  const inputBar = (
-    <div className={`mx-auto w-full ${welcomeComposer ? 'max-w-5xl' : 'max-w-3xl'}`}>
-      {attachmentChip}
-      <div className={`xelora-chat-composer flex items-end gap-2 border border-xelora-border bg-white p-3 shadow-sm ${welcomeComposer ? 'min-h-36 rounded-[28px]' : 'rounded-2xl p-2'}`}>
-        <input ref={fileInputRef} type="file" className="hidden" accept=".xlsx,.xls,.csv,.ods,.tsv" onChange={handleFileSelected} />
-        <Button
-          size="icon"
-          variant="ghost"
-          className="flex-shrink-0 rounded-full text-xelora-text-secondary"
-          onClick={handleAttachClick}
-          disabled={isAttaching}
-          aria-label="Attach a file"
-        >
-          {isAttaching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-        </Button>
+  const composer = (
+    <div className="mx-auto w-full max-w-3xl">
+      <div className="xelora-chat-composer rounded-2xl border border-xelora-border bg-xelora-surface shadow-sm transition-colors">
+        {attachedFile && (
+          <div className="px-3 pt-3">
+            <span className="inline-flex items-center gap-2 rounded-lg border border-xelora-border bg-xelora-surface-2 px-2.5 py-1.5 text-xs text-xelora-text">
+              <FileSpreadsheet className="h-3.5 w-3.5 text-xelora-green" />
+              {attachedFile.name}
+              <button onClick={() => setAttachedFile(null)} className="text-xelora-text-muted hover:text-xelora-text" aria-label="Remove attachment">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </span>
+          </div>
+        )}
         <textarea
           ref={textareaRef}
           value={input}
           onChange={(e) => { setInput(e.target.value); autoGrow(e.target); }}
           onKeyDown={handleKeyDown}
-          placeholder={welcomeComposer ? 'How can Xelora help with your workbook today?' : 'Message Xelora…'}
-          rows={welcomeComposer ? 3 : 1}
-          className={`max-h-[200px] flex-1 resize-none bg-transparent px-2 py-2 text-xelora-text outline-none ring-0 focus:outline-none focus-visible:outline-none focus-visible:ring-0 placeholder:text-xelora-text-muted ${welcomeComposer ? 'min-h-24 text-lg' : 'min-h-[28px] text-sm'}`}
+          placeholder={hasMessages ? 'Reply to Xelora…' : 'Ask a question or describe a spreadsheet task…'}
+          rows={hasMessages ? 1 : 2}
+          aria-label="Message Xelora"
+          className="block max-h-[220px] w-full resize-none bg-transparent px-4 pt-3.5 text-[15px] leading-6 text-xelora-text outline-none placeholder:text-xelora-text-muted"
         />
-        <Button
-          size="icon"
-          onClick={() => sendMessage(input)}
-          disabled={isSending || conversationBusy || !input.trim()}
-          className={`flex-shrink-0 rounded-full ${welcomeComposer ? 'h-11 w-11' : ''}`}
-        >
-          {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
-        </Button>
+        <div className="flex items-center justify-between px-2.5 pb-2.5 pt-1">
+          <input ref={fileInputRef} type="file" className="hidden" accept=".xlsx,.xls,.csv,.ods,.tsv" onChange={handleFileSelected} />
+          <button
+            type="button"
+            onClick={handleAttachClick}
+            disabled={isAttaching}
+            className="flex h-8 items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-xelora-text-secondary transition-colors hover:bg-xelora-surface-2 hover:text-xelora-text disabled:opacity-50"
+            aria-label="Attach a spreadsheet"
+          >
+            {isAttaching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
+            <span className="hidden sm:inline">Attach file</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => sendMessage(input)}
+            disabled={isSending || conversationBusy || !input.trim()}
+            className="flex h-8 w-8 items-center justify-center rounded-lg bg-xelora-text text-xelora-surface transition-opacity hover:opacity-90 disabled:opacity-30"
+            aria-label="Send message"
+          >
+            {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
+          </button>
+        </div>
       </div>
-      <p className="mt-3 text-center text-xs text-xelora-text-muted">
-        Excel is only changed when you explicitly ask for a workbook action.
+      <p className="mt-2 text-center text-xs text-xelora-text-muted">
+        Xelora can make mistakes. Check important results.
       </p>
     </div>
   );
@@ -437,180 +418,219 @@ export default function AgentPage() {
   const floatingModeButton = desktop && (
     <button
       onClick={() => void window.xeloraDesktop?.setFloatingMode(!isFloatingMode)}
-      className="flex items-center gap-1.5 rounded-full border border-xelora-border bg-xelora-surface-2 px-3 py-1.5 text-xs font-medium text-xelora-text-secondary transition-colors hover:border-xelora-green/40 hover:text-xelora-green"
+      className="flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-xelora-text-secondary transition-colors hover:bg-xelora-surface-2 hover:text-xelora-text"
+      title={isFloatingMode ? 'Return to the full window' : 'Keep Xelora in a small window on top of Excel'}
     >
-      {isFloatingMode ? 'Exit Floating Mode' : 'Floating Mode'}
+      {isFloatingMode ? <Maximize2 className="h-3.5 w-3.5" /> : <PictureInPicture2 className="h-3.5 w-3.5" />}
+      {isFloatingMode ? 'Full window' : 'Float over Excel'}
     </button>
   );
   const floatingWindowDragClass = isFloatingMode
     ? '[-webkit-app-region:drag] [&_a]:[-webkit-app-region:no-drag] [&_button]:[-webkit-app-region:no-drag] [&_input]:[-webkit-app-region:no-drag] [&_textarea]:[-webkit-app-region:no-drag] [&_select]:[-webkit-app-region:no-drag]'
     : '';
 
+  const header = (
+    <header className="flex h-12 flex-shrink-0 items-center gap-2 px-4">
+      <button
+        onClick={() => useUIStore.getState().toggleSidebar()}
+        className="flex h-8 w-8 items-center justify-center rounded-lg text-xelora-text-secondary hover:bg-xelora-surface-2 lg:hidden"
+        aria-label="Open navigation"
+      >
+        <Menu className="h-4 w-4" />
+      </button>
+      <p className="min-w-0 truncate text-sm font-medium text-xelora-text">
+        {firstUserText ? firstUserText : ''}
+      </p>
+      <div className="ml-auto flex items-center gap-1.5">
+        {desktop ? <LocalAgentBadge /> : <DesktopConnection />}
+        {floatingModeButton}
+      </div>
+    </header>
+  );
+
   if (!hasMessages) {
     return (
-      <div className={`flex h-full flex-col items-center justify-center gap-8 px-6 pb-20 ${floatingWindowDragClass}`}>
-          <div className="flex w-full max-w-5xl flex-col gap-4 text-left">
-            <XeloraLogo size="lg" showWordmark={false} />
-            <h1 className="max-w-4xl text-4xl font-semibold tracking-[-0.035em] text-xelora-text sm:text-5xl">
-              What can we build together{user?.name ? `, ${user.name.split(' ')[0]}` : ''}?
+      <div className={`flex h-full flex-col ${floatingWindowDragClass}`}>
+        {header}
+        <div className="flex flex-1 flex-col items-center justify-center px-4 pb-24">
+          <div className="w-full max-w-3xl">
+            <h1 className="mb-8 text-center text-3xl font-semibold tracking-tight text-xelora-text">
+              {openingChatId !== null ? 'Opening conversation…' : `What can I help with${greetingName ? `, ${greetingName}` : ''}?`}
             </h1>
+            {composer}
+            <div className="mt-6 grid gap-2 sm:grid-cols-2">
+              {QUICK_ACTIONS.map((action) => (
+                <button
+                  key={action.label}
+                  onClick={() => { setInput(action.instruction); textareaRef.current?.focus(); }}
+                  className="flex items-center gap-3 rounded-xl border border-xelora-border px-4 py-3 text-left text-sm text-xelora-text-secondary transition-colors hover:border-xelora-border-strong hover:bg-xelora-surface-2 hover:text-xelora-text"
+                >
+                  <action.icon className="h-4 w-4 shrink-0 text-xelora-text-muted" strokeWidth={1.75} />
+                  {action.label}
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="flex w-full max-w-5xl items-center justify-end gap-2">
-            {desktop && <LocalAgentBadge />}
-            {floatingModeButton}
-          </div>
-          {inputBar}
-          <div className="flex w-full max-w-5xl flex-wrap gap-2">
-            {QUICK_ACTIONS.map((action) => (
-              <button
-                key={action.label}
-                onClick={() => setInput(action.instruction)}
-                className="rounded-lg border border-xelora-border bg-white px-4 py-2.5 text-sm font-medium text-xelora-text-secondary transition-colors hover:border-xelora-green/40 hover:bg-xelora-success-bg hover:text-xelora-green"
-              >
-                {action.label}
-              </button>
-            ))}
-          </div>
+        </div>
       </div>
     );
   }
 
   return (
     <div className={`flex h-full flex-col ${floatingWindowDragClass}`}>
-        <header className="flex h-14 flex-shrink-0 items-center gap-3 border-b border-xelora-border px-5">
-          <div className="flex items-center gap-2 text-sm font-medium text-xelora-text"><Sparkles className="h-4 w-4 text-xelora-green" /> Xelora</div>
-          <span className="ml-2 text-sm text-xelora-text-muted">
-            {currentTaskId !== null ? `Conversation #${currentTaskId}` : 'New task'}
-          </span>
-          <div className="ml-auto flex items-center gap-2">
-            {desktop && <LocalAgentBadge />}
-            {floatingModeButton}
-          </div>
-        </header>
-        <div className="flex-1 overflow-y-auto px-4 py-8">
-          <div className="mx-auto flex max-w-3xl flex-col gap-7">
-            {messages.map((msg) =>
-              msg.role === 'user' ? (
-                <div key={msg.id} className="flex justify-end gap-3">
-                  <div className="max-w-[85%] space-y-1.5">
-                    {msg.attachment && (
-                      <div className="ml-auto flex w-fit items-center gap-1.5 rounded-lg bg-white/15 px-2.5 py-1 text-xs text-white">
-                        <Paperclip className="h-3 w-3" /> {msg.attachment}
-                      </div>
-                    )}
-                    <div className="rounded-2xl rounded-tr-sm bg-xelora-green px-4 py-2.5 text-sm text-white">
-                      {msg.text}
-                    </div>
-                  </div>
-                  <div className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-xelora-surface-2">
-                    <User className="h-4 w-4 text-xelora-text-secondary" />
-                  </div>
+      {header}
+      <div className="flex-1 overflow-y-auto px-4">
+        <div className="mx-auto flex max-w-3xl flex-col gap-8 pb-10 pt-6">
+          {messages.map((msg) =>
+            msg.role === 'user' ? (
+              <div key={msg.id} className="flex flex-col items-end gap-1.5">
+                {msg.attachment && (
+                  <span className="inline-flex items-center gap-1.5 rounded-lg border border-xelora-border px-2.5 py-1 text-xs text-xelora-text-secondary">
+                    <FileSpreadsheet className="h-3.5 w-3.5 text-xelora-green" /> {msg.attachment}
+                  </span>
+                )}
+                <div className="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl bg-xelora-surface-2 px-4 py-2.5 text-[15px] leading-7 text-xelora-text">
+                  {msg.text}
                 </div>
-              ) : (
-                <div key={msg.id} className="flex gap-3">
-                  <div className="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-xelora-success-bg">
-                    <Bot className="h-4 w-4 text-xelora-green" />
-                  </div>
-                  <div className="max-w-[85%] flex-1 space-y-2">
-                    {msg.status === 'error' ? (
-                      <div className="flex items-start gap-2 rounded-2xl rounded-tl-sm border border-xelora-error/30 bg-xelora-error-bg px-4 py-3 text-sm">
-                        <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-xelora-error" />
-                        <div>
-                          <p className="text-xelora-text">{msg.error}</p>
-                          <Link href="/dashboard/billing/plans" className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-xelora-green hover:underline">
-                            Upgrade plan <ArrowUpRight className="h-3 w-3" />
-                          </Link>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="rounded-2xl rounded-tl-sm bg-xelora-surface-2 px-4 py-3 text-sm">
-                        {msg.steps.length === 0 && !msg.currentTask && msg.status === 'running' ? (
-                          <p className="flex items-center gap-2 text-xelora-text-muted">
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" /> Thinking…
-                          </p>
-                        ) : (
-                          <ul className="space-y-1.5">
-                            {msg.steps.map((step, i) => (
-                              <li key={i} className="flex items-center gap-2 text-xelora-text">
-                                <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-xelora-green" />
-                                {step}
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                        {msg.status === 'running' && msg.currentTask && (
-                          <p className={`mt-2 flex items-center gap-2 text-xs ${
-                            msg.currentTask.startsWith('Recovering safely:') || msg.currentTask.startsWith('Recovery stopped:')
-                              ? 'text-xelora-warning'
-                              : 'text-xelora-text-muted'
-                          }`}>
-                            <Loader2 className="h-3 w-3 animate-spin" /> {msg.currentTask}
-                          </p>
-                        )}
-                        {msg.status === 'done' && (
-                          <>
-                            {msg.response && (
-                              <p className={`${msg.kind === 'chat' ? '' : 'mt-3 '}whitespace-pre-wrap text-xelora-text`}>{msg.response}</p>
-                            )}
-                            {msg.sources && msg.sources.length > 0 && (
-                              <ol className="mt-3 space-y-1 border-t border-xelora-border pt-2 text-xs text-xelora-text-muted">
-                                {msg.sources.map((source) => (
-                                  <li key={source.n} className="flex gap-1.5">
-                                    <span className="flex-shrink-0">[{source.n}]</span>
-                                    <a
-                                      href={source.url}
-                                      target="_blank"
-                                      rel="noopener noreferrer nofollow"
-                                      className="truncate text-xelora-green hover:underline"
-                                      title={source.url}
-                                    >
-                                      {source.title}
-                                    </a>
-                                  </li>
-                                ))}
-                              </ol>
-                            )}
-                            {msg.kind !== 'chat' && <p className={`mt-2 text-xs font-medium ${
-                              msg.completionStatus === 'completed'
-                                ? 'text-xelora-success'
-                                : msg.completionStatus === 'awaiting_approval'
-                                  ? 'text-xelora-warning'
-                                  : 'text-xelora-error'
-                            }`}>
-                              {msg.completionStatus === 'completed'
-                                ? 'Completed and verified.'
-                                : msg.completionStatus === 'awaiting_approval'
-                                  ? 'Plan ready — reply Confirm to apply it.'
-                                  : msg.completionStatus === 'completed_with_warnings'
-                                    ? 'Completed with warnings — review the result before relying on it.'
-                                    : msg.completionStatus === 'failed'
-                                      ? 'Not completed — no unverified work is marked as done.'
-                                      : 'Task finished.'}
-                            </p>}
-                          </>
-                        )}
-                        {msg.status === 'paused' && (
-                          <p className="mt-2 text-xs font-medium text-xelora-warning">Paused.</p>
-                        )}
-                      </div>
-                    )}
-                    {msg.taskId > 0 && (msg.status === 'running' || msg.status === 'paused') && (
-                      <Button size="sm" variant="outline" onClick={() => handlePauseResume(msg)}>
-                        {msg.status === 'running' ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-                        {msg.status === 'running' ? 'Pause' : 'Resume'}
-                      </Button>
-                    )}
-                  </div>
-                </div>
-              )
-            )}
-            <div ref={bottomRef} />
-          </div>
+              </div>
+            ) : (
+              <AgentReply key={msg.id} msg={msg} onPauseResume={() => void handlePauseResume(msg)} />
+            )
+          )}
+          <div ref={bottomRef} />
         </div>
-
-        <div className="border-t border-xelora-border bg-[#fcfcfb] p-4">
-          {inputBar}
-        </div>
+      </div>
+      <div className="px-4 pb-4">{composer}</div>
     </div>
+  );
+}
+
+const STATUS_LINES: Record<string, { icon: typeof CircleCheck; text: string; tone: string }> = {
+  completed: { icon: CircleCheck, text: 'Done and verified in Excel', tone: 'text-xelora-green' },
+  completed_with_warnings: { icon: TriangleAlert, text: 'Done with warnings. Review the result before relying on it.', tone: 'text-xelora-warning' },
+  awaiting_approval: { icon: ListChecks, text: 'Plan ready. Reply “Confirm” to apply it, or tell me what to change.', tone: 'text-xelora-text-secondary' },
+  failed: { icon: CircleAlert, text: 'Not completed. Nothing unverified was marked as done.', tone: 'text-xelora-error' },
+};
+
+function AgentReply({ msg, onPauseResume }: { msg: Extract<ChatMessage, { role: 'agent' }>; onPauseResume: () => void }) {
+  const [stepsOpen, setStepsOpen] = useState(false);
+  const running = msg.status === 'running';
+  const hasSteps = msg.steps.length > 0;
+  const status = msg.status === 'done' && msg.kind !== 'chat' ? STATUS_LINES[msg.completionStatus ?? ''] : undefined;
+  const limitError = msg.status === 'error' && /limit|plan|upgrade|quota/i.test(msg.error ?? '');
+
+  return (
+    <div className="flex gap-3">
+      <XeloraLogo size="sm" showWordmark={false} className="mt-1 h-6 w-6 shrink-0" />
+      <div className="min-w-0 flex-1 space-y-3">
+        {msg.status === 'error' ? (
+          <div className="flex items-start gap-2 rounded-xl border border-xelora-error/20 bg-xelora-error-bg px-4 py-3 text-sm text-xelora-text">
+            <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-xelora-error" />
+            <div>
+              <p>{msg.error}</p>
+              {limitError && (
+                <Link href="/dashboard/billing/plans" className="mt-1 inline-block text-xs font-medium text-xelora-green hover:underline">
+                  View plans
+                </Link>
+              )}
+            </div>
+          </div>
+        ) : (
+          <>
+            {(hasSteps || (running && msg.currentTask)) && (
+              <div className="rounded-xl border border-xelora-border">
+                <button
+                  type="button"
+                  onClick={() => setStepsOpen((open) => !open)}
+                  className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-sm text-xelora-text-secondary"
+                  aria-expanded={stepsOpen || running}
+                >
+                  {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Table2 className="h-4 w-4" strokeWidth={1.75} />}
+                  <span className="min-w-0 flex-1 truncate">
+                    {running ? (msg.currentTask || 'Working in Excel…') : `Worked in Excel · ${msg.steps.length} ${msg.steps.length === 1 ? 'step' : 'steps'}`}
+                  </span>
+                  {hasSteps && <ChevronDown className={`h-4 w-4 transition-transform ${stepsOpen || running ? 'rotate-180' : ''}`} />}
+                </button>
+                {hasSteps && (stepsOpen || running) && (
+                  <ol className="space-y-1.5 border-t border-xelora-border px-3.5 py-3">
+                    {msg.steps.map((step, index) => (
+                      <li key={index} className="flex items-start gap-2 text-sm text-xelora-text-secondary">
+                        <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-xelora-green" /> {step}
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </div>
+            )}
+            {running && !hasSteps && !msg.currentTask && (
+              <p className="flex items-center gap-2 text-sm text-xelora-text-muted"><Loader2 className="h-4 w-4 animate-spin" /> Thinking…</p>
+            )}
+            {msg.status === 'done' && msg.response && <Markdown text={msg.response} sources={msg.sources ?? []} />}
+            {msg.sources && msg.sources.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {msg.sources.map((source) => (
+                  <a
+                    key={source.n}
+                    href={source.url}
+                    target="_blank"
+                    rel="noopener noreferrer nofollow"
+                    title={source.url}
+                    className="flex max-w-[260px] items-center gap-1.5 rounded-lg border border-xelora-border px-2.5 py-1.5 text-xs text-xelora-text-secondary transition-colors hover:border-xelora-border-strong hover:text-xelora-text"
+                  >
+                    <span className="font-medium text-xelora-text-muted">{source.n}</span>
+                    <span className="truncate">{source.title || new URL(source.url).hostname}</span>
+                  </a>
+                ))}
+              </div>
+            )}
+            {status && (
+              <p className={`flex items-center gap-1.5 text-xs font-medium ${status.tone}`}>
+                <status.icon className="h-3.5 w-3.5" /> {status.text}
+              </p>
+            )}
+            {msg.status === 'paused' && <p className="text-xs font-medium text-xelora-warning">Paused</p>}
+          </>
+        )}
+        {msg.taskId > 0 && (msg.status === 'running' || msg.status === 'paused') && (
+          <button
+            type="button"
+            onClick={onPauseResume}
+            className="flex h-7 items-center gap-1.5 rounded-lg border border-xelora-border px-2.5 text-xs font-medium text-xelora-text-secondary hover:bg-xelora-surface-2 hover:text-xelora-text"
+          >
+            {msg.status === 'running' ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3" />}
+            {msg.status === 'running' ? 'Pause' : 'Resume'}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** For the web app: whether Xelora Desktop is online to run Excel tasks. */
+function DesktopConnection() {
+  const [online, setOnline] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const check = () => fetch('/api/agent-link/status', { cache: 'no-store' })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => { if (!cancelled) setOnline(data ? Boolean(data.online) : null); })
+      .catch(() => undefined);
+    void check();
+    const timer = window.setInterval(check, 30000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
+  if (online === null) return null;
+  return online ? (
+    <span className="flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs text-xelora-text-secondary" title="Excel tasks will run on your PC">
+      <span className="h-1.5 w-1.5 rounded-full bg-xelora-green" /> Desktop connected
+    </span>
+  ) : (
+    <Link
+      href="/download"
+      className="flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs text-xelora-text-secondary hover:bg-xelora-surface-2 hover:text-xelora-text"
+      title="Excel tasks run in Xelora Desktop on your Windows PC"
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-xelora-text-muted" /> Desktop offline
+    </Link>
   );
 }

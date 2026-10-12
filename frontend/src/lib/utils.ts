@@ -5,17 +5,28 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+/**
+ * Parse an API timestamp. The backend stores UTC without an offset
+ * ("2026-10-12T09:30:00"); JavaScript would read that as local time, so a
+ * missing offset is treated as UTC.
+ */
+export function parseApiDate(dateString: string): Date {
+  const hasZone = /([zZ]|[+-]\d{2}:?\d{2})$/.test(dateString);
+  const isDateTime = /^\d{4}-\d{2}-\d{2}T/.test(dateString);
+  return new Date(isDateTime && !hasZone ? `${dateString}Z` : dateString);
+}
+
 export function formatDate(dateString: string): string {
   return new Intl.DateTimeFormat('en-GB', {
     day: 'numeric',
     month: 'short',
     year: 'numeric',
-  }).format(new Date(dateString));
+  }).format(parseApiDate(dateString));
 }
 
 export function formatRelativeTime(dateString: string): string {
   const now = new Date();
-  const date = new Date(dateString);
+  const date = parseApiDate(dateString);
   const diffMs = now.getTime() - date.getTime();
   const diffSeconds = Math.floor(diffMs / 1000);
   const diffMinutes = Math.floor(diffSeconds / 60);

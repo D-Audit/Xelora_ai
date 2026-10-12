@@ -1,45 +1,51 @@
 'use client';
 
-import { MailCheck, RefreshCcw } from 'lucide-react';
-import { toast } from 'sonner';
+import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { DashboardPageHeader } from '@/components/dashboard/page-header';
-import { Card } from '@/components/ui/card';
+import { StatePanel } from '@/components/site/state-panel';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { mockTeamMembers } from '@/data/mock-team';
+import { getTeamMembers, type TeamMemberItem } from '@/services/workspace';
+import { formatRelativeTime } from '@/lib/utils';
 
 export default function TeamInvitationsPage() {
-  const pending = mockTeamMembers.filter((member) => member.status === 'invited');
+  const [pending, setPending] = useState<TeamMemberItem[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getTeamMembers()
+      .then((members) => setPending(members.filter((member) => member.status === 'invited')))
+      .catch((err) => setError(err instanceof Error ? err.message : 'Could not load invitations.'));
+  }, []);
+
   return (
-    <div className="space-y-6">
+    <div className="mx-auto max-w-3xl space-y-6">
       <DashboardPageHeader
-        eyebrow="Team"
         title="Pending invitations"
-        description="Track outstanding invites and resend them when needed."
+        description="People you have invited who have not joined yet."
+        actions={<Button variant="outline" asChild><Link href="/dashboard/team">Back to team</Link></Button>}
       />
-      <div className="space-y-4">
-        {pending.map((member) => (
-          <Card key={member.id} className="flex items-center justify-between gap-3 p-5">
-            <div>
-              <p className="text-sm font-semibold text-xelora-text">{member.email}</p>
-              <p className="text-sm text-xelora-text-secondary">{member.role}</p>
-            </div>
-            <div className="flex items-center gap-2">
-              <Badge variant="warning">Pending</Badge>
-              <Button variant="outline" size="sm" onClick={() => toast.success(`Invitation resent to ${member.email}.`)}>
-                <RefreshCcw className="h-4 w-4" />
-                Resend
-              </Button>
-            </div>
-          </Card>
-        ))}
-        {pending.length === 0 ? (
-          <Card className="p-6 text-center">
-            <MailCheck className="mx-auto h-8 w-8 text-xelora-green" />
-            <p className="mt-3 text-sm text-xelora-text-secondary">No pending invitations.</p>
-          </Card>
-        ) : null}
-      </div>
+      {error ? (
+        <StatePanel kind="error" title="Could not load invitations" description={error} />
+      ) : pending === null ? (
+        <StatePanel kind="loading" title="Loading invitations" description="" />
+      ) : pending.length === 0 ? (
+        <StatePanel kind="empty" title="No pending invitations" description="Invite people from the Team page." />
+      ) : (
+        <ul className="divide-y divide-xelora-border rounded-xl border border-xelora-border bg-xelora-surface">
+          {pending.map((member) => (
+            <li key={member.id} className="flex items-center justify-between gap-3 px-4 py-3.5">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium text-xelora-text">{member.email}</p>
+                <p className="text-xs capitalize text-xelora-text-secondary">{member.role}</p>
+              </div>
+              <span className="shrink-0 text-xs text-xelora-text-muted">
+                Invited {member.invitedAt ? formatRelativeTime(member.invitedAt) : ''}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

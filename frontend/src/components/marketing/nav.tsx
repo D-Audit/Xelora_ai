@@ -8,12 +8,10 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
 const navLinks = [
-  { label: 'Product', href: '/features' },
-  { label: 'Solutions', href: '/solutions' },
-  { label: 'How It Works', href: '/how-it-works' },
+  { label: 'Product', href: '/#product' },
+  { label: 'How it works', href: '/#how-it-works' },
   { label: 'Pricing', href: '/pricing' },
   { label: 'Security', href: '/security' },
-  { label: 'Resources', href: '/resources' },
   { label: 'Download', href: '/download' },
 ];
 
@@ -43,8 +41,8 @@ export function MarketingNav() {
     <>
       <header
         className={cn(
-          'sticky top-0 z-50 w-full bg-white border-b border-xelora-border transition-all duration-150',
-          scrolled && 'shadow-sm'
+          'sticky top-0 z-50 w-full border-b transition-colors duration-150',
+          scrolled ? 'border-xelora-border bg-white/90 backdrop-blur' : 'border-transparent bg-white'
         )}
       >
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
@@ -58,7 +56,7 @@ export function MarketingNav() {
                 <Link
                   key={link.href}
                   href={link.href}
-                  className="px-3 py-2 rounded-md text-sm font-medium text-xelora-text-secondary hover:text-xelora-text hover:bg-xelora-surface-2 transition-all duration-150"
+                  className="rounded-md px-3 py-2 text-sm text-xelora-text-secondary transition-colors duration-150 hover:text-xelora-text"
                 >
                   {link.label}
                 </Link>
@@ -67,10 +65,10 @@ export function MarketingNav() {
 
             <div className="hidden lg:flex items-center gap-2 flex-shrink-0">
               <Button variant="ghost" size="sm" asChild>
-                <Link href="/login">Sign In</Link>
+                <Link href="/login">Sign in</Link>
               </Button>
-              <Button variant="bright" size="sm" asChild>
-                <Link href="/register">Start Free Trial</Link>
+              <Button size="sm" asChild>
+                <Link href="/register">Get started</Link>
               </Button>
             </div>
 
@@ -146,12 +144,12 @@ export function MarketingNav() {
           <div className="flex-shrink-0 border-t border-xelora-border px-4 py-4 flex flex-col gap-2">
             <Button variant="outline" size="default" className="w-full" asChild>
               <Link href="/login" onClick={() => setMobileOpen(false)}>
-                Sign In
+                Sign in
               </Link>
             </Button>
-            <Button variant="bright" size="default" className="w-full" asChild>
+            <Button size="default" className="w-full" asChild>
               <Link href="/register" onClick={() => setMobileOpen(false)}>
-                Start Free Trial
+                Get started
               </Link>
             </Button>
           </div>

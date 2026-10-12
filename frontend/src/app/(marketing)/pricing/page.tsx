@@ -1,268 +1,157 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import Link from 'next/link';
-import { Check, Minus, ArrowRight } from 'lucide-react';
-import { toast } from 'sonner';
+import { Check } from 'lucide-react';
 import { MarketingNav } from '@/components/marketing/nav';
 import { MarketingFooter } from '@/components/marketing/footer';
-import { SectionHeading } from '@/components/site/section-heading';
-import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { mockPlans } from '@/data/mock-plans';
-import { formatCurrency } from '@/lib/utils';
+import { planHighlights, plans } from '@/data/plans';
+import { site } from '@/lib/site';
+import { cn } from '@/lib/utils';
+import type { Plan } from '@/types';
 
-const comparisonRows = [
-  { label: 'AI actions per month', trial: '30', starter: '300', professional: '1,500', business: 'Custom' },
-  { label: 'Workflow runs per month', trial: '5', starter: '50', professional: '300', business: 'Custom' },
-  { label: 'Maximum file size', trial: '5 MB', starter: '25 MB', professional: '100 MB', business: 'Custom' },
-  { label: 'Saved workflows', trial: '2', starter: '10', professional: 'Unlimited', business: 'Unlimited' },
-  { label: 'Cloud storage', trial: 'None', starter: '2 GB', professional: '20 GB', business: 'Custom' },
-  { label: 'Devices', trial: '1', starter: '2', professional: '3', business: 'Managed' },
-  { label: 'Batch processing', trial: false, starter: false, professional: true, business: true },
-  { label: 'API access', trial: false, starter: false, professional: false, business: true },
-  { label: 'Role permissions', trial: false, starter: false, professional: false, business: true },
-  { label: 'Audit history', trial: false, starter: false, professional: false, business: true },
+type Limits = Plan['limits'];
+
+function amount(value: number | string, suffix = '') {
+  if (value === 'custom') return 'Custom';
+  return `${Number(value).toLocaleString()}${suffix}`;
+}
+
+const rows: { label: string; value: (limits: Limits) => string }[] = [
+  { label: 'AI actions per month', value: (l) => amount(l.aiActionsPerMonth) },
+  { label: 'Workflow runs per month', value: (l) => amount(l.workflowRunsPerMonth) },
+  { label: 'Maximum file size', value: (l) => amount(l.maxFileSizeMB, ' MB') },
+  { label: 'Saved workflows', value: (l) => amount(l.savedWorkflows) },
+  { label: 'File storage', value: (l) => (l.cloudStorageGB === 0 ? '—' : amount(l.cloudStorageGB, ' GB')) },
+  { label: 'Connected devices', value: (l) => amount(l.devices) },
+  { label: 'History kept', value: (l) => amount(l.historyDays, ' days') },
+  { label: 'Team members', value: (l) => amount(l.teamMembers) },
+  { label: 'Priority support', value: (l) => (l.prioritySupport ? 'Included' : '—') },
 ];
 
-const pricingFaqs = [
-  {
-    q: 'Can I change plans later?',
-    a: 'Yes. You can upgrade, downgrade, or switch billing cycles from the billing section in the dashboard.',
-  },
-  {
-    q: 'Do I need to pay for the desktop app separately?',
-    a: 'No. Xelora Desktop is included with every plan. The difference is the amount of usage and team features included.',
-  },
-  {
-    q: 'What happens when I hit a limit?',
-    a: 'The app explains which limit was reached and what you can do next, such as waiting for a reset or upgrading the plan.',
-  },
+const included = [
+  'Xelora Desktop for Windows',
+  'Chat with web search and sources',
+  'Plans and confirmation before big changes',
+  'Verified results',
+  'File version history',
+  'Workflow templates',
+];
+
+const faqs = [
+  { q: 'Can I change plans later?', a: 'Yes. Upgrade, downgrade or cancel from Billing in the app. Changes apply from your next billing period.' },
+  { q: 'What counts as an AI action?', a: 'Each new task you start in Xelora counts as one AI action. Quick answers and follow-ups in the same conversation do not count. Usage is shown in the app and resets every billing period.' },
+  { q: 'Is the desktop app extra?', a: 'No. Xelora Desktop is included in every plan.' },
+  { q: 'What happens if I reach a limit?', a: 'Xelora tells you which limit was reached. You can wait for the next period or upgrade straight away.' },
 ];
 
 export default function PricingPage() {
-  const [billingCycle, setBillingCycle] = useState<'monthly' | 'annual'>('monthly');
-  const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
-
-  const plans = useMemo(
-    () =>
-      mockPlans.map((plan) => ({
-        ...plan,
-        price: billingCycle === 'annual' ? plan.annualPrice : plan.monthlyPrice,
-      })),
-    [billingCycle]
-  );
-
-  const handleCheckout = async () => {
-    await new Promise((resolve) => setTimeout(resolve, 900));
-    toast.success('Mock checkout completed. No payment was taken.');
-    setSelectedPlan(null);
-  };
+  const [annual, setAnnual] = useState(false);
 
   return (
     <>
       <MarketingNav />
-      <main className="bg-xelora-bg-main">
-        <section className="border-b border-xelora-border bg-white">
-          <div className="mx-auto max-w-7xl px-4 py-16 sm:px-6 lg:px-8">
-            <SectionHeading
-              eyebrow="Pricing"
-              title="Choose a plan that matches how much spreadsheet work you want to automate"
-              description="Start with the trial, then move into the plan that fits your file sizes, usage, and team needs."
-              align="center"
-            />
-            <div className="mt-8 flex justify-center gap-2 rounded-lg border border-xelora-border bg-xelora-surface-2 p-1">
+      <main className="bg-white">
+        <section className="mx-auto max-w-6xl px-4 pb-12 pt-20 text-center sm:px-6 lg:px-8">
+          <p className="text-sm font-medium text-xelora-green">Pricing</p>
+          <h1 className="mt-2 text-4xl font-semibold tracking-tight text-xelora-text sm:text-5xl">Simple plans that grow with you</h1>
+          <p className="mx-auto mt-5 max-w-xl text-lg text-xelora-text-secondary">
+            Every account starts with a {site.trialDays}-day free trial. No credit card required.
+          </p>
+          <div className="mt-8 inline-flex rounded-lg border border-xelora-border bg-xelora-surface-2 p-1" role="group" aria-label="Billing period">
+            {[false, true].map((option) => (
               <button
+                key={String(option)}
                 type="button"
-                onClick={() => setBillingCycle('monthly')}
-                className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
-                  billingCycle === 'monthly' ? 'bg-white text-xelora-text shadow-sm' : 'text-xelora-text-secondary'
-                }`}
+                onClick={() => setAnnual(option)}
+                aria-pressed={annual === option}
+                className={cn(
+                  'rounded-md px-4 py-1.5 text-sm font-medium transition-colors',
+                  annual === option ? 'bg-white text-xelora-text shadow-sm' : 'text-xelora-text-secondary hover:text-xelora-text',
+                )}
               >
-                Monthly
+                {option ? 'Yearly · save up to 25%' : 'Monthly'}
               </button>
-              <button
-                type="button"
-                onClick={() => setBillingCycle('annual')}
-                className={`rounded-md px-4 py-2 text-sm font-medium transition-colors ${
-                  billingCycle === 'annual' ? 'bg-white text-xelora-text shadow-sm' : 'text-xelora-text-secondary'
-                }`}
-              >
-                Annual
-                <Badge variant="success" className="ml-2 text-[10px]">
-                  Save 20%
-                </Badge>
-              </button>
-            </div>
-          </div>
-        </section>
-
-        <section className="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
-          <div className="grid gap-4 lg:grid-cols-4">
-            {plans.map((plan) => (
-              <Card key={plan.id} className={`relative p-5 ${plan.isPopular ? 'border-xelora-green ring-1 ring-xelora-green' : ''}`}>
-                {plan.isPopular ? (
-                  <Badge variant="green" className="absolute -top-3 left-1/2 -translate-x-1/2">
-                    Most popular
-                  </Badge>
-                ) : null}
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <h2 className="text-base font-semibold text-xelora-text">{plan.name}</h2>
-                    <p className="mt-1 text-sm text-xelora-text-secondary">{plan.description}</p>
-                  </div>
-                  <Badge variant={plan.tier === 'trial' ? 'info' : 'outline'}>{plan.tier}</Badge>
-                </div>
-                <div className="mt-5">
-                  {plan.price === null ? (
-                    <p className="text-3xl font-semibold text-xelora-text">Custom</p>
-                  ) : plan.price === 0 ? (
-                    <div>
-                      <p className="text-3xl font-semibold text-xelora-text">Free</p>
-                      <p className="text-sm text-xelora-text-muted">14-day trial</p>
-                    </div>
-                  ) : (
-                    <div>
-                      <p className="text-3xl font-semibold text-xelora-text">
-                        {formatCurrency(plan.price * (billingCycle === 'annual' ? 10 : 1))}
-                      </p>
-                      <p className="text-sm text-xelora-text-muted">
-                        {billingCycle === 'annual' ? 'billed annually' : 'per month'}
-                      </p>
-                    </div>
-                  )}
-                </div>
-                <ul className="mt-5 space-y-2 text-sm text-xelora-text-secondary">
-                  <li>{plan.limits.aiActionsPerMonth} AI actions</li>
-                  <li>{plan.limits.workflowRunsPerMonth} workflow runs</li>
-                  <li>{plan.limits.maxFileSizeMB} MB max file</li>
-                  <li>{plan.limits.devices} device{plan.limits.devices === 1 ? '' : 's'}</li>
-                </ul>
-                <div className="mt-6">
-                  <Button
-                    className="w-full"
-                    variant={plan.isPopular ? 'bright' : 'outline'}
-                    onClick={() => setSelectedPlan(plan.name)}
-                  >
-                    {plan.tier === 'trial' ? 'Start free trial' : `Choose ${plan.name}`}
-                  </Button>
-                </div>
-              </Card>
             ))}
           </div>
         </section>
 
-        <section className="border-y border-xelora-border bg-white">
-          <div className="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
-            <SectionHeading
-              eyebrow="Plan comparison"
-              title="See the main limits and features side by side"
-              description="The table below is intentionally readable on desktop and scrollable on smaller screens."
-            />
-            <div className="mt-8 overflow-x-auto rounded-xl border border-xelora-border">
-              <table className="w-full text-sm">
-                <thead className="bg-xelora-surface-2">
-                  <tr className="border-b border-xelora-border">
-                    <th className="px-5 py-3 text-left font-medium text-xelora-text-secondary">Feature</th>
-                    {['Trial', 'Starter', 'Professional', 'Business'].map((heading) => (
-                      <th key={heading} className="px-4 py-3 text-center font-medium text-xelora-text">
-                        {heading}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-xelora-border bg-white">
-                  {comparisonRows.map((row) => (
-                    <tr key={row.label}>
-                      <td className="px-5 py-3 text-xelora-text-secondary">{row.label}</td>
-                      {(['trial', 'starter', 'professional', 'business'] as const).map((tier) => (
-                        <td key={tier} className="px-4 py-3 text-center">
-                          {typeof row[tier] === 'boolean' ? (
-                            row[tier] ? (
-                              <Check className="mx-auto h-4 w-4 text-xelora-success" />
-                            ) : (
-                              <Minus className="mx-auto h-4 w-4 text-xelora-border-strong" />
-                            )
-                          ) : (
-                            <span className="font-medium text-xelora-text">{row[tier]}</span>
-                          )}
-                        </td>
-                      ))}
-                    </tr>
+        <section className="mx-auto grid max-w-6xl gap-4 px-4 sm:px-6 md:grid-cols-2 lg:grid-cols-4 lg:px-8">
+          {plans.map((plan) => {
+            const featured = plan.tier === 'professional';
+            const price = annual ? plan.annualPrice : plan.monthlyPrice;
+            return (
+              <div key={plan.tier} className={cn('flex flex-col rounded-2xl border p-6', featured ? 'border-xelora-green ring-1 ring-xelora-green' : 'border-xelora-border')}>
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold text-xelora-text">{plan.name}</h2>
+                  {featured && <span className="rounded-full bg-xelora-success-bg px-2 py-0.5 text-[11px] font-medium text-xelora-green">Most popular</span>}
+                </div>
+                <p className="mt-4 text-4xl font-semibold tracking-tight text-xelora-text">
+                  {price === null ? 'Custom' : price === 0 ? 'Free' : `$${price}`}
+                </p>
+                <p className="mt-1 h-5 text-xs text-xelora-text-muted">
+                  {price ? `per month${annual ? ', billed yearly' : ''}` : plan.tier === 'trial' ? `for ${site.trialDays} days` : ''}
+                </p>
+                <p className="mt-4 min-h-10 text-sm text-xelora-text-secondary">{plan.description}</p>
+                <Button className="mt-6 w-full" variant={featured ? 'default' : 'outline'} asChild>
+                  <Link href={plan.tier === 'business' ? '/contact' : '/register'}>
+                    {plan.tier === 'business' ? 'Contact us' : plan.tier === 'trial' ? 'Start free trial' : `Choose ${plan.name}`}
+                  </Link>
+                </Button>
+                <ul className="mt-6 space-y-2 border-t border-xelora-border pt-6 text-sm text-xelora-text-secondary">
+                  {planHighlights(plan).map((item) => (
+                    <li key={item} className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-xelora-green" />{item}</li>
                   ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </section>
-
-        <section className="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
-          <div className="grid gap-4 lg:grid-cols-[1fr_.8fr]">
-            <Card className="p-5">
-              <h2 className="text-base font-semibold text-xelora-text">Additional usage explanation</h2>
-              <p className="mt-2 text-sm text-xelora-text-secondary">
-                If you need more AI actions, workflow runs, or storage, the dashboard explains what was consumed and when the next reset occurs. Business plans can extend limits and add managed workspaces.
-              </p>
-              <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                <div className="rounded-lg border border-xelora-border bg-xelora-surface-2 p-4">
-                  <p className="text-xs font-medium uppercase tracking-wide text-xelora-text-muted">Free trial</p>
-                  <p className="mt-1 text-sm text-xelora-text-secondary">14 days, 30 AI actions, 5 workflow runs.</p>
-                </div>
-                <div className="rounded-lg border border-xelora-border bg-xelora-surface-2 p-4">
-                  <p className="text-xs font-medium uppercase tracking-wide text-xelora-text-muted">Upgrade path</p>
-                  <p className="mt-1 text-sm text-xelora-text-secondary">Upgrade in the billing area without reinstalling anything.</p>
-                </div>
+                </ul>
               </div>
-            </Card>
+            );
+          })}
+        </section>
 
-            <Card className="p-5">
-              <h2 className="text-base font-semibold text-xelora-text">Contact sales</h2>
-              <p className="mt-2 text-sm text-xelora-text-secondary">
-                Need a larger rollout, custom retention, or managed devices? The Business plan is built for that.
-              </p>
-              <Button className="mt-4 w-full" asChild>
-                <Link href="/contact">
-                  Contact Sales <ArrowRight className="h-4 w-4" />
-                </Link>
-              </Button>
-            </Card>
+        <section className="mx-auto max-w-6xl px-4 py-20 sm:px-6 lg:px-8">
+          <h2 className="text-2xl font-semibold tracking-tight text-xelora-text">Compare plans</h2>
+          <div className="mt-8 overflow-x-auto rounded-2xl border border-xelora-border">
+            <table className="w-full min-w-[640px] text-left text-sm">
+              <thead className="bg-xelora-bg-main">
+                <tr>
+                  <th scope="col" className="px-5 py-3 font-medium text-xelora-text-secondary">Limits</th>
+                  {plans.map((plan) => <th key={plan.tier} scope="col" className="px-5 py-3 font-semibold text-xelora-text">{plan.name}</th>)}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-xelora-border">
+                {rows.map((row) => (
+                  <tr key={row.label}>
+                    <th scope="row" className="px-5 py-3 font-normal text-xelora-text-secondary">{row.label}</th>
+                    {plans.map((plan) => <td key={plan.tier} className="px-5 py-3 tabular-nums text-xelora-text">{row.value(plan.limits)}</td>)}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="mt-8 rounded-2xl border border-xelora-border p-6">
+            <h3 className="text-sm font-semibold text-xelora-text">Included in every plan</h3>
+            <ul className="mt-4 grid gap-2 text-sm text-xelora-text-secondary sm:grid-cols-2 lg:grid-cols-3">
+              {included.map((item) => <li key={item} className="flex gap-2"><Check className="mt-0.5 h-4 w-4 shrink-0 text-xelora-green" />{item}</li>)}
+            </ul>
           </div>
         </section>
 
-        <section className="border-t border-xelora-border bg-white">
-          <div className="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
-            <SectionHeading eyebrow="FAQ" title="Pricing questions, answered simply" />
-            <div className="mt-6 grid gap-4 lg:grid-cols-3">
-              {pricingFaqs.map((faq) => (
-                <Card key={faq.q} className="p-5">
-                  <h3 className="text-sm font-semibold text-xelora-text">{faq.q}</h3>
-                  <p className="mt-2 text-sm text-xelora-text-secondary">{faq.a}</p>
-                </Card>
+        <section className="border-t border-xelora-border bg-xelora-bg-main">
+          <div className="mx-auto max-w-3xl px-4 py-20 sm:px-6 lg:px-8">
+            <h2 className="text-2xl font-semibold tracking-tight text-xelora-text">Billing questions</h2>
+            <dl className="mt-8 space-y-6">
+              {faqs.map(({ q, a }) => (
+                <div key={q}>
+                  <dt className="text-base font-medium text-xelora-text">{q}</dt>
+                  <dd className="mt-2 text-sm leading-relaxed text-xelora-text-secondary">{a}</dd>
+                </div>
               ))}
-            </div>
+            </dl>
           </div>
         </section>
       </main>
       <MarketingFooter />
-
-      <Dialog open={selectedPlan !== null} onOpenChange={() => setSelectedPlan(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Mock checkout</DialogTitle>
-            <DialogDescription>
-              This is a frontend simulation for {selectedPlan ?? 'the selected'} plan. No payment details are collected.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setSelectedPlan(null)}>
-              Cancel
-            </Button>
-            <Button onClick={handleCheckout}>Continue to checkout</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </>
   );
 }

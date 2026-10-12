@@ -13,13 +13,14 @@ import type { NextResponse } from 'next/server';
 const COOKIE_NAME = 'xelora_session';
 const OAUTH_STATE_COOKIE = 'xelora_oauth_state';
 
-function sessionCookieOptions(expiresAt: string) {
+function sessionCookieOptions(expiresAt: string, persistent = true) {
   return {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax' as const,
     path: '/',
-    expires: new Date(expiresAt),
+    // Without "Remember me" the cookie lasts only until the browser closes.
+    ...(persistent ? { expires: new Date(expiresAt) } : {}),
   };
 }
 
@@ -33,9 +34,9 @@ function oauthStateCookieOptions() {
   };
 }
 
-export async function setSessionCookie(token: string, expiresAt: string) {
+export async function setSessionCookie(token: string, expiresAt: string, persistent = true) {
   const store = await cookies();
-  store.set(COOKIE_NAME, token, sessionCookieOptions(expiresAt));
+  store.set(COOKIE_NAME, token, sessionCookieOptions(expiresAt, persistent));
 }
 
 export function applySessionCookie(response: NextResponse, token: string, expiresAt: string) {

@@ -1,155 +1,88 @@
 'use client';
 
-import React, { useState } from 'react';
+import { Suspense, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { toast } from 'sonner';
-import { Eye, EyeOff, Loader2 } from 'lucide-react';
+import { CircleCheck, Loader2 } from 'lucide-react';
 
+import { resetPassword } from '@/services/auth';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import {
-  Card,
-  CardHeader,
-  CardTitle,
-  CardDescription,
-  CardContent,
-} from '@/components/ui/card';
-import { XeloraLogo } from '@/components/ui/xelora-logo';
+import { AuthHeader, FieldError, PasswordInput } from '@/components/auth/auth-ui';
 
-const resetPasswordSchema = z
-  .object({
-    password: z
-      .string()
-      .min(8, 'Password must be at least 8 characters.')
-      .refine((v) => /[A-Z]/.test(v), 'Password must contain at least one uppercase letter.')
-      .refine((v) => /[0-9]/.test(v), 'Password must contain at least one number.'),
-    confirmPassword: z.string().min(1, 'Please confirm your new password.'),
-  })
-  .refine((data) => data.password === data.confirmPassword, {
-    message: 'Passwords do not match.',
-    path: ['confirmPassword'],
-  });
-
-type ResetPasswordFormValues = z.infer<typeof resetPasswordSchema>;
+const schema = z.object({
+  password: z.string().min(8, 'Use at least 8 characters.').max(200),
+  confirm: z.string(),
+}).refine((values) => values.password === values.confirm, { message: 'The passwords do not match.', path: ['confirm'] });
+type Values = z.infer<typeof schema>;
 
 export default function ResetPasswordPage() {
-  const router = useRouter();
-  const [showPassword, setShowPassword] = useState(false);
-  const [showConfirm, setShowConfirm] = useState(false);
+  return <Suspense fallback={null}><ResetPasswordForm /></Suspense>;
+}
 
-  const {
-    register,
-    handleSubmit,
-    formState: { errors, isSubmitting },
-  } = useForm<ResetPasswordFormValues>({
-    resolver: zodResolver(resetPasswordSchema),
-  });
+function ResetPasswordForm() {
+  const token = useSearchParams().get('token');
+  const [done, setDone] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<Values>({ resolver: zodResolver(schema) });
 
-  const onSubmit = async () => {
-    await new Promise((resolve) => setTimeout(resolve, 900));
-    toast.success('Password updated. You can now sign in with your new password.');
-    router.push('/login');
+  const onSubmit = async ({ password }: Values) => {
+    if (!token) return;
+    setFormError(null);
+    try {
+      await resetPassword(token, password);
+      setDone(true);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'We could not reset your password. Please try again.');
+    }
   };
 
-  return (
-    <div className="flex flex-col gap-6">
-      <div className="flex justify-center">
-        <Link href="/" aria-label="Go to homepage">
-          <XeloraLogo size="lg" />
-        </Link>
+  if (!token) {
+    return (
+      <div className="text-center">
+        <AuthHeader title="This link is not valid" subtitle="Open the link from your email again, or request a new one." />
+        <Button size="lg" className="w-full" asChild><Link href="/forgot-password">Request a new link</Link></Button>
       </div>
+    );
+  }
 
-      <Card>
-        <CardHeader className="text-center pb-2">
-          <CardTitle className="text-xl font-semibold text-xelora-text">
-            Set a new password
-          </CardTitle>
-          <CardDescription>
-            Your new password must be at least 8 characters and include an uppercase letter and a number.
-          </CardDescription>
-        </CardHeader>
+  if (done) {
+    return (
+      <div className="text-center">
+        <CircleCheck className="mx-auto h-8 w-8 text-xelora-green" strokeWidth={1.75} />
+        <AuthHeader title="Password updated" subtitle="You can now sign in with your new password." />
+        <Button size="lg" className="w-full" asChild><Link href="/login">Sign in</Link></Button>
+      </div>
+    );
+  }
 
-        <CardContent>
-          <form onSubmit={handleSubmit(onSubmit)} noValidate className="flex flex-col gap-4">
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="password">New password</Label>
-              <div className="relative">
-                <Input
-                  id="password"
-                  type={showPassword ? 'text' : 'password'}
-                  autoComplete="new-password"
-                  placeholder="Min. 8 characters"
-                  error={!!errors.password}
-                  className="pr-10"
-                  {...register('password')}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword((v) => !v)}
-                  className="absolute inset-y-0 right-0 flex items-center px-3 text-xelora-text-muted hover:text-xelora-text transition-colors"
-                  aria-label={showPassword ? 'Hide password' : 'Show password'}
-                >
-                  {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </button>
-              </div>
-              {errors.password && (
-                <p className="text-xs text-xelora-error">{errors.password.message}</p>
-              )}
-            </div>
-
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="confirmPassword">Confirm new password</Label>
-              <div className="relative">
-                <Input
-                  id="confirmPassword"
-                  type={showConfirm ? 'text' : 'password'}
-                  autoComplete="new-password"
-                  placeholder="Re-enter your new password"
-                  error={!!errors.confirmPassword}
-                  className="pr-10"
-                  {...register('confirmPassword')}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowConfirm((v) => !v)}
-                  className="absolute inset-y-0 right-0 flex items-center px-3 text-xelora-text-muted hover:text-xelora-text transition-colors"
-                  aria-label={showConfirm ? 'Hide password' : 'Show password'}
-                >
-                  {showConfirm ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                </button>
-              </div>
-              {errors.confirmPassword && (
-                <p className="text-xs text-xelora-error">{errors.confirmPassword.message}</p>
-              )}
-            </div>
-
-            <Button
-              type="submit"
-              variant="default"
-              size="lg"
-              className="w-full mt-1"
-              disabled={isSubmitting}
-            >
-              {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
-              {isSubmitting ? 'Saving…' : 'Set new password'}
-            </Button>
-          </form>
-
-          <div className="flex justify-center mt-4">
-            <Link
-              href="/login"
-              className="text-sm text-xelora-text-secondary hover:text-xelora-text transition-colors"
-            >
-              ← Back to sign in
-            </Link>
-          </div>
-        </CardContent>
-      </Card>
-    </div>
+  return (
+    <>
+      <AuthHeader title="Choose a new password" subtitle="Use at least 8 characters. Avoid passwords you use elsewhere." />
+      <form onSubmit={handleSubmit(onSubmit)} noValidate className="space-y-4">
+        <div className="space-y-1.5">
+          <Label htmlFor="password">New password</Label>
+          <PasswordInput id="password" autoComplete="new-password" error={!!errors.password} {...register('password')} />
+          <FieldError message={errors.password?.message} />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="confirm">Confirm new password</Label>
+          <PasswordInput id="confirm" autoComplete="new-password" error={!!errors.confirm} {...register('confirm')} />
+          <FieldError message={errors.confirm?.message} />
+        </div>
+        {formError && (
+          <p className="rounded-lg bg-xelora-error-bg px-3 py-2.5 text-sm text-xelora-error" role="alert">
+            {formError} <Link href="/forgot-password" className="font-medium underline">Request a new link</Link>
+          </p>
+        )}
+        <Button type="submit" size="lg" className="w-full" disabled={isSubmitting}>
+          {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
+          Update password
+        </Button>
+      </form>
+    </>
   );
 }

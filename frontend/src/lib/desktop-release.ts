@@ -42,6 +42,14 @@ export async function findDesktopInstallerAsset(): Promise<GithubReleaseAsset | 
   );
 }
 
+/** Version and size of the current Windows installer, for the download page. */
+export async function getLatestInstallerInfo(): Promise<{ version: string; sizeMB: number } | null> {
+  const release = await getLatestRelease().catch(() => null);
+  const asset = release?.assets.find((a) => a.name.toLowerCase().endsWith(".exe"));
+  if (!release || !asset) return null;
+  return { version: release.tag_name.replace(/^v/, ""), sizeMB: Math.round(asset.size / (1024 * 1024)) };
+}
+
 /**
  * Serve electron-updater's generic feed (latest.yml, the installer, and its
  * blockmap) from the latest GitHub release. Only an asset whose name exactly

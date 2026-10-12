@@ -87,7 +87,7 @@ export default function WorkflowsPage() {
             <Card key={w.id} className="p-5">
               <div className="flex items-start justify-between gap-2">
                 <div className="flex items-start gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-md bg-xelora-surface-2">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-xelora-border bg-xelora-surface">
                     <GitBranch className="h-5 w-5 text-xelora-green" />
                   </div>
                   <div>

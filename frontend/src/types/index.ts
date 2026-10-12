@@ -18,6 +18,8 @@ export interface User {
   objectives?: string[];
   onboardingCompleted: boolean;
   isAdmin?: boolean;
+  /** False for accounts created with Google that have not set a password. */
+  hasPassword?: boolean;
 }
 
 

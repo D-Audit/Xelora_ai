@@ -6,27 +6,28 @@ import { cva, type VariantProps } from 'class-variance-authority';
 import { cn } from '@/lib/utils';
 
 const buttonVariants = cva(
-  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-xelora-border-focus focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50',
+  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg text-sm font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-xelora-border-focus focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:shrink-0',
   {
     variants: {
       variant: {
-        default: 'bg-xelora-green text-white hover:bg-xelora-deep-green',
-        primary: 'bg-xelora-green text-white hover:bg-xelora-deep-green',
-        bright: 'bg-xelora-bright-green text-xelora-black font-semibold hover:bg-[#00d458]',
-        destructive: 'bg-xelora-error text-white hover:bg-[#9b1e14]',
-        outline: 'border border-xelora-border bg-xelora-surface text-xelora-text hover:bg-xelora-surface-2',
+        default: 'bg-xelora-green text-white shadow-sm hover:bg-xelora-deep-green',
+        primary: 'bg-xelora-green text-white shadow-sm hover:bg-xelora-deep-green',
+        // Kept for existing call sites; now the same calm primary style.
+        bright: 'bg-xelora-green text-white shadow-sm hover:bg-xelora-deep-green',
+        destructive: 'bg-xelora-error text-white shadow-sm hover:bg-[#991B1B]',
+        outline: 'border border-xelora-border bg-xelora-surface text-xelora-text shadow-sm hover:border-xelora-border-strong hover:bg-xelora-surface-2',
         secondary: 'bg-xelora-surface-2 text-xelora-text hover:bg-xelora-border',
-        ghost: 'text-xelora-text hover:bg-xelora-surface-2',
-        link: 'text-xelora-info underline-offset-4 hover:underline p-0 h-auto',
-        dark: 'bg-xelora-black text-white hover:bg-xelora-deep-green',
+        ghost: 'text-xelora-text-secondary hover:bg-xelora-surface-2 hover:text-xelora-text',
+        link: 'text-xelora-green underline-offset-4 hover:underline p-0 h-auto',
+        dark: 'bg-xelora-text text-xelora-surface shadow-sm hover:opacity-90',
       },
       size: {
-        default: 'h-9 px-4 py-2',
-        sm: 'h-7 px-3 text-xs',
-        lg: 'h-11 px-6 text-base',
-        xl: 'h-12 px-8 text-base',
+        default: 'h-9 px-4',
+        sm: 'h-8 px-3 text-[13px]',
+        lg: 'h-11 px-5 text-[15px]',
+        xl: 'h-12 px-7 text-base',
         icon: 'h-9 w-9',
-        'icon-sm': 'h-7 w-7',
+        'icon-sm': 'h-8 w-8',
       },
     },
     defaultVariants: {

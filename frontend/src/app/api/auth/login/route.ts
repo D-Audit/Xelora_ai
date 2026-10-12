@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { backendFetch } from '@/lib/backend';
+import { backendErrorMessage } from '@/lib/relay';
 import { setSessionCookie } from '@/lib/session';
 
 interface LoginBackendResponse {
@@ -17,13 +18,10 @@ export async function POST(req: NextRequest) {
   });
 
   if (!result.ok) {
-    const detail =
-      (result.data as { detail?: string })?.detail ||
-      (result.data as { error?: string })?.error ||
-      'Invalid email address or password.';
+    const detail = backendErrorMessage(result.data, 'Invalid email address or password.');
     return NextResponse.json({ error: detail }, { status: result.status || 401 });
   }
 
-  await setSessionCookie(result.data.token, result.data.expires_at);
+  await setSessionCookie(result.data.token, result.data.expires_at, body.rememberMe !== false);
   return NextResponse.json({ user: result.data.user });
 }

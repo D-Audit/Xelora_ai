@@ -1,4 +1,5 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
+import { relayJson } from '@/lib/relay';
 import { backendFetch } from '@/lib/backend';
 import { getSessionToken, clearSessionCookie } from '@/lib/session';
 
@@ -16,4 +17,9 @@ export async function GET() {
   }
 
   return NextResponse.json({ user: result.data });
+}
+
+export async function PATCH(req: NextRequest) {
+  const body = await req.json().catch(() => ({}));
+  return relayJson('/auth/me', { method: 'PATCH', auth: true, body: { name: body.name } });
 }

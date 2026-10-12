@@ -277,6 +277,15 @@ def _conversation_has_agent_work(db: Session, task_id: int, user_id: int, has_ag
     return bool(row and row.transcript and has_agent_work(json.loads(row.transcript)))
 
 
+def _utc_iso(value):
+    """ISO time with an explicit UTC offset. DB columns are naive UTC; without the
+    offset, browsers read them as local time ("2h ago" for a new chat)."""
+    if value is None:
+        return None
+    from datetime import timezone
+    return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).isoformat()
+
+
 def _owned_conversation(db: Session, task_id: int, user_id: int):
     from models import Task
     row = db.query(Task).filter(Task.id == task_id).first()
@@ -303,7 +312,7 @@ def _save_quick_exchange(db: Session, user_id: int, task_id: int | None, questio
     ]
     row = _owned_conversation(db, task_id, user_id) if task_id is not None else None
     if row is None:
-        row = Task(user_id=user_id, instruction=question, status="completed", completed_at=now,
+        row = Task(user_id=user_id, instruction=question, status="answered", completed_at=now,
                    transcript=json.dumps(turns, default=str), is_read=True)
         db.add(row)
     else:
@@ -604,8 +613,8 @@ def list_tasks(
             "id": t.id,
             "title": (t.instruction[:80] + "…") if len(t.instruction) > 80 else t.instruction,
             "status": t.status,
-            "created_at": t.created_at.isoformat() if t.created_at else None,
-            "completed_at": t.completed_at.isoformat() if t.completed_at else None,
+            "created_at": _utc_iso(t.created_at),
+            "completed_at": _utc_iso(t.completed_at),
             "is_read": t.is_read,
         }
         for t in tasks
@@ -635,8 +644,8 @@ def get_task_detail(
         "id": task.id,
         "instruction": task.instruction,
         "status": task.status,
-        "created_at": task.created_at.isoformat() if task.created_at else None,
-        "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+        "created_at": _utc_iso(task.created_at),
+        "completed_at": _utc_iso(task.completed_at),
         "transcript": transcript,
         "resumable": (task_id in ACTIVE_TASKS) or bool(task.raw_messages or task.transcript),
     }

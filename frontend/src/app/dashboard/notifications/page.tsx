@@ -78,12 +78,10 @@ export default function NotificationsPage() {
           {items.map((n) => (
             <Card
               key={n.id}
-              className={`flex items-start gap-3 p-4 ${!n.isRead ? 'border-xelora-green/40 bg-xelora-success-bg/30' : ''}`}
+              className={`flex items-start gap-3 p-4 ${!n.isRead ? 'bg-xelora-surface-2/60' : ''}`}
               onClick={() => handleRead(n)}
             >
-              <div className="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-xelora-surface-2">
-                <Bell className="h-4 w-4 text-xelora-text-secondary" />
-              </div>
+              <Bell className="mt-0.5 h-4 w-4 shrink-0 text-xelora-text-muted" strokeWidth={1.75} />
               <div className="flex-1">
                 <div className="flex items-center gap-2">
                   <p className="text-sm font-medium text-xelora-text">{n.title}</p>

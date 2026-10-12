@@ -3,6 +3,40 @@
 Straight list - what was actually done, what was NOT done and why, no
 in-between.
 
+## 2026-10-12 (3) - professional frontend, real sign-in flows
+
+**Done**
+
+- **Design.** Neutral palette with green as the accent; calmer buttons and
+  inputs; outline icons without tinted backgrounds.
+- **Landing page** rebuilt around what the product really does (product shot,
+  capabilities, examples, how it works, security, pricing, FAQ). Removed false
+  claims (AES-256, offline mode, undo of any step, batch processing).
+  `/features`, `/how-it-works`, `/solutions`, `/resources` and the mock
+  `/desktop` preview now redirect.
+- **Pages:** Pricing (real plans, no fake checkout), Security, Download (live
+  GitHub release), Status (live checks), Contact, and new Terms, Privacy,
+  Acceptable Use and Cookie policies (`components/legal`). Business details
+  come from `NEXT_PUBLIC_*` settings in `lib/site.ts`.
+- **Auth:** form-only sign-in and sign-up pages; real forgot/reset password
+  and email confirmation (`auth.py` + `emailer.py`, Resend or SMTP); working
+  "Keep me signed in"; profile and password changes; Google accounts can set a
+  password. Google sign-in from Xelora Desktop opens the system browser and
+  hands the session back via `xelora://` (`lib/desktop-handoff.ts`).
+- **App:** new sidebar (New chat, sections, recents, real usage, account
+  menu); chat page with Markdown, work steps, sources and status lines; chat
+  available on the web too; real Settings, Task history, Usage, workflow
+  editing and invitations; short honest onboarding. No user-facing page uses
+  mock data any more (admin pages still do).
+- **Fixes:** website plan limits now match the backend catalog; timestamps
+  without a timezone are read as UTC ("2h ago" bug); quick answers are saved
+  as "answered".
+
+**Not done**
+
+- Admin pages still show mock data.
+- Account deletion and data export are handled by email, not in the app.
+
 ## 2026-10-12 (2) - conversations, speed, signed installer
 
 **Done**

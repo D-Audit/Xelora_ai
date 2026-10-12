@@ -39,3 +39,11 @@ services:
         value: database   # uploads live in Postgres; switch to s3 (R2) for many/large files
       - key: TAVILY_API_KEY
         sync: false   # web search (or BRAVE_SEARCH_API_KEY / SERPER_API_KEY); see .env.example
+      - key: GOOGLE_CLIENT_ID
+        sync: false   # "Continue with Google" (docs/DEPLOYMENT.md)
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false   # password reset and email confirmation emails
+      - key: EMAIL_FROM
+        sync: false   # e.g. Xelora <no-reply@yourdomain.com>

@@ -1,4 +1,5 @@
-﻿const { app, BrowserWindow, shell, Menu, ipcMain, screen } = require('electron');
+const { app, BrowserWindow, shell, Menu, ipcMain, screen } = require('electron');
+const crypto = require('crypto');
 const path = require('path');
 const { autoUpdater } = require('electron-updater');
 const localAgent = require('./agent');
@@ -12,6 +13,59 @@ const WEB_APP_URL = process.env.XELORA_WEB_URL
 
 let mainWindow;
 let floatingModeEnabled = false;
+
+// ── Sign in with Google/Microsoft in the system browser ───────────────────
+// Google blocks OAuth inside embedded app windows. The app opens the user's
+// browser with a one-time secret; the website finishes sign-in and sends a
+// short-lived code back through xelora://auth. The code is exchanged only
+// together with that secret, which never leaves this process.
+const PROTOCOL = 'xelora';
+const HANDOFF_TTL_MS = 10 * 60 * 1000;
+let pendingHandoff = null; // { secret, createdAt }
+
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+}
+if (process.defaultApp) {
+  app.setAsDefaultProtocolClient(PROTOCOL, process.execPath, [path.resolve(process.argv[1] || '.')]);
+} else {
+  app.setAsDefaultProtocolClient(PROTOCOL);
+}
+
+function startBrowserSignIn(provider) {
+  if (!['google', 'microsoft'].includes(provider)) throw new Error('Unknown sign-in provider.');
+  const secret = crypto.randomBytes(32).toString('base64url');
+  pendingHandoff = { secret, createdAt: Date.now() };
+  const origin = new URL(WEB_APP_URL).origin;
+  shell.openExternal(`${origin}/api/auth/${provider}/start?desktop=${encodeURIComponent(secret)}`);
+  return true;
+}
+
+function handleDeepLink(url) {
+  let parsed;
+  try { parsed = new URL(url); } catch { return; }
+  if (parsed.protocol !== `${PROTOCOL}:` || parsed.hostname !== 'auth') return;
+  const code = parsed.searchParams.get('code');
+  const handoff = pendingHandoff;
+  pendingHandoff = null;
+  if (!code || !handoff || Date.now() - handoff.createdAt > HANDOFF_TTL_MS || !mainWindow || mainWindow.isDestroyed()) return;
+  const origin = new URL(WEB_APP_URL).origin;
+  const complete = `${origin}/api/auth/desktop/complete?code=${encodeURIComponent(code)}&secret=${encodeURIComponent(handoff.secret)}`;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+  mainWindow.loadURL(complete);
+}
+
+app.on('second-instance', (_event, argv) => {
+  const link = argv.find((arg) => arg.startsWith(`${PROTOCOL}://`));
+  if (link) handleDeepLink(link);
+  else if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+});
+app.on('open-url', (event, url) => { event.preventDefault(); handleDeepLink(url); });
 let windowBeforeFloating = null;
 
 function createWindow() {
@@ -21,18 +75,19 @@ function createWindow() {
     minWidth: 1100,
     minHeight: 700,
     title: 'Xelora',
-    backgroundColor: '#001E2B',
-    icon: path.join(__dirname, 'assets', 'icon.ico'),
+    backgroundColor: '#FAFAFA',
+    icon: path.join(__dirname, 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
+      additionalArguments: [`--xelora-version=${app.getVersion()}`],
       nodeIntegration: false,
       contextIsolation: true,
       spellcheck: false,
     },
     titleBarStyle: 'hidden',
     titleBarOverlay: {
-      color: '#001E2B',
-      symbolColor: '#ffffff',
+      color: '#FAFAFA',
+      symbolColor: '#18181B',
       height: 36,
     },
     show: false,
@@ -121,6 +176,10 @@ ipcMain.on('reload', () => {
 });
 
 ipcMain.handle('floating:set', (_event, enabled) => setFloatingMode(enabled));
+ipcMain.handle('auth:browser-sign-in', (event, provider) => {
+  if (!fromWebApp(event)) throw new Error('Not allowed.');
+  return startBrowserSignIn(provider);
+});
 ipcMain.handle('floating:get', () => floatingModeEnabled);
 
 // Only the Xelora web app loaded in this window may pair or control the agent.

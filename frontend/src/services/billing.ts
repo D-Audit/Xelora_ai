@@ -1,6 +1,6 @@
 /**
  * Client-side billing service. Calls our own Next.js API routes.
- * Return shapes are kept close to the mock-billing.ts / mock-plans.ts
+ * Return shapes are kept close to the mock-billing.ts / plans.ts
  * shapes the existing pages were built against, to minimise page
  * rewrites - see PlanSummary/SubscriptionSummary below.
  */
