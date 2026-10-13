@@ -107,3 +107,31 @@ class SkillLibraryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BundledCuaDriverTests(unittest.TestCase):
+    def test_bundled_driver_is_enabled(self):
+        with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {}):
+            driver = os.path.join(root, "cua-driver.exe")
+            Path(driver).write_bytes(b"")
+            for name in ("ENABLE_CUA_DRIVER", "CUA_DRIVER_COMMAND"):
+                os.environ.pop(name, None)
+            with patch.object(local_agent, "bundled_cua_driver", return_value=driver):
+                local_agent.configure_environment("https://api.example.com", "xa_tok")
+            self.assertEqual("true", os.environ["ENABLE_CUA_DRIVER"])
+            self.assertEqual(driver, os.environ["CUA_DRIVER_COMMAND"])
+
+    def test_user_opt_out_wins_and_no_driver_leaves_it_off(self):
+        with patch.dict(os.environ, {"ENABLE_CUA_DRIVER": "false"}):
+            with patch.object(local_agent, "bundled_cua_driver", return_value="C:/x/cua-driver.exe"):
+                local_agent.configure_environment("https://api.example.com", "xa_tok")
+            self.assertEqual("false", os.environ["ENABLE_CUA_DRIVER"])
+        with patch.dict(os.environ, {}):
+            os.environ.pop("ENABLE_CUA_DRIVER", None)
+            with patch.object(local_agent, "bundled_cua_driver", return_value=None):
+                local_agent.configure_environment("https://api.example.com", "xa_tok")
+            self.assertNotIn("ENABLE_CUA_DRIVER", os.environ)
+
+    def test_driver_is_looked_up_beside_the_backend(self):
+        self.assertEqual(None if not (BACKEND.parent / "cua" / "cua-driver.exe").is_file() else str(BACKEND.parent / "cua" / "cua-driver.exe"),
+                         local_agent.bundled_cua_driver())

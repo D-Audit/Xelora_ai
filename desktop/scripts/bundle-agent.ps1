@@ -45,6 +45,33 @@ robocopy $backend (Join-Path $out "backend") /E /NFL /NDL /NJH /NJS `
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed with $LASTEXITCODE" }
 $global:LASTEXITCODE = 0
 
+# 3b. Cua Driver (accessibility-based desktop control). Pinned and checked
+#     against the SHA256SUMS published with that release.
+$cuaVersion = "0.34.0"
+$cuaZip = "cua-driver-rs-$cuaVersion-windows-x86_64-binary.zip"
+$cuaSha256 = "bcc520e50861c7092cf775846fec76ae386d7dcd6b5b408608b0ea4423a8b888"
+$cuaUrl = "https://github.com/trycua/cua/releases/download/cua-driver-rs-v$cuaVersion/$cuaZip"
+$cuaTemp = Join-Path ([System.IO.Path]::GetTempPath()) "xelora-cua-$cuaVersion"
+if (Test-Path $cuaTemp) { Remove-Item -Recurse -Force $cuaTemp }
+New-Item -ItemType Directory -Force $cuaTemp | Out-Null
+$cuaArchive = Join-Path $cuaTemp $cuaZip
+Invoke-WebRequest -Uri $cuaUrl -OutFile $cuaArchive -UseBasicParsing
+$actual = (Get-FileHash $cuaArchive -Algorithm SHA256).Hash.ToLower()
+if ($actual -ne $cuaSha256) { throw "Cua Driver checksum mismatch: expected $cuaSha256, got $actual" }
+Expand-Archive $cuaArchive -DestinationPath (Join-Path $cuaTemp "x") -Force
+$cuaExe = Get-ChildItem (Join-Path $cuaTemp "x") -Recurse -Filter "cua-driver*.exe" | Select-Object -First 1
+if (-not $cuaExe) { throw "cua-driver executable not found in $cuaZip" }
+$cuaOut = Join-Path $out "cua"
+New-Item -ItemType Directory -Force $cuaOut | Out-Null
+Copy-Item (Join-Path $cuaExe.Directory.FullName "*") $cuaOut -Recurse -Force
+if ($cuaExe.Name -ne "cua-driver.exe") {
+    Move-Item (Join-Path $cuaOut $cuaExe.Name) (Join-Path $cuaOut "cua-driver.exe") -Force
+}
+$cuaVersionOutput = & (Join-Path $cuaOut "cua-driver.exe") --version
+if ($LASTEXITCODE -ne 0) { throw "bundled cua-driver --version failed" }
+Write-Host "Bundled Cua Driver: $cuaVersionOutput"
+Remove-Item -Recurse -Force $cuaTemp
+
 # 4. Smoke test, run the way Xelora Desktop runs it (python -I): the agent
 #    imports cleanly, xlwings has its Excel engine (pywin32 loads), and
 #    importing the backend writes nothing into the install directory, which
@@ -56,6 +83,8 @@ import local_agent
 local_agent.configure_environment('https://example.invalid', 'smoke-test')
 status = local_agent.excel_engine_status()
 assert status == 'Excel automation ready', status
+assert local_agent.bundled_cua_driver(), 'the Cua Driver is missing from the bundle'
+assert os.environ.get('ENABLE_CUA_DRIVER') == 'true', 'the bundled Cua Driver was not enabled'
 import pywintypes, pythoncom, win32api, win32com.client
 import agent.core, knowledge.rag, memory._store, reporting.pdf_generator
 from skills import loader

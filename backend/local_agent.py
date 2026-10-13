@@ -71,6 +71,32 @@ def configure_environment(api_url: str, token: str, workspace_dir: str | None = 
     })
     os.environ.setdefault("XELORA_DATA_DIR", default_data_dir())
     os.environ.setdefault("JWT_SECRET_KEY", "local-agent-does-not-issue-tokens")
+    driver = bundled_cua_driver()
+    if driver:
+        # Xelora Desktop ships the Cua Driver beside the backend: turn on
+        # accessibility-based desktop control unless the user opted out.
+        os.environ.setdefault("ENABLE_CUA_DRIVER", "true")
+        os.environ.setdefault("CUA_DRIVER_COMMAND", driver)
+
+
+def bundled_cua_driver() -> str | None:
+    """Path of the Cua Driver shipped in the desktop install (agent/cua/)."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cua", "cua-driver.exe")
+    return path if os.path.isfile(path) else None
+
+
+def cua_driver_status() -> str:
+    """One log line saying whether Cua desktop control is usable on this PC."""
+    try:
+        from vision.cua_driver import health_check
+        health = health_check(force_refresh=True)
+    except Exception as exc:
+        return f"Cua desktop control unavailable: {exc}"
+    if health.get("status") == "ready":
+        return f"Cua desktop control ready ({health.get('version') or 'cua-driver'}, {health.get('tool_count')} tools)"
+    if health.get("status") == "disabled":
+        return "Cua desktop control off"
+    return "Cua desktop control unavailable: " + "; ".join(health.get("errors") or ["not reachable"])
 
 
 def excel_engine_status() -> str:
@@ -262,6 +288,7 @@ def main(argv=None) -> int:
 
     configure_environment(args.api_url, args.token)
     print(excel_engine_status(), flush=True)
+    print(cua_driver_status(), flush=True)
     cloud = CloudClient(args.api_url, args.token)
     from memory import _store
     _store.use_remote(cloud.read_memory, cloud.write_memory)  # learn into the user's cloud memory
