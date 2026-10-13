@@ -45,11 +45,16 @@ robocopy $backend (Join-Path $out "backend") /E /NFL /NDL /NJH /NJS `
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed with $LASTEXITCODE" }
 $global:LASTEXITCODE = 0
 
-# 3b. Cua Driver (accessibility-based desktop control). Pinned and checked
-#     against the SHA256SUMS published with that release.
+# 3b. Cua Driver (accessibility-based desktop control). Pinned, checked
+#     against the SHA256SUMS published with that release, and laid out the
+#     way Cua's own install.ps1 installs it: the directory zip expands to
+#     cua-driver-rs-<v>-windows-x86_64\ with cua-driver.exe beside its
+#     cursor-theme helper, the reserved uiAccess worker (cua-driver-uia.exe,
+#     which Windows only starts from a trusted location) and licenses.
 $cuaVersion = "0.34.0"
-$cuaZip = "cua-driver-rs-$cuaVersion-windows-x86_64-binary.zip"
-$cuaSha256 = "bcc520e50861c7092cf775846fec76ae386d7dcd6b5b408608b0ea4423a8b888"
+$cuaStage = "cua-driver-rs-$cuaVersion-windows-x86_64"
+$cuaZip = "$cuaStage.zip"
+$cuaSha256 = "f96cc1632bc88e6f268eab745277c1fc302bb0f7d123e04373e35afecad6439f"
 $cuaUrl = "https://github.com/trycua/cua/releases/download/cua-driver-rs-v$cuaVersion/$cuaZip"
 $cuaTemp = Join-Path ([System.IO.Path]::GetTempPath()) "xelora-cua-$cuaVersion"
 if (Test-Path $cuaTemp) { Remove-Item -Recurse -Force $cuaTemp }
@@ -59,17 +64,21 @@ Invoke-WebRequest -Uri $cuaUrl -OutFile $cuaArchive -UseBasicParsing
 $actual = (Get-FileHash $cuaArchive -Algorithm SHA256).Hash.ToLower()
 if ($actual -ne $cuaSha256) { throw "Cua Driver checksum mismatch: expected $cuaSha256, got $actual" }
 Expand-Archive $cuaArchive -DestinationPath (Join-Path $cuaTemp "x") -Force
-$cuaExe = Get-ChildItem (Join-Path $cuaTemp "x") -Recurse -Filter "cua-driver*.exe" | Select-Object -First 1
-if (-not $cuaExe) { throw "cua-driver executable not found in $cuaZip" }
+$cuaStageDir = Join-Path $cuaTemp "x\$cuaStage"
+if (-not (Test-Path (Join-Path $cuaStageDir "cua-driver.exe"))) {
+    Get-ChildItem (Join-Path $cuaTemp "x") -Recurse | ForEach-Object { Write-Host "  $($_.FullName)" }
+    throw "cua-driver.exe not found in $cuaZip"
+}
+foreach ($exe in Get-ChildItem $cuaStageDir -Filter *.exe) {
+    $signature = Get-AuthenticodeSignature $exe.FullName
+    if ($signature.Status -ne "Valid") { throw "$($exe.Name) in $cuaZip is not validly signed: $($signature.Status)" }
+}
 $cuaOut = Join-Path $out "cua"
 New-Item -ItemType Directory -Force $cuaOut | Out-Null
-Copy-Item (Join-Path $cuaExe.Directory.FullName "*") $cuaOut -Recurse -Force
-if ($cuaExe.Name -ne "cua-driver.exe") {
-    Move-Item (Join-Path $cuaOut $cuaExe.Name) (Join-Path $cuaOut "cua-driver.exe") -Force
-}
-# cua-driver.exe is a windowed (GUI-subsystem) program, which PowerShell's
-# call operator cannot capture output from; redirect it explicitly, the way
-# the agent's Python subprocess does.
+Copy-Item (Join-Path $cuaStageDir "*") $cuaOut -Recurse -Force
+# Run it with redirected output: PowerShell's call operator cannot capture a
+# windowed (GUI-subsystem) program, and this matches how the agent's Python
+# subprocess starts it.
 $probe = New-Object System.Diagnostics.ProcessStartInfo
 $probe.FileName = Join-Path $cuaOut "cua-driver.exe"
 $probe.Arguments = "--version"
