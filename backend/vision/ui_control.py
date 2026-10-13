@@ -2283,6 +2283,8 @@ def verify_agent_context() -> dict:
     try:
         import xlwings as xw
         import concurrent.futures
+        from skills.excel_shared import require_excel_engine
+        require_excel_engine()
         def com_create():
             app = xw.App(visible=True)
             wb = app.books.add()

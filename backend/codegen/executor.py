@@ -224,7 +224,12 @@ def _check_ast(code: str):
 _RUNNER_TEMPLATE = """
 import json
 import sys
-from skills.excel_shared import bind_workbook_context, get_active_workbook  # noqa: F401
+from skills.excel_shared import bind_workbook_context, get_active_workbook, require_excel_engine  # noqa: F401
+
+# This is a fresh Python process: register xlwings' Excel engine here too, or
+# generated ``xw.App()`` calls fail with "'NoneType' object has no attribute 'apps'".
+if {needs_excel}:
+    require_excel_engine()
 
 WORKBOOK_NAME = {workbook_name}
 EXCEL_APP_PID = {excel_app_pid}
@@ -314,6 +319,7 @@ def run_generated_code(
         # This is Python source, not JSON.  ``json.dumps(None)`` produces
         # ``null``, which crashes the subprocess before user code runs.
         workbook_name=repr(workbook_name),
+        needs_excel=repr("xlwings" in code or "xw." in code),
         excel_app_pid=repr(excel_app_pid),
     )
 
