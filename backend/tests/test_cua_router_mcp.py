@@ -308,10 +308,18 @@ class RouterTests(unittest.TestCase):
         self.assertEqual("python_codegen", self.caps("Load 12,000 rows and group by region")[0])
 
     def test_dedicated_skills_are_not_sent_to_codegen(self):
-        for text in ("Unpivot the months into rows", "Remove duplicate customers",
-                     "Merge the first and last name columns", "Sort by date descending"):
+        cases = {
+            "Unpivot the months into rows": "unpivot_data",
+            "Remove duplicate customers": "remove_duplicates",
+            "Merge the first and last name columns": "merge_columns",
+            "Sort by date descending": "sort_range",
+        }
+        for text, skill in cases.items():
             with self.subTest(text=text):
-                self.assertEqual(["excel_skills"], self.caps(text))
+                plan = route_instruction(text, available=ALL_ON)
+                self.assertNotIn("python_codegen", plan.capabilities())
+                self.assertEqual("excel_skills", plan.capabilities()[0])
+                self.assertIn(skill, {tool for step in plan.steps for tool in step.tools})
 
     def test_research_uses_web_then_excel(self):
         caps = self.caps("Find the latest inflation rate for Rwanda and put it into the sheet")

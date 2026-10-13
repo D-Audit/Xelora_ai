@@ -34,7 +34,11 @@ import config
 from tools import mcp_client
 
 _LOGGER = logging.getLogger(__name__)
-_CACHE_TTL_SECONDS = 15
+# Discovery starts a fresh `cua-driver mcp` process; the tool list does not
+# change while the driver runs, so reuse it for a task's whole lifetime
+# instead of respawning the driver several times a minute. Failures are
+# retried after 2s (see discover_tools).
+_CACHE_TTL_SECONDS = 300
 _DISCOVERY_TIMEOUT_SECONDS = 8
 _CALL_TIMEOUT_SECONDS = 30
 _MAX_ACT_ATTEMPTS = 3

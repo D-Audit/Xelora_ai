@@ -11,6 +11,7 @@ options every turn, in the priority order explained in the system prompt.
 
 import base64
 import json
+import logging
 import time
 
 import config
@@ -24,6 +25,8 @@ from agent.tool_registry import (
     workspace_import_tool_spec,
 )
 from skills.registry import claude_tools, gemini_tools
+
+logger = logging.getLogger(__name__)
 
 CODEGEN_TOOL_CLAUDE = {
     "name": "run_excel_code",
@@ -360,40 +363,155 @@ def build_claude_tools():
     return tools
 
 
-_GEMINI_UNSUPPORTED_SCHEMA_KEYS = {"default", "additionalProperties", "$schema"}
+_GEMINI_TYPES = {"string", "integer", "number", "boolean", "array", "object"}
+# Schema keywords Gemini's function declarations understand. Everything else
+# (default, additionalProperties, $schema, examples, patternProperties, ...)
+# is dropped; $ref/anyOf/oneOf/allOf/const/type-lists are rewritten first.
+_GEMINI_KEPT_KEYS = {
+    "description", "title", "nullable", "enum", "minItems", "maxItems", "minLength",
+    "maxLength", "pattern", "minimum", "maximum", "minProperties", "maxProperties",
+}
+_GEMINI_FORMATS = {
+    "string": {"enum", "date-time"},
+    "integer": {"int32", "int64"},
+    "number": {"float", "double"},
+}
+_MAX_SCHEMA_DEPTH = 12
 
 
-def _strip_unsupported_schema_keys(schema):
-    """Gemini's function-schema parser is stricter than plain JSON-schema
-    (which is all Claude requires). It rejects
-    unsupported keywords like 'default', AND it requires every array to
-    declare 'items' (including nested arrays-of-arrays) and every field
-    to declare a 'type' (no bare '{}' for "any value" fields). This walks
-    the schema recursively and patches all of that in one pass, so a new
-    skill with a slightly loose schema doesn't need a Gemini-specific
-    fix each time it trips a new validation rule."""
+def _strip_unsupported_schema_keys(schema, _root=None, _depth=0):
+    """Rewrite any JSON Schema into the subset Gemini's function calling accepts.
+
+    Claude takes plain JSON Schema, but Gemini's SDK parses each schema into
+    its own Schema type and fails on a whole request when one tool is loose:
+    a nullable ``"type": ["integer", "null"]`` (common in MCP tools such as
+    the Cua Driver's) raised "'list' object has no attribute 'upper'". It
+    also requires ``items`` on arrays, a ``type`` on every field, and string
+    enums. This resolves local ``$ref``s, flattens ``anyOf``/``oneOf``/
+    ``allOf``, maps ``const`` to an enum, keeps only supported keywords, and
+    patches the rest, so any skill, MCP or Cua tool schema is usable.
+    """
+    root = schema if _root is None else _root
     if isinstance(schema, list):
-        return [_strip_unsupported_schema_keys(item) for item in schema]
+        return [_strip_unsupported_schema_keys(item, root, _depth + 1) for item in schema]
     if not isinstance(schema, dict):
-        return schema
+        return {"type": "string"}
+    if _depth > _MAX_SCHEMA_DEPTH:
+        return {"type": "string", "description": str(schema.get("description") or "")[:200]}
 
-    cleaned = {k: v for k, v in schema.items() if k not in _GEMINI_UNSUPPORTED_SCHEMA_KEYS}
+    schema = _resolve_schema_ref(schema, root)
+    schema = _flatten_schema_alternatives(schema, root)
 
-    if "properties" in cleaned:
-        cleaned["properties"] = {k: _strip_unsupported_schema_keys(v) for k, v in cleaned["properties"].items()}
-    if "items" in cleaned:
-        cleaned["items"] = _strip_unsupported_schema_keys(cleaned["items"])
+    cleaned = {key: value for key, value in schema.items() if key in _GEMINI_KEPT_KEYS}
+    raw_type = schema.get("type")
+    if isinstance(raw_type, list):
+        if "null" in raw_type:
+            cleaned["nullable"] = True
+        raw_type = next((t for t in raw_type if t in _GEMINI_TYPES), None)
+    if raw_type not in _GEMINI_TYPES:
+        raw_type = (
+            "object" if "properties" in schema
+            else "array" if "items" in schema
+            else "string"
+        )
+    cleaned["type"] = raw_type
 
-    if "type" not in cleaned:
-        cleaned["type"] = "string"
+    if "const" in schema and "enum" not in cleaned:
+        cleaned["enum"] = [schema["const"]]
+    if "enum" in cleaned:
+        values = [value for value in cleaned["enum"] if value is not None] if isinstance(cleaned["enum"], list) else []
+        if values:
+            # Gemini only accepts string enums.
+            cleaned["enum"] = [str(value) for value in values]
+            cleaned["type"] = "string"
+        else:
+            cleaned.pop("enum")
 
-    if cleaned["type"] == "array" and "items" not in cleaned:
-        cleaned["items"] = {"type": "string"}
+    fmt = schema.get("format")
+    if isinstance(fmt, str) and fmt in _GEMINI_FORMATS.get(cleaned["type"], ()):
+        cleaned["format"] = fmt
 
-    if cleaned["type"] == "object" and "properties" not in cleaned:
-        cleaned["properties"] = {}
+    if cleaned["type"] == "object":
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        cleaned["properties"] = {
+            str(name): _strip_unsupported_schema_keys(value, root, _depth + 1)
+            for name, value in properties.items()
+        }
+        required = schema.get("required")
+        if isinstance(required, list):
+            kept = [name for name in required if name in cleaned["properties"]]
+            if kept:
+                cleaned["required"] = kept
+    elif cleaned["type"] == "array":
+        items = schema.get("items")
+        if isinstance(items, list):  # tuple-style items: describe the first shape
+            items = items[0] if items else None
+        cleaned["items"] = (
+            _strip_unsupported_schema_keys(items, root, _depth + 1)
+            if isinstance(items, dict) else {"type": "string"}
+        )
 
+    for key in ("description", "title"):
+        if key in cleaned and not isinstance(cleaned[key], str):
+            cleaned[key] = str(cleaned[key])
+    for key in ("minimum", "maximum"):
+        if key in cleaned and not isinstance(cleaned[key], (int, float)):
+            cleaned.pop(key)
+    for key in ("minItems", "maxItems", "minLength", "maxLength", "minProperties", "maxProperties"):
+        if key in cleaned and not isinstance(cleaned[key], int):
+            cleaned.pop(key)
+    if "nullable" in cleaned and not isinstance(cleaned["nullable"], bool):
+        cleaned.pop("nullable")
+    if "pattern" in cleaned and not isinstance(cleaned["pattern"], str):
+        cleaned.pop("pattern")
     return cleaned
+
+
+def _resolve_schema_ref(schema: dict, root: dict, _seen=None) -> dict:
+    """Inline a local ``#/$defs/...`` or ``#/definitions/...`` reference."""
+    ref = schema.get("$ref")
+    if not isinstance(ref, str) or not ref.startswith("#/"):
+        return schema
+    seen = _seen or set()
+    if ref in seen:
+        return {"type": "object", "description": schema.get("description") or ""}
+    target = root
+    for part in ref[2:].split("/"):
+        target = target.get(part) if isinstance(target, dict) else None
+    if not isinstance(target, dict):
+        return {key: value for key, value in schema.items() if key != "$ref"}
+    merged = {**target, **{key: value for key, value in schema.items() if key != "$ref"}}
+    return _resolve_schema_ref(merged, root, seen | {ref})
+
+
+def _flatten_schema_alternatives(schema: dict, root: dict) -> dict:
+    """Collapse anyOf/oneOf to their first non-null option and merge allOf."""
+    schema = dict(schema)
+    for key in ("anyOf", "oneOf"):
+        options = schema.pop(key, None)
+        if not isinstance(options, list):
+            continue
+        resolved = [_resolve_schema_ref(option, root) for option in options if isinstance(option, dict)]
+        concrete = [option for option in resolved if option.get("type") != "null"]
+        if len(concrete) < len(resolved):
+            schema["nullable"] = True
+        if concrete:
+            choice = _flatten_schema_alternatives(concrete[0], root)
+            schema = {**choice, **{k: v for k, v in schema.items() if k != "type" or "type" not in choice}}
+    parts = schema.pop("allOf", None)
+    if isinstance(parts, list):
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            part = _flatten_schema_alternatives(_resolve_schema_ref(part, root), root)
+            properties = {**(part.get("properties") or {}), **(schema.get("properties") or {})}
+            required = list(dict.fromkeys((part.get("required") or []) + (schema.get("required") or [])))
+            schema = {**part, **schema}
+            if properties:
+                schema["properties"] = properties
+            if required:
+                schema["required"] = required
+    return schema
 
 
 def build_gemini_tools(allowed_function_names=None):
@@ -432,7 +550,7 @@ def build_gemini_tools(allowed_function_names=None):
         merged.append({
             "name": CODEGEN_TOOL_CLAUDE["name"],
             "description": CODEGEN_TOOL_CLAUDE["description"],
-            "parameters": CODEGEN_TOOL_CLAUDE["input_schema"],
+            "parameters": _strip_unsupported_schema_keys(CODEGEN_TOOL_CLAUDE["input_schema"]),
         })
     general_tools = WEB_TOOLS_CLAUDE + FILE_TOOLS_CLAUDE + _cua_provider_tools() + _mcp_provider_tools()
     if config.ENABLE_TERMINAL_TOOLS:
@@ -445,7 +563,8 @@ def build_gemini_tools(allowed_function_names=None):
         _append_non_overlapping_tools(
             merged,
             [
-                {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}
+                {"name": t["name"], "description": t["description"],
+                 "parameters": _strip_unsupported_schema_keys(t["input_schema"])}
                 for t in vision_tools
                 if include(t["name"])
             ],
@@ -1150,6 +1269,32 @@ def _is_transient_gemini_transport_error(error: Exception) -> bool:
     return any(term in name or term in message for term in transient_terms)
 
 
+def _gemini_tool_objects(task, types, tool_declarations):
+    """Build Gemini Tool objects, leaving out any one declaration it rejects.
+
+    A single malformed schema (for example from a newly discovered MCP or Cua
+    tool) must cost that tool, not the whole model turn.
+    """
+    tools = []
+    for group in tool_declarations:
+        accepted = []
+        for declaration in group.get("function_declarations", []):
+            try:
+                accepted.append(types.FunctionDeclaration(**declaration))
+            except Exception as exc:
+                name = declaration.get("name", "?")
+                skipped = getattr(task, "gemini_skipped_tools", None)
+                if skipped is None:
+                    skipped = task.gemini_skipped_tools = []
+                if name not in skipped:
+                    skipped.append(name)
+                    logger.warning("Gemini rejected the %s tool schema: %s", name, exc)
+                    task.log_step(f"Tool '{name}' is unavailable with this AI model (its definition was rejected); continuing without it.")
+        if accepted:
+            tools.append(types.Tool(function_declarations=accepted))
+    return tools
+
+
 def call_gemini(task, system_prompt: str):
     from google import genai
     from google.genai import errors, types
@@ -1166,7 +1311,7 @@ def call_gemini(task, system_prompt: str):
         if task.awaiting_approval and getattr(task, "defer_excel_until_approval", False)
         else build_gemini_tools(allowed_function_names)
     )
-    tools = [types.Tool(**declaration) for declaration in tool_declarations]
+    tools = _gemini_tool_objects(task, types, tool_declarations)
     generation_config = types.GenerateContentConfig(
         tools=tools or None,
         tool_config=(

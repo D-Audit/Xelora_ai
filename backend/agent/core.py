@@ -6,11 +6,14 @@ layers: skill library, code generation, or visual fallback.
 """
 
 import concurrent.futures
+import contextlib
 import contextvars
 import json
 import os
 import re
 import sys
+import threading
+import time as _time
 
 import config
 from skills.registry import has_skill, run_skill
@@ -39,6 +42,46 @@ try:
     _HAS_WINDOW_SAFETY = True
 except ImportError:
     _HAS_WINDOW_SAFETY = False
+
+
+HEARTBEAT_FIRST_SECONDS = 10
+HEARTBEAT_EVERY_SECONDS = 20
+
+
+@contextlib.contextmanager
+def _heartbeat(task, label: str):
+    """Tell the user what Xelora is waiting on while a slow step runs.
+
+    A model turn or an Excel action can take tens of seconds; without this
+    the live progress view looks frozen. Quick steps log nothing extra.
+    """
+    stop = threading.Event()
+    started = _time.monotonic()
+
+    def beat():
+        wait = HEARTBEAT_FIRST_SECONDS
+        while not stop.wait(wait):
+            task.log_step(f"⏳ {label}… ({int(_time.monotonic() - started)}s)")
+            wait = HEARTBEAT_EVERY_SECONDS
+
+    thread = threading.Thread(target=beat, name="xelora-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+
+
+def _action_label(tool_name: str) -> str:
+    if tool_name in {"web_search", "web_fetch"}:
+        return "Researching on the web"
+    if tool_name.startswith("cua"):
+        return "Checking the Excel window"
+    if tool_name == "run_excel_code":
+        return "Running a custom Excel step"
+    from agent.reveal import NATIVE_FEATURE_NAMES
+    label = NATIVE_FEATURE_NAMES.get(tool_name)
+    return f"Working in Excel: {label}" if label else f"Working in Excel ({tool_name})"
 
 
 def _run_skill_with_timeout(
@@ -2229,8 +2272,10 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             ExcelUnavailableError, bind_workbook_context, start_task_workbook,
         )
         if not use_existing and not task.workbook_name:
+            task.log_step("Opening Excel with a new workbook.")
             try:
-                workbook = start_task_workbook()
+                with _heartbeat(task, "Waiting for Excel to open"):
+                    workbook = start_task_workbook()
             except ExcelUnavailableError as exc:
                 task.is_done = True
                 task.final_response = f"INCOMPLETE: Xelora could not start Excel. Reason: {exc}"
@@ -2245,8 +2290,9 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             bind_workbook_context(task.workbook_name, task.excel_app_pid)
         _keep_excel_visible(task)
 
-    excel_version_info = _detect_excel_version_once(task) if can_start_excel_session else None
-    workbook_state = _inspect_workbook_state_once(task) if can_start_excel_session else None
+    with _heartbeat(task, "Checking the workbook before planning"):
+        excel_version_info = _detect_excel_version_once(task) if can_start_excel_session else None
+        workbook_state = _inspect_workbook_state_once(task) if can_start_excel_session else None
     # Inspection is the first reliable source of the active workbook identity.
     # Adopt it before the planner can call codegen, otherwise a subprocess can
     # fall back to an unrelated global xlwings active workbook.
@@ -2398,7 +2444,7 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
         if steps_since_last == 0 and time_since_last > 30:
             # No progress in 30 seconds
             task._stall_count += 1
-            task.log_step(f"⚠️ No progress for {int(time_since_last)}s (stall #{task._stall_count})")
+            task.log_step(f"⚠️ No new step for {int(time_since_last)}s; asking the AI to continue with the plan.")
             
             if task._stall_count >= 3:
                 # Stalled 3 times - terminate
@@ -2413,9 +2459,10 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 "role": "user",
                 "content": (
                     f"You have not made progress for {int(time_since_last)} seconds. "
-                    "You MUST call an actual Excel tool to make changes. "
-                    "Do not just describe actions - call the tools to perform them. "
-                    "If you are stuck, try: execute_excel_shortcut, go_to_range, or type_text."
+                    "Call the next tool your plan needs now (for example write_table, "
+                    "insert_formula, format_range, or create_chart); do not only describe it. "
+                    "If every requested item is already verified, give your final answer. "
+                    "If you are blocked, say exactly what is blocking you."
                 ),
             })
             task._last_progress_time = current_time
@@ -2428,21 +2475,22 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             task._last_step_count = len(task.structured_steps)
 
         try:
-            active_provider = providers.active_provider_name(task)
-            if active_provider == "claude":
-                tool_calls, text_blocks, stop_reason = providers.call_claude(task, system_prompt)
-            elif active_provider == "openrouter":
-                tool_calls, text_blocks, stop_reason = providers.call_openrouter(task, system_prompt)
-                # Store assistant message with tool_calls for OpenRouter format
-                assistant_content = {"tool_calls": tool_calls} if tool_calls else {}
-                if text_blocks:
-                    assistant_content["text"] = " ".join(text_blocks)
-                task.messages.append({
-                    "role": "assistant",
-                    "content": assistant_content
-                })
-            else:
-                tool_calls, text_blocks, stop_reason = providers.call_gemini(task, system_prompt)
+            with _heartbeat(task, "Planning the next step with the AI"):
+                active_provider = providers.active_provider_name(task)
+                if active_provider == "claude":
+                    tool_calls, text_blocks, stop_reason = providers.call_claude(task, system_prompt)
+                elif active_provider == "openrouter":
+                    tool_calls, text_blocks, stop_reason = providers.call_openrouter(task, system_prompt)
+                    # Store assistant message with tool_calls for OpenRouter format
+                    assistant_content = {"tool_calls": tool_calls} if tool_calls else {}
+                    if text_blocks:
+                        assistant_content["text"] = " ".join(text_blocks)
+                    task.messages.append({
+                        "role": "assistant",
+                        "content": assistant_content
+                    })
+                else:
+                    tool_calls, text_blocks, stop_reason = providers.call_gemini(task, system_prompt)
         except Exception as exc:
             if providers.activate_available_provider_fallback(task, exc):
                 # The fallback begins from a clean, provider-neutral user turn
@@ -3127,13 +3175,14 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                     }
                     execution_layer, generated_code = "popup_gate", None
                 else:
-                    result, execution_layer, generated_code = dispatch_action(
-                        tool_name, tool_input, workbook_name=task.workbook_name,
-                        excel_app_pid=task.excel_app_pid,
-                        user_id=task.user_id,
-                        file_access_authorized=bool(getattr(task, "has_authenticated_user", False)),
-                        cua_observed_targets=task.cua_observed_targets,
-                    )
+                    with _heartbeat(task, _action_label(tool_name)):
+                        result, execution_layer, generated_code = dispatch_action(
+                            tool_name, tool_input, workbook_name=task.workbook_name,
+                            excel_app_pid=task.excel_app_pid,
+                            user_id=task.user_id,
+                            file_access_authorized=bool(getattr(task, "has_authenticated_user", False)),
+                            cua_observed_targets=task.cua_observed_targets,
+                        )
                 status = "success"
                 if (
                     tool_name == "cua__get_window_state"
