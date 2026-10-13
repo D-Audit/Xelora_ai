@@ -114,9 +114,11 @@ sign-in inside app windows), and the session comes back to the app through a
 
 ### Email (password reset and email confirmation)
 
-Create a free account at resend.com, verify your domain, and set
-`RESEND_API_KEY` and `EMAIL_FROM` (e.g. `Xelora <no-reply@yourdomain.com>`) on
-Render, plus `FRONTEND_URL` = your Vercel URL so links point to the site.
+Create a free account at brevo.com, verify a sender address or your domain
+(Senders, Domains & Dedicated IPs), create an API key (SMTP & API -> API Keys),
+and set `BREVO_API_KEY` and `EMAIL_FROM` (e.g. `Xelora <no-reply@yourdomain.com>`,
+using the verified address) on Render, plus `FRONTEND_URL` = your Vercel URL so
+links point to the site.
 Any SMTP server works instead (`SMTP_HOST`, `SMTP_USER`, ...). Until one is set,
 "Forgot password" emails are only printed in the Render logs.
 

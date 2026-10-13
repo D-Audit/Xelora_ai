@@ -43,7 +43,7 @@ services:
         sync: false   # "Continue with Google" (docs/DEPLOYMENT.md)
       - key: GOOGLE_CLIENT_SECRET
         sync: false
-      - key: RESEND_API_KEY
-        sync: false   # password reset and email confirmation emails
+      - key: BREVO_API_KEY
+        sync: false   # password reset and email confirmation emails (Brevo)
       - key: EMAIL_FROM
         sync: false   # e.g. Xelora <no-reply@yourdomain.com>

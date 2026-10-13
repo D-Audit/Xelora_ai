@@ -1,9 +1,10 @@
 """emailer.py - transactional email (password reset, email verification).
 
 Configure ONE of:
-  RESEND_API_KEY            Resend (https://resend.com), simplest to set up
+  BREVO_API_KEY             Brevo (https://www.brevo.com) transactional email API
   SMTP_HOST [+ SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_STARTTLS]
-and EMAIL_FROM, e.g. "Xelora <no-reply@yourdomain.com>".
+and EMAIL_FROM, e.g. "Xelora <no-reply@yourdomain.com>". With Brevo, the
+EMAIL_FROM address must be a sender (or domain) verified in your Brevo account.
 
 With neither configured, send_email() logs the message (including any
 link) to the server console and returns False, so local development
@@ -16,12 +17,14 @@ import logging
 import os
 import smtplib
 from email.message import EmailMessage
+from email.utils import parseaddr
 
 import requests
 
 logger = logging.getLogger(__name__)
 
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+BREVO_API_KEY = os.getenv("BREVO_API_KEY", "").strip()
+BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
 SMTP_HOST = os.getenv("SMTP_HOST", "")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
@@ -31,7 +34,7 @@ EMAIL_FROM = os.getenv("EMAIL_FROM", "Xelora <no-reply@xelora.app>")
 
 
 def configured() -> bool:
-    return bool(RESEND_API_KEY or SMTP_HOST)
+    return bool(BREVO_API_KEY or SMTP_HOST)
 
 
 def _html(heading: str, paragraphs: list[str], button: tuple[str, str] | None) -> str:
@@ -59,19 +62,27 @@ def send_email(to: str, subject: str, heading: str, paragraphs: list[str],
     """Send one email. Returns True if handed to a provider. Never raises."""
     text = "\n\n".join([heading, *paragraphs] + ([f"{button[0]}: {button[1]}"] if button else []))
     if not configured():
-        logger.warning("Email not configured (set RESEND_API_KEY or SMTP_HOST). Would send to %s: %s\n%s", to, subject, text)
+        logger.warning("Email not configured (set BREVO_API_KEY or SMTP_HOST). Would send to %s: %s\n%s", to, subject, text)
         print(f"[email not configured] To: {to} | {subject}\n{text}", flush=True)
         return False
     try:
-        if RESEND_API_KEY:
+        if BREVO_API_KEY:
+            sender_name, sender_email = parseaddr(EMAIL_FROM)
             response = requests.post(
-                "https://api.resend.com/emails",
-                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
-                json={"from": EMAIL_FROM, "to": [to], "subject": subject, "text": text,
-                      "html": _html(heading, paragraphs, button)},
+                BREVO_API_URL,
+                headers={"api-key": BREVO_API_KEY, "accept": "application/json"},
+                json={
+                    "sender": {"name": sender_name or "Xelora", "email": sender_email},
+                    "to": [{"email": to}],
+                    "subject": subject,
+                    "textContent": text,
+                    "htmlContent": _html(heading, paragraphs, button),
+                },
                 timeout=15,
             )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                # Brevo explains rejections (unverified sender, bad key) in the body.
+                raise RuntimeError(f"Brevo rejected the email ({response.status_code}): {response.text[:300]}")
         else:
             message = EmailMessage()
             message["From"], message["To"], message["Subject"] = EMAIL_FROM, to, subject
