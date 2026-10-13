@@ -67,8 +67,22 @@ Copy-Item (Join-Path $cuaExe.Directory.FullName "*") $cuaOut -Recurse -Force
 if ($cuaExe.Name -ne "cua-driver.exe") {
     Move-Item (Join-Path $cuaOut $cuaExe.Name) (Join-Path $cuaOut "cua-driver.exe") -Force
 }
-$cuaVersionOutput = & (Join-Path $cuaOut "cua-driver.exe") --version
-if ($LASTEXITCODE -ne 0) { throw "bundled cua-driver --version failed" }
+# cua-driver.exe is a windowed (GUI-subsystem) program, which PowerShell's
+# call operator cannot capture output from; redirect it explicitly, the way
+# the agent's Python subprocess does.
+$probe = New-Object System.Diagnostics.ProcessStartInfo
+$probe.FileName = Join-Path $cuaOut "cua-driver.exe"
+$probe.Arguments = "--version"
+$probe.RedirectStandardOutput = $true
+$probe.RedirectStandardError = $true
+$probe.RedirectStandardInput = $true
+$probe.UseShellExecute = $false
+$probe.CreateNoWindow = $true
+$proc = [System.Diagnostics.Process]::Start($probe)
+$proc.StandardInput.Close()
+$cuaVersionOutput = ($proc.StandardOutput.ReadToEnd() + $proc.StandardError.ReadToEnd()).Trim()
+if (-not $proc.WaitForExit(30000)) { $proc.Kill(); throw "bundled cua-driver --version timed out" }
+if ($proc.ExitCode -ne 0) { throw "bundled cua-driver --version failed ($($proc.ExitCode)): $cuaVersionOutput" }
 Write-Host "Bundled Cua Driver: $cuaVersionOutput"
 Remove-Item -Recurse -Force $cuaTemp
 
