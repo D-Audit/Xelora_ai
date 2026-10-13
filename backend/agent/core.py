@@ -159,6 +159,11 @@ class AgentTask:
         # lets both providers enforce the fallback instead of merely hoping
         # the model remembers a sentence in the prompt.
         self.pending_codegen_fallback = None
+        # Failures per tool, and the tools already told to research their
+        # error online, so a repeated failure prompts one web lookup instead
+        # of the same attempt again.
+        self.failures_by_tool = {}
+        self.research_hinted = []
         # A task may be actively recovering after a failed action. This is
         # visible to the user, but it never authorizes overlapping or
         # speculative Excel writes. The executor remains serial.
@@ -1995,6 +2000,33 @@ def _write_table_input_contains_formula_values(tool_input: dict) -> bool:
     )
 
 
+RESEARCH_AFTER_FAILURES = 2
+_NO_RESEARCH_TOOLS = {"web_search", "web_fetch"}
+
+
+def _add_research_hint(task: AgentTask, tool_name: str, result: dict) -> None:
+    """After repeated failures of one tool, tell the model to look it up once.
+
+    A second identical guess rarely fixes an unfamiliar Excel feature or an
+    error message the model does not understand; the documented method does.
+    """
+    if not isinstance(result, dict) or tool_name in _NO_RESEARCH_TOOLS or tool_name.startswith("cua"):
+        return
+    count = task.failures_by_tool.get(tool_name, 0) + 1
+    task.failures_by_tool[tool_name] = count
+    if count < RESEARCH_AFTER_FAILURES or tool_name in task.research_hinted:
+        return
+    task.research_hinted.append(tool_name)
+    error = str(result.get("error") or result.get("verification_note") or result.get("status") or "")[:200]
+    result["research_hint"] = (
+        f"{tool_name} has now failed {count} times in this task. Do not repeat the same attempt. "
+        "Call web_search with the exact error text or the Excel feature/function name "
+        "(prefer learn.microsoft.com and support.microsoft.com), web_fetch the most relevant "
+        "page, then retry once using the documented method or switch to the skill it points to."
+        + (f" Error to search: {error}" if error else "")
+    )
+
+
 def _should_schedule_codegen_fallback(
     tool_name: str,
     result: dict,
@@ -3175,6 +3207,7 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                     "recovery_options",
                     recovery_options(tool_name, execution_layer, result),
                 )
+                _add_research_hint(task, tool_name, result)
                 task.log_step(f"⚠️ Not verified: {tool_name} -> {result.get('verification_note', result.get('error', 'no details'))}")
                 task.set_recovery_state(
                     "inspecting_failure",

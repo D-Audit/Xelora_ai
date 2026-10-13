@@ -69,6 +69,82 @@ _PATTERNS: dict[str, re.Pattern[str]] = {
 }
 
 
+# Request wording -> the dedicated skills built for it, so the model reaches
+# for e.g. export_to_pdf or data_validation instead of improvising with
+# generic writes or code. Only registered skills are ever recommended.
+_FEATURE_HINTS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = tuple(
+    (re.compile(pattern, re.I), tools, reason) for pattern, tools, reason in (
+        (r"\bdashboard|kpi|scorecard\b", ("create_sheets", "create_pivot_table", "create_chart", "add_slicer",
+         "add_shape", "add_sparkline", "arrange_dashboard_layout"),
+         "Dashboard: data Table -> summary formulas/pivot -> KPI cards, charts, slicers -> reflow layout."),
+        (r"\bpdf\b|\bprint|page setup|landscape|portrait", ("set_page_layout", "export_to_pdf"),
+         "Set the page layout first, then export the sheet to PDF."),
+        (r"\bpivot|summari[sz]e by|break ?down by|group(ed)? by", ("create_pivot_table", "refresh_pivot_table", "add_slicer"),
+         "Use a native PivotTable (and slicers for interactive filtering)."),
+        (r"\bchart|graph|plot|visuali[sz]", ("create_chart", "modify_chart", "position_chart"),
+         "Chart from a bounded summary range, titled and placed beside the data."),
+        (r"\bsparkline|trend line in (the )?cell", ("add_sparkline",), "In-cell trend per row."),
+        (r"drop-?down|pick ?list|list of (options|choices)|validation|restrict (input|entries)",
+         ("data_validation", "add_dropdown_control"), "In-cell lists and input limits via data validation."),
+        (r"\bfilter", ("set_autofilter", "filter_data"),
+         "set_autofilter adds filter arrows; filter_data only reads matching rows."),
+        (r"highlight|heat ?map|colou?r (code|scale)|traffic light|data bars?|icons?\b",
+         ("conditional_formatting", "color_scale_formatting", "data_bar_formatting", "icon_set_formatting"),
+         "Use the matching conditional-format skill rather than static fills."),
+        (r"duplicate", ("remove_duplicates",), "Dedicated de-duplication."),
+        (r"\bsplit\b|first (and|&) last name", ("split_column",), "Split one column into several."),
+        (r"\bcombine|merge (the )?sheets|consolidate|stack", ("combine_sheets", "merge_columns"),
+         "Combine similar sheets or join columns."),
+        (r"unpivot|wide to long|long format", ("unpivot_data",), "Reshape wide data to long."),
+        (r"budget|actual vs|vs\.? actual|variance", ("variance_analysis",), "Formula-based budget vs actual."),
+        (r"scenario|what-?if|sensitivity|best case|worst case", ("scenario_builder", "create_named_range"),
+         "Scenario tables driven by named inputs."),
+        (r"\bprotect|\block\b|password", ("protect_sheet", "unprotect_sheet"), "Sheet protection, only as asked."),
+        (r"\bhide|unhide", ("set_sheet_visibility", "group_rows_columns"), "Hide sheets or collapse rows/columns."),
+        (r"\bcomment|\bnote\b", ("add_comment",), "Cell notes for assumptions and sources."),
+        (r"hyperlink|\blink to|table of contents|contents page", ("add_hyperlink",), "Clickable links."),
+        (r"\blogo|picture|image|photo", ("insert_picture",), "Place an image file on the sheet."),
+        (r"\bmacro|\bvba\b|\bbutton|\.xlsm", ("check_vba_access", "create_vba_macro", "add_macro_button",
+         "run_macro", "save_as_macro_enabled"), "Check VBA trust first; save as .xlsm."),
+        (r"\bsql\b|database|postgres|mysql|sql server", ("import_from_database",), "Run the user's query into a sheet."),
+        (r"power query|get data|refreshable|connection", ("create_power_query_connection",), "A refreshable data connection."),
+        (r"\bapi\b|live (rate|price|data)|exchange rate|stock price", ("fetch_live_data", "web_search"),
+         "Live values from a named API, or researched with a cited source."),
+        (r"\bpdf\b.*\b(into|to) (excel|a sheet)|scanned|invoice|receipt|\.docx|word document|extract (the )?table",
+         ("import_unstructured_document",), "Extract tables/text from a document into a sheet."),
+        (r"\bopen\b.*\.(xlsx|xlsm|xls|csv)|open (my|the) (file|workbook)", ("open_workbook",), "Open the named file."),
+        (r"\bsave as|save (it )?(to|in|as)|name (it|the file)", ("create_new_workbook",), "Save under the requested name."),
+        (r"knowledge base|our (policy|policies|sop|manual|documents?)|company (data|documents?)",
+         ("search_knowledge_base",), "Use the user's stored documents."),
+        (r"\bfreeze", ("freeze_panes",), "Freeze header rows/columns."),
+        (r"named range|name (the|this) (cell|range)", ("create_named_range",), "Readable named inputs."),
+        (r"sort|rank|order by|largest|smallest|top \d+", ("sort_range",), "Native sort."),
+        (r"copy (the |this )?sheet|duplicate (the |this )?sheet", ("copy_sheet",), "Duplicate a sheet with formatting."),
+        (r"insert (a |an )?(row|column)|add (a |an )?(row|column)", ("insert_row", "insert_column"), "Insert rows/columns."),
+        (r"delete (the )?(row|column|sheet|chart)|remove (the )?(row|column|sheet|chart)",
+         ("delete_row", "delete_column", "delete_sheet", "delete_chart"), "Delete only what was asked."),
+    )
+)
+
+
+def feature_skills(instruction: str) -> list[RouteStep]:
+    """Dedicated skills whose purpose matches the instruction's wording."""
+    try:
+        from skills.registry import has_skill
+    except Exception:  # registry unavailable (e.g. a minimal test import)
+        has_skill = None
+    steps, seen = [], set()
+    for pattern, tools, reason in _FEATURE_HINTS:
+        if not pattern.search(instruction or ""):
+            continue
+        usable = tuple(t for t in tools if t not in seen and (
+            has_skill is None or has_skill(t) or t.startswith("web_")))
+        if usable:
+            seen.update(usable)
+            steps.append(RouteStep("feature_skills", usable, reason))
+    return steps
+
+
 def _availability() -> dict[str, bool]:
     return {
         "codegen": bool(config.ENABLE_CODEGEN_LAYER),
@@ -144,6 +220,7 @@ def route_instruction(instruction: str, *, file_access: bool = True, available: 
     if wants_excel:
         plan.steps.append(RouteStep("excel_skills", ("inspect_workbook", "read_range", "write_table", "write_cell", "insert_formula", "format_range"),
                                     "Structured Excel API skills are the default for cells, ranges, formulas, and formatting."))
+        plan.steps.extend(feature_skills(text))
     if "gui" in matched:
         ui_steps, missing = ui_method_chain(available)
         plan.steps.extend(ui_steps)
