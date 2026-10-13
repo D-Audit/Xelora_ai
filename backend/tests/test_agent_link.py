@@ -209,6 +209,26 @@ class RunJobTests(AgentLinkCase):
         self.assertIn("Use the Sales sheet", texts)
         self.assertTrue(job["state"]["has_authenticated_user"])  # agent's local override stays local
 
+    def test_reply_after_cloud_restart_still_goes_to_the_agent(self):
+        """A chat rebuilt from the database must not run on the cloud (no Excel)."""
+        self.start_task()
+
+        def answer(task, **_kwargs):
+            task.final_response = "Done."
+            task.chat_transcript.append({"role": "assistant", "text": task.final_response})
+            task.messages.append({"role": "assistant", "content": "Done."})
+            task.is_done = True
+
+        local_agent.run_job(self.cloud.claim(wait=0), self.cloud, run=answer, log=lambda _m: None)
+        main.ACTIVE_TASKS.pop(7)  # the cloud restarted and forgot the live task
+        with patch.object(main, "run_task", side_effect=AssertionError("ran on the cloud")):
+            response = self.client.post("/task/7/resume", json={"correction": "Add a totals row"},
+                                        headers=self.web_headers)
+        self.assertEqual(200, response.status_code, response.text)
+        job = self.cloud.claim(wait=0)
+        self.assertIsNotNone(job, "the reply was not queued for the desktop agent")
+        self.assertTrue(job["state"]["has_authenticated_user"])
+
     def test_push_after_cloud_restart_rebuilds_the_mirror(self):
         db = self.Session()
         db.add(agent_link.AgentJob(task_id=9, user_id=USER, status=agent_link.CLAIMED, payload="{}"))

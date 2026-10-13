@@ -516,6 +516,11 @@ def resume_task(
                    "completed a run, or it ran before persistence was enabled.",
         )
     _assert_task_owner(task.user_id, jwt_user_id)
+    if jwt_user_id is not None:
+        # A task rebuilt from the database after a restart starts unflagged;
+        # without this, a reply in an existing chat ran on this server
+        # (Linux, no Excel) instead of being handed to the user's desktop.
+        task.has_authenticated_user = True
 
     if not task.is_done and not task.is_paused:
         raise HTTPException(status_code=409, detail="This conversation is still processing the previous message.")
