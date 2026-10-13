@@ -8,6 +8,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
 from skills.excel_shared import get_active_workbook, normalize, hex_to_rgb  # noqa: F401
+from skills.table_style import style_data_block
 
 EXCEL_ERROR_VALUES = {"#NAME?", "#REF!", "#VALUE!", "#DIV/0!", "#N/A", "#NULL!", "#NUM!", "#SPILL!", "#CALC!"}
 def _is_excel_error(value) -> bool:
@@ -64,7 +65,8 @@ def _table_values_match(expected, actual) -> bool:
     return True
 
 
-def run(sheet_name: str, start_cell: str, headers: list, rows: list, table_name: str = None):
+def run(sheet_name: str, start_cell: str, headers: list, rows: list, table_name: str = None,
+        style: str = "professional"):
     if not isinstance(headers, list) or not headers or any(not isinstance(header, str) or not header.strip() for header in headers):
         return {
             "error": "headers must be a non-empty list of non-blank strings.",
@@ -151,6 +153,17 @@ def run(sheet_name: str, start_cell: str, headers: list, rows: list, table_name:
                     f"Data was written, but converting it into a real Table named "
                     f"'{table_name}' failed ({e}). Structured references to it will fail."
                 )
+
+    if style != "none" and result.get("verified"):
+        try:
+            result["styling"] = style_data_block(
+                sheet, start, headers, rows, len(rows) if rows else existing_data_rows,
+                is_table=result.get("table_status") in {"table_created", "table_resized_to_existing_data"},
+            )
+            wb.save()
+        except Exception as exc:
+            # Cosmetic only: the verified data stays written.
+            result["styling"] = {"applied": [], "error": str(exc)}
 
     if not rows and existing_data_rows:
         result["existing_rows_included"] = existing_data_rows

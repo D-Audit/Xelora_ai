@@ -37,6 +37,10 @@ class SandboxPolicyTests(unittest.TestCase):
         self.assertRejected("wb.api.SaveAs('C:/x.xlsx')", "SaveAs")
         self.assertRejected("import xlwings as xw\nb = xw.Book('C:/other.xlsx')", "Book")
 
+    def test_starting_another_excel_is_rejected(self):
+        self.assertRejected("import xlwings as xw\napp = xw.App(visible=True)", "xw.App")
+        _check_ast("wb = get_task_workbook()\nwb.app.calculation = 'automatic'")
+
     def test_pandas_numpy_io_is_rejected(self):
         for code in (
             "import pandas as pd\ndf = pd.read_csv('C:/data.csv')",

@@ -7,6 +7,9 @@ import xlwings as xw
 from skills.excel_shared import (
     bind_workbook_context,
     get_active_workbook,
+    get_bound_workbook_name,
+    is_blank_workbook,
+    is_owned_excel_process,
     mark_task_bootstrap_workbook_used,
     normalize_workbook_path,
     require_excel_engine,
@@ -15,6 +18,19 @@ from skills.excel_shared import (
     _active_or_new_workbook,
     use_task_bootstrap_workbook,
 )
+
+
+def _bound_blank_owned_workbook():
+    """The task's bound workbook, if Xelora started it and it is still blank."""
+    if not get_bound_workbook_name():
+        return None
+    try:
+        wb = get_active_workbook()
+    except Exception:
+        return None
+    if is_owned_excel_process(wb.app) and is_blank_workbook(wb):
+        return wb
+    return None
 
 
 def run(file_path: str):
@@ -42,9 +58,13 @@ def run(file_path: str):
     # Book2 beside it.  This is the normal path for a natural-language request
     # such as "create a workbook named Report.xlsx".
     reuse_startup_workbook = use_task_bootstrap_workbook()
+    bound_blank_workbook = None if reuse_startup_workbook else _bound_blank_owned_workbook()
     try:
-        if reuse_startup_workbook:
-            wb = get_active_workbook()
+        if reuse_startup_workbook or bound_blank_workbook is not None:
+            # A task resumed after "Confirm" loses the startup flag, but its
+            # bound workbook is still Xelora's blank one: save that instead of
+            # opening another window.
+            wb = bound_blank_workbook or get_active_workbook()
             app = wb.app
         else:
             created_app = len(xw.apps) == 0

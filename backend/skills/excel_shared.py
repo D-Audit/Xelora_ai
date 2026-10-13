@@ -111,6 +111,10 @@ def bind_workbook_context(workbook_name: str | None, excel_app_pid: int | None =
     _RESTART_COUNT.set(0)
 
 
+def get_bound_workbook_name() -> str | None:
+    return _CURRENT_WORKBOOK_NAME.get()
+
+
 def _app_pid(app) -> int | None:
     """Return an xlwings application's PID without making routing fail."""
     try:
@@ -152,15 +156,60 @@ def start_task_workbook():
     user workbooks are left untouched.
     """
     require_excel_engine()
-    app = xw.App(visible=True)
-    retain_owned_excel_app(app)
-    _harden_app(app)
-    workbook = _active_or_new_workbook(app)
+    # Reuse the Excel process Xelora already started for an earlier task, and
+    # a blank workbook left in it, so each new chat does not pile up another
+    # Excel process and window.
+    app = _live_owned_app()
+    if app is not None:
+        _harden_app(app)
+        workbook = next((book for book in app.books if is_blank_workbook(book)), None) or app.books.add()
+    else:
+        app = xw.App(visible=True)
+        retain_owned_excel_app(app)
+        _harden_app(app)
+        workbook = _active_or_new_workbook(app)
     _ensure_workbook_has_path(workbook)
     restore_screen_updating(app)
     _bind_resolved_workbook(workbook)
     _TASK_BOOTSTRAP_WORKBOOK.set(True)
     return workbook
+
+
+def _live_owned_app():
+    """Return a still-running Excel process that Xelora started, if any."""
+    try:
+        live_pids = {int(pid) for pid in xw.apps.keys()}
+    except Exception:
+        return None
+    for pid in list(_OWNED_EXCEL_APPS):
+        if pid not in live_pids:
+            _OWNED_EXCEL_APPS.pop(pid, None)
+            continue
+        try:
+            return xw.apps[pid]
+        except Exception:
+            continue
+    return None
+
+
+def is_owned_excel_process(app) -> bool:
+    return _app_pid(app) in _OWNED_EXCEL_APPS
+
+
+def is_blank_workbook(book) -> bool:
+    """True for an untouched workbook: one empty sheet with no objects."""
+    try:
+        if len(book.sheets) != 1:
+            return False
+        sheet = book.sheets[0]
+        used = sheet.used_range
+        return (
+            used.address == "$A$1"
+            and used.value in (None, "")
+            and int(sheet.api.Shapes.Count) == 0
+        )
+    except Exception:
+        return False
 
 
 def use_task_bootstrap_workbook() -> bool:

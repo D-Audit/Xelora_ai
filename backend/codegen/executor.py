@@ -172,6 +172,11 @@ def _check_ast(code: str):
                 "databases, or pickles. Read input from the workbook (e.g. "
                 "sheet.range(...).options(pd.DataFrame, header=1, index=False).value) and write results back to it."
             )
+        elif isinstance(node, ast.Attribute) and node.attr == "App":
+            raise CodeRejected(
+                "Generated code must not start Excel (xw.App opens another Excel window). "
+                "Use get_task_workbook() for the workbook this task already has open."
+            )
         elif _attribute_path(node) in {"xw.books.active", "xlwings.books.active", "xw.apps.active"}:
             raise CodeRejected(
                 "Do not select an active xlwings workbook. Use get_task_workbook() "
