@@ -284,6 +284,27 @@ def _available_vision_tools():
     return [tool for tool in VISION_TOOLS_CLAUDE if tool["name"] not in parser_dependent]
 
 
+# Keyboard-only Excel controls: Name Box / Go To navigation, sheet switching,
+# named shortcuts, Ribbon KeyTips and key presses, plus reading and answering
+# the dialog a shortcut opens. No screenshots, no mouse.
+EXCEL_SHORTCUT_TOOL_NAMES = frozenset({
+    "go_to_range", "go_to_sheet", "navigate_to_cell_on_sheet", "execute_excel_shortcut",
+    "press_shortcut", "press_alt", "hotkey", "press_key", "activate_ribbon_tab",
+    "inspect_popup", "click_popup_button", "click_popup_control", "set_popup_text",
+})
+
+
+def shortcuts_enabled() -> bool:
+    return bool(config.ENABLE_EXCEL_SHORTCUTS or config.ENABLE_VISUAL_FALLBACK or config.VISUAL_ONLY_MODE)
+
+
+def _excel_shortcut_tools() -> list[dict]:
+    """The keyboard subset of the visual tools, for hybrid mode without the full visual fallback."""
+    if not config.ENABLE_EXCEL_SHORTCUTS or config.ENABLE_VISUAL_FALLBACK:
+        return []
+    return [tool for tool in VISION_TOOLS_CLAUDE if tool["name"] in EXCEL_SHORTCUT_TOOL_NAMES]
+
+
 def _assert_unique_tool_names(tool_declarations, provider_name: str) -> None:
     """Fail before contacting a model when a provider tool list is invalid.
 
@@ -359,6 +380,7 @@ def build_claude_tools():
         tools.append(CODEGEN_TOOL_CLAUDE)
     if config.ENABLE_VISUAL_FALLBACK:
         _append_non_overlapping_tools(tools, _available_vision_tools())
+    _append_non_overlapping_tools(tools, _excel_shortcut_tools())
     _assert_unique_tool_names(tools, "Claude")
     return tools
 
@@ -569,6 +591,15 @@ def build_gemini_tools(allowed_function_names=None):
                 if include(t["name"])
             ],
         )
+    _append_non_overlapping_tools(
+        merged,
+        [
+            {"name": t["name"], "description": t["description"],
+             "parameters": _strip_unsupported_schema_keys(t["input_schema"])}
+            for t in _excel_shortcut_tools()
+            if include(t["name"])
+        ],
+    )
     _assert_unique_tool_names(merged, "Gemini")
     return [{"function_declarations": merged}]
 
@@ -840,6 +871,8 @@ def _gemini_tool_config(task):
             names.add("run_terminal")
         if config.ENABLE_VISUAL_FALLBACK:
             names |= _GEMINI_INITIAL_VISUAL_MUTATION_TOOLS
+        elif config.ENABLE_EXCEL_SHORTCUTS:
+            names |= _GEMINI_INITIAL_VISUAL_MUTATION_TOOLS & EXCEL_SHORTCUT_TOOL_NAMES
         if config.ENABLE_CODEGEN_LAYER:
             names.add("run_excel_code")
         return {
@@ -865,7 +898,7 @@ def call_claude(task, system_prompt: str):
         max_retries=0,
     )
     request = dict(
-        model="claude-sonnet-4-6",
+        model=config.CLAUDE_TASK_MODEL,
         max_tokens=1024,
         system=system_prompt,
         tools=([] if task.awaiting_approval and getattr(task, "defer_excel_until_approval", False)
@@ -911,6 +944,14 @@ def active_provider_name(task) -> str:
     """
     provider = str(getattr(task, "active_provider", "") or config.AI_PROVIDER).lower()
     return provider if provider in {"gemini", "claude", "openrouter"} else config.AI_PROVIDER
+
+
+def task_provider() -> str:
+    """The provider a new Excel task starts on: EXCEL_TASK_PROVIDER when it has a key."""
+    preferred = config.EXCEL_TASK_PROVIDER
+    if preferred in {"gemini", "claude", "openrouter"} and _provider_is_configured(preferred):
+        return preferred
+    return config.AI_PROVIDER
 
 
 def _provider_is_configured(provider: str) -> bool:

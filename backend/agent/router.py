@@ -153,6 +153,7 @@ def _availability() -> dict[str, bool]:
         "terminal": bool(config.ENABLE_TERMINAL_TOOLS),
         "cua": bool(config.ENABLE_CUA_DRIVER),
         "visual": bool(config.ENABLE_VISUAL_FALLBACK or config.VISUAL_ONLY_MODE),
+        "shortcuts": bool(config.ENABLE_EXCEL_SHORTCUTS or config.ENABLE_VISUAL_FALLBACK or config.VISUAL_ONLY_MODE),
         "omniparser": bool(config.OMNIPARSER_URL or config.OMNIPARSER_LOCAL_MODE),
         "mcp": bool(getattr(config, "ENABLE_MCP_CLIENT", False)),
     }
@@ -162,9 +163,9 @@ def ui_method_chain(available: dict[str, bool]) -> tuple[list[RouteStep], list[s
     """Ordered methods for an Excel UI interaction the API cannot perform."""
     steps: list[RouteStep] = []
     missing: list[str] = []
-    if available["visual"]:
-        steps.append(RouteStep("excel_shortcuts", ("execute_excel_shortcut", "press_shortcut", "go_to_range"),
-                               "Known ribbon/dialog actions have deterministic keyboard paths."))
+    if available.get("shortcuts", available["visual"]):
+        steps.append(RouteStep("excel_shortcuts", ("execute_excel_shortcut", "press_alt", "inspect_popup", "click_popup_button"),
+                               "Known ribbon/dialog actions have deterministic keyboard paths (shortcuts, KeyTips)."))
     if available["cua"]:
         steps.append(RouteStep(
             "cua_accessibility", ("cua__get_window_state", "cua_act_and_verify", "cua__verify_state"),
@@ -223,6 +224,10 @@ def route_instruction(instruction: str, *, file_access: bool = True, available: 
         plan.steps.append(RouteStep("excel_skills", ("inspect_workbook", "read_range", "write_table", "write_cell", "insert_formula", "format_range"),
                                     "Structured Excel API skills are the default for cells, ranges, formulas, and formatting."))
         plan.steps.extend(feature_skills(text))
+        if available.get("shortcuts", available["visual"]) and "gui" not in matched:
+            plan.steps.append(RouteStep(
+                "excel_shortcuts", ("go_to_range", "go_to_sheet", "execute_excel_shortcut", "press_alt"),
+                "Navigate, select, reveal results and run standard commands by keyboard; check the effect."))
     if "gui" in matched:
         ui_steps, missing = ui_method_chain(available)
         plan.steps.extend(ui_steps)
@@ -234,7 +239,8 @@ def route_instruction(instruction: str, *, file_access: bool = True, available: 
 
 def routing_context(plan: RoutePlan) -> str:
     """A compact prompt section describing the recommended chain."""
-    lines = ["\n\nCAPABILITY ROUTE (computed by Xelora; prefer this order, verify each result):"]
+    lines = ["\n\nCAPABILITY HINTS (matched from the request's wording; a starting point, not an order. "
+             "Your reading of the live workbook and the request decides; verify each result):"]
     for index, step in enumerate(plan.steps, 1):
         lines.append(f"{index}. {step.capability}: {', '.join(step.tools)} - {step.reason}")
     if plan.unavailable:

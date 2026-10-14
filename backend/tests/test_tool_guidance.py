@@ -40,7 +40,8 @@ class ToolGuidanceTests(unittest.TestCase):
 
     def test_plain_data_entry_gets_no_extra_features(self):
         steps = route_instruction("put this data in excel").steps
-        self.assertEqual(["excel_skills"], [step.capability for step in steps])
+        # Keyboard navigation is a general method, not an extra feature.
+        self.assertEqual(["excel_skills"], [step.capability for step in steps if step.capability != "excel_shortcuts"])
 
 
 

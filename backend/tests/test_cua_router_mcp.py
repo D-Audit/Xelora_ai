@@ -26,7 +26,8 @@ from vision import cua_driver
 
 FAKE_DRIVER = str(Path(__file__).with_name("test_support") / "fake_cua_driver.py")
 EXCEL = (4242, 7)
-ALL_ON = {"codegen": True, "terminal": True, "cua": True, "visual": True, "omniparser": True, "mcp": True}
+ALL_ON = {"codegen": True, "terminal": True, "cua": True, "visual": True, "omniparser": True, "mcp": True,
+          "shortcuts": True}
 
 
 class FakeDriverCase(unittest.TestCase):
@@ -297,8 +298,15 @@ class RouterTests(unittest.TestCase):
         return route_instruction(text, available=kwargs.pop("available", ALL_ON), **kwargs).capabilities()
 
     def test_excel_range_update_uses_skills(self):
-        self.assertEqual(["excel_skills"], self.caps("Format column B as currency in Sheet1"))
-        self.assertEqual(["excel_skills"], self.caps("Write these values into A1:C5"))
+        self.assertEqual(["excel_skills", "excel_shortcuts"], self.caps("Format column B as currency in Sheet1"))
+        self.assertEqual(["excel_skills", "excel_shortcuts"], self.caps("Write these values into A1:C5"))
+
+    def test_shortcuts_follow_their_setting(self):
+        self.assertEqual(["excel_skills"], self.caps("Write these values into A1:C5",
+                                                     available={**ALL_ON, "shortcuts": False, "visual": False}))
+        gui = self.caps("Click the Sort button in the Data ribbon")
+        self.assertEqual(1, gui.count("excel_shortcuts"))
+        self.assertLess(gui.index("excel_shortcuts"), gui.index("cua_accessibility"))
 
     def test_large_transformation_uses_python(self):
         caps = self.caps("Use pandas to merge and deduplicate thousands of rows, then put the result in a sheet")
@@ -323,11 +331,11 @@ class RouterTests(unittest.TestCase):
 
     def test_research_uses_web_then_excel(self):
         caps = self.caps("Find the latest inflation rate for Rwanda and put it into the sheet")
-        self.assertEqual(["web_research", "excel_skills"], caps)
+        self.assertEqual(["web_research", "excel_skills", "excel_shortcuts"], caps)
         self.assertEqual(["web_research"], self.caps("What is the latest news about solar panels?"))
 
     def test_file_reading_uses_files(self):
-        self.assertEqual(["user_files", "excel_skills"], self.caps("Put this CSV into Excel"))
+        self.assertEqual(["user_files", "excel_skills", "excel_shortcuts"], self.caps("Put this CSV into Excel"))
         plan = route_instruction("Summarize my uploaded csv", file_access=False, available=ALL_ON)
         self.assertNotIn("user_files", plan.capabilities())
         self.assertTrue(plan.unavailable)

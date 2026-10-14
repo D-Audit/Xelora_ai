@@ -176,7 +176,7 @@ class AgentTask:
         # The task normally stays with the configured primary provider.  This
         # changes only after a proven provider availability failure, never
         # because an Excel action merely failed verification.
-        self.active_provider = config.AI_PROVIDER
+        self.active_provider = providers.task_provider()
         self.provider_failover_history = []
         self.final_response = None
         self.chat_transcript = [{"role": "user", "text": instruction}]
@@ -341,7 +341,7 @@ class AgentTask:
             self.gemini_expected_function_responses = 0
             self.gemini_function_response_order = []
             self.gemini_function_response_batch = []
-            self.active_provider = config.AI_PROVIDER
+            self.active_provider = providers.task_provider()
             self.provider_failover_history = []
             self.pending_codegen_fallback = None
             self.recovery_state = None
@@ -972,7 +972,8 @@ def dispatch_action(
         return result, "codegen", code
 
     if tool_name in VISUAL_TOOL_NAMES:
-        if not config.ENABLE_VISUAL_FALLBACK:
+        keyboard_allowed = config.ENABLE_EXCEL_SHORTCUTS and tool_name in providers.EXCEL_SHORTCUT_TOOL_NAMES
+        if not (config.ENABLE_VISUAL_FALLBACK or keyboard_allowed):
             return {"error": "Visual fallback is disabled (ENABLE_VISUAL_FALLBACK=false).",
                     "verified": False}, "visual", None
         from vision import ui_control

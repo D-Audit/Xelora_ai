@@ -114,6 +114,10 @@ CUA_ALLOW_OTHER_APPS = _local_agent_setting("CUA_ALLOW_OTHER_APPS", "false").low
 ENABLE_MCP_CLIENT = _local_agent_setting("ENABLE_MCP_CLIENT", "false").lower() == "true"
 MCP_SERVERS_FILE = _local_agent_setting("MCP_SERVERS_FILE", "").strip()
 ENABLE_VISUAL_FALLBACK = _local_agent_setting("ENABLE_VISUAL_FALLBACK", "false").lower() == "true"
+# Excel's own keyboard shortcuts, Ribbon KeyTips and Name Box navigation
+# (no screenshots or mouse clicks), offered even when the visual fallback is
+# off: they are fast and deterministic for standard commands and dialogs.
+ENABLE_EXCEL_SHORTCUTS = _local_agent_setting("ENABLE_EXCEL_SHORTCUTS", "true").lower() == "true"
 VISUAL_ONLY_MODE = _local_agent_setting("VISUAL_ONLY_MODE", "false").lower() == "true"
 # Hybrid mode keeps the real Excel window visible while structured skills do
 # the precise workbook work.  Visual controls remain a narrow fallback for
@@ -257,6 +261,11 @@ OPENROUTER_TOTAL_TIMEOUT_SECONDS = int(
     os.getenv("OPENROUTER_TOTAL_TIMEOUT_SECONDS", "45")
 )
 CLAUDE_TIMEOUT_SECONDS = int(os.getenv("CLAUDE_TIMEOUT_SECONDS", "35"))
+CLAUDE_TASK_MODEL = os.getenv("CLAUDE_TASK_MODEL", "claude-sonnet-4-6")
+# Excel tasks are long multi-step tool use, where a stronger model plans and
+# recovers better. EXCEL_TASK_PROVIDER (gemini | claude | openrouter) runs them
+# on that provider when its key is configured; empty means AI_PROVIDER.
+EXCEL_TASK_PROVIDER = os.getenv("EXCEL_TASK_PROVIDER", "").strip().lower()
 
 
 def validate_ai_provider_configuration() -> None:
