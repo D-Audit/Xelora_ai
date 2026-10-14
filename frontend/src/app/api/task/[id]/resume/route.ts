@@ -11,7 +11,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const result = await backendFetch(`/task/${id}/resume`, {
     method: 'POST',
     token,
-    body: { correction: body.correction ?? null },
+    body: { correction: body.correction ?? null, routed: Boolean(body.routed) },
   });
   if (!result.ok) {
     const detail =

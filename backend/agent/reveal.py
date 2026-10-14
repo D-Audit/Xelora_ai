@@ -86,6 +86,7 @@ def progress_snapshot(
     is_done: bool,
     final_response: str | None = None,
     recovery_state: dict | None = None,
+    live_status: str | None = None,
 ) -> dict:
     """A compact 'what is the AI doing right now' view - Current task /
     Completed actions / Decision explanations, per the Intelligent
@@ -95,10 +96,14 @@ def progress_snapshot(
     visual_checkpoints = [s for s in structured_steps if s.get("type") == "visual_checkpoint"]
 
     active_recovery = recovery_state if isinstance(recovery_state, dict) else None
-    if not is_done and active_recovery and active_recovery.get("message"):
+    if is_done:
+        current_task = "Done"
+    elif active_recovery and active_recovery.get("message"):
         current_task = active_recovery["message"]
+    elif live_status:
+        current_task = live_status
     else:
-        current_task = reasoning[-1] if reasoning and not is_done else ("Done" if is_done else "Starting up...")
+        current_task = reasoning[-1] if reasoning else "Getting started"
 
     return {
         "current_task": current_task,

@@ -10,7 +10,7 @@ export async function POST(req: NextRequest) {
   const result = await backendFetch('/task', {
     method: 'POST',
     token,
-    body: { instruction: body.instruction, workbook_name: body.workbookName ?? null },
+    body: { instruction: body.instruction, workbook_name: body.workbookName ?? null, routed: Boolean(body.routed) },
   });
 
   if (!result.ok) {

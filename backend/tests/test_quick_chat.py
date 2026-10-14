@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import config
 import quick_chat
-from quick_chat import canned_reply, classify_message
+from quick_chat import classify_message, pre_route
 
 SEARCH_HIT = {"verified": True, "provider": "tavily", "results": [
     {"title": "Central Bank", "url": "https://bank.example/rate", "snippet": "Policy rate 5.25%"},
@@ -18,7 +18,6 @@ class QuickChatRoutingTests(unittest.TestCase):
     def test_greeting_stays_on_quick_chat(self):
         decision = classify_message("hello")
         self.assertEqual("chat", decision.kind)
-        self.assertIsNotNone(canned_reply("hello"))
 
     def test_explanatory_excel_question_stays_on_quick_chat(self):
         self.assertEqual("chat", classify_message("How do I create a pivot table?").kind)
@@ -40,6 +39,15 @@ class QuickChatRoutingTests(unittest.TestCase):
             "task",
             classify_message("Format it as currency", has_workbook_context=True).kind,
         )
+
+
+class PreRouteTests(unittest.TestCase):
+    def test_only_attachments_and_approvals_skip_the_model(self):
+        self.assertEqual("task", pre_route("what is in here?", workbook_name="sales.xlsx").kind)
+        self.assertEqual("task", pre_route("confirm", has_workbook_context=True).kind)
+        self.assertIsNone(pre_route("confirm"))
+        self.assertIsNone(pre_route("Create a pivot table from the active worksheet"))
+        self.assertIsNone(pre_route("hello"))
 
 
 class SmarterRoutingTests(unittest.TestCase):
@@ -69,6 +77,14 @@ class SmarterRoutingTests(unittest.TestCase):
         self.check("chat", "Why did it fail?", context=True)
         self.check("chat", "thanks", context=True)
 
+    def test_general_questions_in_an_excel_conversation_are_answered(self):
+        for text in ("between Ronaldo and Messi who is the goat", "Ronaldo vs Messi",
+                     "is Messi better than Ronaldo", "tell me who won the 2022 World Cup"):
+            self.check("chat", text, context=True)
+        for text in ("make it bold", "the second one", "can you make the header bold",
+                     "do the same for March", "now the March column instead"):
+            self.check("task", text, context=True)
+
 
 class QuickChatEndpointTests(unittest.TestCase):
     """POST /chat backs the frontend's /api/chat proxy."""
@@ -79,7 +95,9 @@ class QuickChatEndpointTests(unittest.TestCase):
         import config
         import main
 
-        with patch.object(config, "LOCAL_API_KEY", "k"):
+        # No model configured: the wording rules decide, and the chat reply says to try again.
+        with patch.object(config, "LOCAL_API_KEY", "k"), patch.object(config, "GEMINI_API_KEY", ""), \
+                patch.object(config, "ANTHROPIC_API_KEY", ""), patch.object(config, "OPENROUTER_API_KEY", ""):
             client = TestClient(main.app)
             chat = client.post("/chat", json={"instruction": "hello"}, headers={"X-API-Key": "k"})
             task = client.post("/chat", json={"instruction": "Sort column B in this sheet"}, headers={"X-API-Key": "k"})
@@ -89,6 +107,46 @@ class QuickChatEndpointTests(unittest.TestCase):
         self.assertEqual([], chat.json()["sources"])
         self.assertEqual({"route": "task", "reply": None}, {k: task.json()[k] for k in ("route", "reply")})
         self.assertEqual(401, denied.status_code)
+
+
+    def test_stream_reports_route_status_and_answer(self):
+        import json
+        from fastapi.testclient import TestClient
+        import main
+
+        def answer(instruction, history, *, user_id=None, on_status=None, route=False, excel_context=False):
+            self.assertTrue(route)
+            if instruction.startswith("Sort"):
+                return {"route": "task", "reason": "Sorting a column.", "reply": None, "sources": []}
+            on_status("Searching the web for “goat”")
+            return {"route": "chat", "reply": "Both are great.", "sources": []}
+
+        with patch.object(config, "LOCAL_API_KEY", "k"), patch.object(quick_chat, "quick_answer", side_effect=answer):
+            client = TestClient(main.app)
+            chat = client.post("/chat/stream", json={"instruction": "Who is the GOAT, Messi or Ronaldo?"},
+                               headers={"X-API-Key": "k"})
+            task = client.post("/chat/stream", json={"instruction": "Sort column B in this sheet"},
+                               headers={"X-API-Key": "k"})
+        events = [json.loads(line) for line in chat.text.splitlines() if line.strip()]
+        self.assertEqual(["status", "status", "route", "answer"], [event["type"] for event in events])
+        self.assertEqual(["Thinking", "Searching the web for “goat”"], [event["text"] for event in events[:2]])
+        self.assertEqual("chat", events[2]["route"])
+        self.assertEqual("Both are great.", events[3]["reply"])
+        self.assertNotIn("route", events[3])
+        task_events = [json.loads(line) for line in task.text.splitlines() if line.strip()]
+        self.assertEqual({"type": "route", "route": "task", "reason": "Sorting a column."}, task_events[-1])
+
+
+    def test_a_routed_task_is_not_routed_again(self):
+        from fastapi.testclient import TestClient
+        import main
+
+        with patch.object(config, "LOCAL_API_KEY", "k"), patch.object(config, "DATABASE_URL", ""), \
+                patch.object(main, "_start_task_in_background") as start:
+            client = TestClient(main.app)
+            client.post("/task", json={"instruction": "Who is the GOAT?", "routed": True}, headers={"X-API-Key": "k"})
+            client.post("/task", json={"instruction": "Who is the GOAT?"}, headers={"X-API-Key": "k"})
+        self.assertEqual([False, True], [call.kwargs["allow_direct_answer"] for call in start.call_args_list])
 
 
 class QuickChatSettingsTests(unittest.TestCase):
@@ -110,6 +168,7 @@ class ClaudeSearchLoopTests(unittest.TestCase):
         fake_module.Anthropic = MagicMock(return_value=self.client)
         for item in (patch.dict(sys.modules, {"anthropic": fake_module}),
                      patch.object(config, "AI_PROVIDER", "claude"),
+                     patch.object(config, "AI_PROVIDER_FALLBACK_CHAIN", []),
                      patch.object(config, "ANTHROPIC_API_KEY", "k"),
                      patch.object(config, "QUICK_CHAT_WEB_SEARCH", True)):
             item.start()
@@ -157,12 +216,101 @@ class ClaudeSearchLoopTests(unittest.TestCase):
         self.client.messages.create.side_effect = RuntimeError("boom")
         answer = quick_chat.quick_answer("Explain VLOOKUP")
         self.assertIn("try again", answer["reply"])
+        self.assertTrue(answer["failed"])
+
+    def test_reports_what_it_is_doing(self):
+        self.client.messages.create.side_effect = [
+            _block(stop_reason="tool_use", content=[
+                _block(type="tool_use", id="t1", name="web_search", input={"query": "policy rate today"})]),
+            _block(stop_reason="end_turn", content=[_block(type="text", text="5.25% [1].")]),
+        ]
+        statuses = []
+        with patch("tools.web.web_search", return_value=SEARCH_HIT):
+            quick_chat.quick_answer("What is the policy rate today?", on_status=statuses.append)
+        self.assertEqual(["Searching the web for “policy rate today”", "Writing the answer"], statuses)
+
+    def test_a_short_time_budget_answers_without_searching(self):
+        self.client.messages.create.return_value = _block(stop_reason="end_turn", content=[_block(type="text", text="Hi.")])
+        with patch.object(config, "QUICK_CHAT_DEADLINE_SECONDS", 8):
+            quick_chat.quick_answer("Who won yesterday?")
+        request = self.client.messages.create.call_args.kwargs
+        self.assertEqual({"type": "none"}, request["tool_choice"])
+        self.assertLessEqual(request["timeout"], 8)
+
+    def test_falls_back_to_the_next_configured_provider(self):
+        self.client.messages.create.side_effect = RuntimeError("overloaded")
+        reply = MagicMock(status_code=200)
+        reply.json.return_value = {"choices": [{"message": {"content": "Messi or Ronaldo: it's a debate."}}]}
+        statuses = []
+        with patch.object(config, "AI_PROVIDER_FALLBACK_CHAIN", ["openrouter"]), \
+                patch.object(config, "OPENROUTER_API_KEY", "or-key"), \
+                patch.object(config, "OPENROUTER_MODEL_CHAIN", ["some/model"]), \
+                patch("requests.post", return_value=reply) as post:
+            answer = quick_chat.quick_answer("Who is the GOAT, Messi or Ronaldo?", on_status=statuses.append)
+        self.assertEqual("Messi or Ronaldo: it's a debate.", answer["reply"])
+        self.assertNotIn("failed", answer)
+        self.assertEqual("some/model", post.call_args.kwargs["json"]["model"])
+        self.assertIn("Still working on it, trying another AI model", statuses)
+
+    def test_unconfigured_fallbacks_are_skipped(self):
+        with patch.object(config, "AI_PROVIDER_FALLBACK_CHAIN", ["openrouter", "gemini"]), \
+                patch.object(config, "OPENROUTER_API_KEY", ""), patch.object(config, "GEMINI_API_KEY", ""):
+            self.assertEqual(["claude"], quick_chat._providers())
+
+    def test_the_model_hands_excel_work_to_the_agent(self):
+        self.client.messages.create.return_value = _block(stop_reason="tool_use", content=[
+            _block(type="tool_use", id="h", name="start_excel_task", input={"reason": "Build a budget sheet."})])
+        answer = quick_chat.quick_answer("Set up a monthly budget for my family", route=True)
+        self.assertEqual({"route": "task", "reason": "Build a budget sheet.", "reply": None, "sources": []}, answer)
+        request = self.client.messages.create.call_args.kwargs
+        self.assertIn("start_excel_task", [tool["name"] for tool in request["tools"]])
+        self.assertNotIn("tool_choice", request)
+        self.assertIn("start_excel_task", request["system"])
+
+    def test_the_model_answers_greetings_itself(self):
+        self.client.messages.create.return_value = _block(stop_reason="end_turn", content=[
+            _block(type="text", text="Hi! What are we working on today?")])
+        with patch.object(config, "QUICK_CHAT_WEB_SEARCH", False):
+            answer = quick_chat.quick_answer("hello", route=True)
+        self.assertEqual(("chat", "Hi! What are we working on today?"), (answer["route"], answer["reply"]))
+        tools = self.client.messages.create.call_args.kwargs["tools"]
+        self.assertEqual(["start_excel_task"], [tool["name"] for tool in tools])
+
+    def test_excel_conversations_tell_the_model_follow_ups_continue_the_task(self):
+        self.client.messages.create.return_value = _block(stop_reason="end_turn", content=[_block(type="text", text="Ok.")])
+        quick_chat.quick_answer("make it bold", route=True, excel_context=True)
+        self.assertIn("already has Excel work", self.client.messages.create.call_args.kwargs["system"])
+
+    def test_without_a_model_the_wording_rules_route(self):
+        self.client.messages.create.side_effect = RuntimeError("down")
+        self.assertEqual("task", quick_chat.quick_answer("Sort column B in this sheet", route=True)["route"])
+        failed = quick_chat.quick_answer("Who won the match?", route=True)
+        self.assertEqual(("chat", True), (failed["route"], failed["failed"]))
 
     def test_web_search_can_be_disabled(self):
         self.client.messages.create.return_value = _block(stop_reason="end_turn", content=[_block(type="text", text="Hi.")])
         with patch.object(config, "QUICK_CHAT_WEB_SEARCH", False):
             quick_chat.quick_answer("Explain VLOOKUP")
         self.assertNotIn("tools", self.client.messages.create.call_args.kwargs)
+
+
+class OpenRouterSearchLoopTests(unittest.TestCase):
+    def test_tool_call_round_trip(self):
+        first = MagicMock(status_code=200)
+        first.json.return_value = {"choices": [{"message": {"content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "web_search", "arguments": '{"query": "rate"}'}}]}}]}
+        second = MagicMock(status_code=200)
+        second.json.return_value = {"choices": [{"message": {"content": "It is 5.25% [1]."}}]}
+        with patch.object(config, "AI_PROVIDER", "openrouter"), patch.object(config, "AI_PROVIDER_FALLBACK_CHAIN", []), \
+                patch.object(config, "OPENROUTER_API_KEY", "k"), patch.object(config, "OPENROUTER_MODEL_CHAIN", ["m"]), \
+                patch.object(config, "QUICK_CHAT_WEB_SEARCH", True), \
+                patch("requests.post", side_effect=[first, second]) as post, \
+                patch("tools.web.web_search", return_value=SEARCH_HIT):
+            answer = quick_chat.quick_answer("What is the policy rate?")
+        self.assertEqual("It is 5.25% [1].", answer["reply"])
+        self.assertEqual("https://bank.example/rate", answer["sources"][0]["url"])
+        messages = post.call_args_list[1].kwargs["json"]["messages"]
+        self.assertEqual(("tool", "c1"), (messages[-1]["role"], messages[-1]["tool_call_id"]))
 
 
 class GeminiSearchLoopTests(unittest.TestCase):

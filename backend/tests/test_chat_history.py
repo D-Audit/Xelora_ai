@@ -147,8 +147,12 @@ class DirectAnswerTests(ChatHistoryTests):
         with patch("quick_chat.quick_answer") as answer:
             self.assertFalse(main._answer_directly(start.call_args.args[0], task_id, USER))
         answer.assert_not_called()
-        routed = self.client.post("/chat", json={"instruction": "Use the Sales sheet", "task_id": task_id},
-                                  headers=self.headers()).json()
+        # /chat tells the model this conversation has Excel work; it hands the reply to the agent.
+        handoff = {"route": "task", "reason": "Continue the totals row.", "reply": None, "sources": []}
+        with patch("quick_chat.quick_answer", return_value=handoff) as answer:
+            routed = self.client.post("/chat", json={"instruction": "Use the Sales sheet", "task_id": task_id},
+                                      headers=self.headers()).json()
+        self.assertTrue(answer.call_args.kwargs["excel_context"])
         self.assertEqual("task", routed["route"])
 
     def test_confirming_a_plan_is_never_answered_directly(self):

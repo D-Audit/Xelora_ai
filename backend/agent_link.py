@@ -49,6 +49,7 @@ WAITING_MESSAGE = (
     "Waiting for Xelora Desktop. Open the desktop app on the Windows PC with Excel "
     "and sign in; this task starts there automatically."
 )
+HANDOFF_MESSAGE = "Sending this to Xelora Desktop on your PC"
 
 # AgentTask attributes that hold live objects or per-process state and are
 # never copied between cloud and agent.
@@ -58,7 +59,7 @@ CLOUD_OWNED = frozenset({"user_id", "has_authenticated_user"})
 # Attributes copied on every progress push (cheap, needed by the live UI).
 PROGRESS_FIELDS = (
     "structured_steps", "progress_log", "is_done", "is_paused", "final_response",
-    "recovery_state", "awaiting_approval", "chat_transcript", "instruction",
+    "recovery_state", "awaiting_approval", "chat_transcript", "instruction", "live_status",
 )
 
 
@@ -254,7 +255,9 @@ def dispatch(task, task_id: int) -> None:
         db.close()
     with _wake:
         _wake.notify_all()
-    if not agent_online(task.user_id):
+    if agent_online(task.user_id):
+        task.live_status = HANDOFF_MESSAGE  # until the agent claims it and pushes its own status
+    else:
         task.set_recovery_state("waiting_for_agent", WAITING_MESSAGE, safe_to_continue=False)
 
 
@@ -417,8 +420,11 @@ def claim(wait: float = CLAIM_WAIT_SECONDS, user_id: int = Depends(require_agent
         return {"job": None}
     from main import ACTIVE_TASKS
     task = ACTIVE_TASKS.get(job["task_id"])
-    if task is not None and (task.recovery_state or {}).get("phase") == "waiting_for_agent":
-        task.clear_recovery_state("Xelora Desktop picked up this task.")
+    if task is not None:
+        if (task.recovery_state or {}).get("phase") == "waiting_for_agent":
+            task.clear_recovery_state("Xelora Desktop picked up this task.")
+        # An older agent never pushes live_status; don't leave the hand-off line showing.
+        task.live_status = None
     return {"job": job}
 
 

@@ -53,10 +53,13 @@ def _heartbeat(task, label: str):
     """Tell the user what Xelora is waiting on while a slow step runs.
 
     A model turn or an Excel action can take tens of seconds; without this
-    the live progress view looks frozen. Quick steps log nothing extra.
+    the live progress view looks frozen. ``task.live_status`` shows the
+    label at once; the progress log adds the elapsed time to slow steps.
     """
     stop = threading.Event()
     started = _time.monotonic()
+    previous_status = getattr(task, "live_status", None)
+    task.live_status = label
 
     def beat():
         wait = HEARTBEAT_FIRST_SECONDS
@@ -70,6 +73,7 @@ def _heartbeat(task, label: str):
         yield
     finally:
         stop.set()
+        task.live_status = previous_status
 
 
 def _action_label(tool_name: str) -> str:
@@ -212,6 +216,8 @@ class AgentTask:
         # speculative Excel writes. The executor remains serial.
         self.recovery_state = None
         self.recovery_guard_block_count = 0
+        # What Xelora is doing at this moment ("Opening Excel"), shown live.
+        self.live_status = None
         self.successful_visual_actions = set()
         self.successful_action_signatures = set()
         self.visual_checkpoints = []
@@ -340,6 +346,7 @@ class AgentTask:
             self.pending_codegen_fallback = None
             self.recovery_state = None
             self.recovery_guard_block_count = 0
+            self.live_status = None
             self.successful_visual_actions = set()
             self.successful_action_signatures = set()
             self.visual_checkpoints = []
@@ -2274,7 +2281,7 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
         if not use_existing and not task.workbook_name:
             task.log_step("Opening Excel with a new workbook.")
             try:
-                with _heartbeat(task, "Waiting for Excel to open"):
+                with _heartbeat(task, "Opening Excel"):
                     workbook = start_task_workbook()
             except ExcelUnavailableError as exc:
                 task.is_done = True
@@ -2290,7 +2297,7 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             bind_workbook_context(task.workbook_name, task.excel_app_pid)
         _keep_excel_visible(task)
 
-    with _heartbeat(task, "Checking the workbook before planning"):
+    with _heartbeat(task, "Reading your workbook"):
         excel_version_info = _detect_excel_version_once(task) if can_start_excel_session else None
         workbook_state = _inspect_workbook_state_once(task) if can_start_excel_session else None
     # Inspection is the first reliable source of the active workbook identity.
@@ -2475,7 +2482,7 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
             task._last_step_count = len(task.structured_steps)
 
         try:
-            with _heartbeat(task, "Planning the next step with the AI"):
+            with _heartbeat(task, "Thinking about the next step"):
                 active_provider = providers.active_provider_name(task)
                 if active_provider == "claude":
                     tool_calls, text_blocks, stop_reason = providers.call_claude(task, system_prompt)

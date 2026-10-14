@@ -172,10 +172,13 @@ class InstructionRequest(BaseModel):
     instruction: str
     user_id: int | None = None
     workbook_name: str | None = None
+    # True when the client already routed this message through /chat: run it as Excel work.
+    routed: bool = False
 
 
 class CorrectionRequest(BaseModel):
     correction: str | None = None
+    routed: bool = False
 
 
 class PreferenceRequest(BaseModel):
@@ -217,7 +220,7 @@ def start_task(
     ACTIVE_TASKS[task_id] = task
     if config.ENABLE_SSE_STREAMING:
         task.progress_callback = lambda message: streamer.emit_step(task_id, "progress", message)
-    _start_task_in_background(task, task_id, user_id, user_prefs)
+    _start_task_in_background(task, task_id, user_id, user_prefs, allow_direct_answer=not req.routed)
 
     return {"task_id": task_id, "status": "started",
             "message": f"Poll GET /task/{task_id}/progress or /task/{task_id}/reveal to watch it run."}
@@ -232,6 +235,15 @@ class ChatRequest(BaseModel):
     task_id: int | None = None
 
 
+def _chat_has_excel_work(req: ChatRequest, db: Session | None, jwt_user_id: int | None) -> bool:
+    from quick_chat import has_agent_work
+
+    if req.task_id is not None and db is not None and jwt_user_id is not None:
+        # The saved conversation decides: replies in an Excel conversation go to the agent.
+        return _conversation_has_agent_work(db, req.task_id, jwt_user_id, has_agent_work)
+    return req.has_workbook_context
+
+
 @app.post("/chat", dependencies=_AUTH)
 def quick_chat(
     req: ChatRequest,
@@ -240,30 +252,98 @@ def quick_chat(
 ):
     """Route one composer message: a quick answer, or the Excel task flow.
 
-    Called by the frontend's /api/chat proxy. When the route is "task" no
-    reply is generated; the client submits POST /task instead, so workbook
-    changes always go through the governed agent loop. Quick answers may use
-    web search and cite "sources"; a signed-in user's memory adds context.
-    A signed-in user's exchange is saved to their chat history (``task_id``).
+    Called by the frontend's /api/chat proxy. The model decides whether the
+    message is Excel work (route "task": no reply is generated, and the client
+    submits POST /task so workbook changes go through the governed agent loop)
+    or something it answers itself. Quick answers may use web search and cite
+    "sources"; a signed-in user's memory adds context. A signed-in user's
+    exchange is saved to their chat history (``task_id``).
     """
-    from quick_chat import classify_message, has_agent_work, quick_answer
+    from quick_chat import pre_route, quick_answer
 
-    has_context = req.has_workbook_context
-    if req.task_id is not None and db is not None and jwt_user_id is not None:
-        # The saved conversation decides: replies in an Excel conversation go to the agent.
-        has_context = _conversation_has_agent_work(db, req.task_id, jwt_user_id, has_agent_work)
-    route = classify_message(
-        req.instruction,
-        workbook_name=req.workbook_name,
-        has_workbook_context=has_context,
-    )
-    if route.kind == "task":
-        return {"route": "task", "reason": route.reason, "reply": None, "sources": []}
-    answer = quick_answer(req.instruction, req.history[-12:], user_id=jwt_user_id)
+    has_context = _chat_has_excel_work(req, db, jwt_user_id)
+    fixed = pre_route(req.instruction, workbook_name=req.workbook_name, has_workbook_context=has_context)
+    if fixed is not None:
+        return {"route": fixed.kind, "reason": fixed.reason, "reply": None, "sources": []}
+    answer = quick_answer(req.instruction, req.history[-12:], user_id=jwt_user_id, route=True, excel_context=has_context)
+    if answer.get("route") == "task":
+        return {"route": "task", "reason": answer["reason"], "reply": None, "sources": []}
     task_id = None
-    if db is not None and jwt_user_id is not None:
+    if db is not None and jwt_user_id is not None and not answer.get("failed"):
         task_id = _save_quick_exchange(db, jwt_user_id, req.task_id, req.instruction, answer)
-    return {"route": "chat", "reason": route.reason, "task_id": task_id, **answer}
+    return {"route": "chat", "reason": "Answered in conversation.", "task_id": task_id, **answer}
+
+
+@app.post("/chat/stream", dependencies=_AUTH)
+def quick_chat_stream(
+    req: ChatRequest,
+    db: Session = Depends(_get_db_optional),
+    jwt_user_id: int | None = Depends(_current_user_id_from_jwt),
+):
+    """/chat as newline-delimited JSON events, so the UI shows what is happening.
+
+    Events: {"type": "status", "text": ...} while the model works (searching,
+    switching model), {"type": "ping"} every few seconds of silence, then
+    {"type": "route", "route": "chat"|"task"} and, for a chat,
+    {"type": "answer", "reply", "sources", "task_id", "failed"?}.
+    """
+    import json
+    import queue
+
+    from fastapi.responses import StreamingResponse
+    from quick_chat import pre_route, quick_answer
+
+    has_context = _chat_has_excel_work(req, db, jwt_user_id)
+    fixed = pre_route(req.instruction, workbook_name=req.workbook_name, has_workbook_context=has_context)
+
+    def events():
+        if fixed is not None:
+            yield json.dumps({"type": "route", "route": fixed.kind, "reason": fixed.reason}) + "\n"
+            return
+        # Sent at once, so the client knows the server is awake and working.
+        yield json.dumps({"type": "status", "text": "Thinking"}) + "\n"
+        updates: queue.Queue = queue.Queue()
+        result: dict = {}
+
+        def work():
+            try:
+                result["answer"] = quick_answer(req.instruction, req.history[-12:], user_id=jwt_user_id,
+                                                on_status=updates.put, route=True, excel_context=has_context)
+            finally:
+                updates.put(None)
+
+        threading.Thread(target=work, name="xelora-quick-chat", daemon=True).start()
+        while True:
+            try:
+                text = updates.get(timeout=5)
+            except queue.Empty:
+                yield json.dumps({"type": "ping"}) + "\n"  # keeps proxies from closing a quiet stream
+                continue
+            if text is None:
+                break
+            yield json.dumps({"type": "status", "text": text}) + "\n"
+        answer = result.get("answer") or {"route": "chat", "reply": None, "sources": [], "failed": True}
+        if answer.get("route") == "task":
+            yield json.dumps({"type": "route", "route": "task", "reason": answer.get("reason") or ""}) + "\n"
+            return
+        yield json.dumps({"type": "route", "route": "chat", "reason": "Answered in conversation."}) + "\n"
+        task_id = None
+        if jwt_user_id is not None and not answer.get("failed"):
+            # The request's session is closed once streaming starts; save with a fresh one.
+            from database import SessionLocal
+            if SessionLocal is not None:
+                session = SessionLocal()
+                try:
+                    task_id = _save_quick_exchange(session, jwt_user_id, req.task_id, req.instruction, answer)
+                except Exception as exc:
+                    print(f"Could not save quick answer to history: {exc}")
+                finally:
+                    session.close()
+        reply = {key: value for key, value in answer.items() if key != "route"}
+        yield json.dumps({"type": "answer", "task_id": task_id, **reply}, default=str) + "\n"
+
+    return StreamingResponse(events(), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 def _conversation_has_agent_work(db: Session, task_id: int, user_id: int, has_agent_work) -> bool:
@@ -535,7 +615,8 @@ def resume_task(
         from models import Task
         db.query(Task).filter_by(id=task_id).update({"status": "running"})
         db.commit()
-    _start_task_in_background(task, task_id, task.user_id, user_prefs, allow_direct_answer=not replying_to_plan)
+    _start_task_in_background(task, task_id, task.user_id, user_prefs,
+                              allow_direct_answer=not (replying_to_plan or req.routed))
 
     return {"task_id": task_id, "status": "resumed",
             "message": f"Poll GET /task/{task_id}/progress or /task/{task_id}/reveal to watch it continue."}
@@ -585,6 +666,7 @@ def get_progress(task_id: int, jwt_user_id: int | None = Depends(_current_user_i
         task.is_done,
         task.final_response,
         task.recovery_state,
+        getattr(task, "live_status", None),
     )
     snapshot["task_id"] = task_id
     snapshot["is_paused"] = task.is_paused

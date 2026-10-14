@@ -6,7 +6,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { toast } from 'sonner';
 import {
   ArrowUp, Check, ChevronDown, CircleAlert, CircleCheck, FileSpreadsheet, Filter, Loader2, ListChecks, Maximize2,
-  Menu, Paintbrush, Pause, Paperclip, PictureInPicture2, Play, Sigma, Table2, TriangleAlert, X,
+  Menu, MonitorSmartphone, Paintbrush, Pause, Paperclip, PictureInPicture2, Play, RotateCw, Sigma, Table2, TriangleAlert, X,
 } from 'lucide-react';
 import { XeloraLogo } from '@/components/ui/xelora-logo';
 import { useIsDesktop } from '@/lib/is-desktop';
@@ -15,11 +15,11 @@ import { useAuthStore } from '@/stores/auth-store';
 import { useUIStore } from '@/stores/ui-store';
 import { Markdown } from '@/components/chat/markdown';
 import {
-  startTask, quickChat, getTaskProgress, pauseTask, resumeTask,
+  startTask, quickChatStream, getTaskProgress, pauseTask, resumeTask,
   getChat,
 } from '@/services/agent';
 import { uploadFile } from '@/services/workspace';
-import type { TaskProgressResponse } from '@/services/agent';
+import type { QuickChatResponse, TaskProgressResponse } from '@/services/agent';
 import type { FileItem } from '@/services/workspace';
 import type { ChatMessage } from '@/types/agent-chat';
 
@@ -89,12 +89,16 @@ export default function AgentPage() {
   const [openingChatId, setOpeningChatId] = useState<number | null>(null);
   const hydratedRouteRef = useRef<string | null>(null);
   const chatRequestRef = useRef(0);
+  const sendCountRef = useRef(0);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
   useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  // Start a sleeping backend booting while the user is still typing.
+  useEffect(() => { void fetch('/api/warm', { method: 'POST' }).catch(() => {}); }, []);
 
   const refreshChatList = () => window.dispatchEvent(new Event('xelora:chats-updated'));
 
@@ -116,6 +120,7 @@ export default function AgentPage() {
         updateAgentMessage(messageId, {
           steps: [...stepNames, ...checkpointSteps],
           currentTask: data.is_done ? undefined : data.current_task,
+          waitingForDesktop: !data.is_done && data.recovery?.phase === 'waiting_for_agent',
           response: data.final_response ?? undefined,
         });
         if (data.is_done) {
@@ -239,47 +244,88 @@ export default function AgentPage() {
     }
   }, [searchParams, currentTaskId, messages.length]);
 
-  const sendMessage = async (text: string) => {
+  const sendMessage = async (text: string, attachment: FileItem | null = attachedFile) => {
     if (!text.trim() || isSending || conversationBusy) return;
 
     setInput('');
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
 
-    const userMsgId = `u-${Date.now()}`;
-    const agentMsgId = `a-${Date.now()}`;
+    const sendId = ++sendCountRef.current;
+    const userMsgId = `u-${sendId}`;
+    const agentMsgId = `a-${sendId}`;
     setMessages((current) => [
       ...current,
-      { id: userMsgId, role: 'user', text, attachment: attachedFile?.name },
+      { id: userMsgId, role: 'user', text, attachment: attachment?.name },
       { id: agentMsgId, role: 'agent', taskId: -1, steps: [], status: 'running' },
     ]);
     setIsSending(true);
 
     const requestedText = text.trim();
     const useOpenWorkbook = /^(use|work with|use data from) (your |the )?(own |existing )?(data|workbook|spreadsheet)$/i.test(requestedText);
-    const instruction = attachedFile
-      ? `Regarding the file "${attachedFile.name}": ${requestedText}`
+    const instruction = attachment
+      ? `Regarding the file "${attachment.name}": ${requestedText}`
       : useOpenWorkbook
         ? 'Use the data in the active Excel workbook already open on my computer. Inspect the workbook first, then continue the report requested above using its real data. Do not ask me to paste data unless no workbook or usable data is open.'
         : requestedText;
-    const workbookHint = attachedFile?.name;
+    const workbookHint = attachment?.name;
+    const retry = { text, attachment: attachment ?? undefined };
     setAttachedFile(null);
 
+    // A sleeping backend (Render's free plan) can take a while to answer the
+    // first message; say so instead of showing a spinner that looks stuck.
+    let heardBack = false;
+    const wakeTimer = window.setTimeout(() => {
+      if (!heardBack) updateAgentMessage(agentMsgId, { currentTask: 'Connecting to Xelora. The first message after a quiet spell can take up to a minute' });
+    }, 6000);
+
     try {
-      // Questions get a quick answer (searching the web when needed); only
-      // workbook requests start an Excel task. If quick chat is unreachable,
-      // fall through to the task flow as before.
-      const quick = await quickChat(requestedText, {
-        workbookName: workbookHint,
-        hasWorkbookContext: currentTaskId !== null,
-        taskId: currentTaskId,
-        history: messages.slice(-12).flatMap((m): { role: 'user' | 'assistant'; text: string }[] =>
-          m.role === 'user'
-            ? [{ role: 'user', text: m.text }]
-            : m.response ? [{ role: 'assistant', text: m.response }] : []),
-      }).catch(() => null);
-      if (quick?.route === 'chat' && quick.reply) {
+      // The backend decides: questions get a quick answer (searching the web
+      // when needed) and only workbook requests start an Excel task. A failed
+      // answer is shown as an error with Retry; it never becomes an Excel task.
+      let quick: QuickChatResponse;
+      try {
+        quick = await quickChatStream(requestedText, {
+          workbookName: workbookHint,
+          hasWorkbookContext: currentTaskId !== null,
+          taskId: currentTaskId,
+          // Failed exchanges (and a retried one still on screen) are not context.
+          history: messages
+            .filter((m, i) => {
+              const reply = m.role === 'user' ? messages[i + 1] : m;
+              return !(reply?.role === 'agent' && reply.status === 'error');
+            })
+            .slice(-12)
+            .flatMap((m): { role: 'user' | 'assistant'; text: string }[] =>
+              m.role === 'user'
+                ? [{ role: 'user', text: m.text }]
+                : m.response ? [{ role: 'assistant', text: m.response }] : []),
+        }, {
+          onRoute: (route) => {
+            heardBack = true;
+            updateAgentMessage(agentMsgId, route === 'chat'
+              ? { kind: 'chat', currentTask: undefined }
+              : { kind: 'task', currentTask: 'Getting your Excel task ready' });
+          },
+          onStatus: (status) => {
+            heardBack = true;
+            updateAgentMessage(agentMsgId, { currentTask: status });
+          },
+        });
+      } finally {
+        heardBack = true;
+        window.clearTimeout(wakeTimer);
+      }
+
+      if (quick.route === 'chat') {
+        if (quick.failed || !quick.reply) {
+          updateAgentMessage(agentMsgId, {
+            status: 'error', currentTask: undefined, retry,
+            error: quick.reply || 'Xelora could not answer just now. Please try again.',
+          });
+          return;
+        }
         updateAgentMessage(agentMsgId, {
-          status: 'done', kind: 'chat', response: quick.reply, sources: quick.sources ?? [],
+          status: 'done', kind: 'chat', currentTask: undefined, response: quick.reply, sources: quick.sources ?? [],
         });
         if (quick.task_id) {
           // Saved to chat history: keep this conversation open so follow-ups continue it.
@@ -295,7 +341,7 @@ export default function AgentPage() {
 
       if (currentTaskId !== null) {
         try {
-          await resumeTask(currentTaskId, instruction);
+          await resumeTask(currentTaskId, instruction, true);
           updateAgentMessage(agentMsgId, { taskId: currentTaskId, status: 'running' });
           pollProgress(agentMsgId, currentTaskId);
         } catch (err) {
@@ -303,7 +349,7 @@ export default function AgentPage() {
             throw err;
           }
           toast.info('That earlier session had ended - continuing as a new conversation.');
-          const res = await startTask(instruction, workbookHint);
+          const res = await startTask(instruction, workbookHint, true);
           setCurrentTaskId(res.task_id);
           hydratedRouteRef.current = `chat:${res.task_id}`;
           router.replace(`/dashboard/agent?chat=${res.task_id}`);
@@ -311,7 +357,7 @@ export default function AgentPage() {
           pollProgress(agentMsgId, res.task_id);
         }
       } else {
-        const res = await startTask(instruction, workbookHint);
+        const res = await startTask(instruction, workbookHint, true);
         setCurrentTaskId(res.task_id);
         hydratedRouteRef.current = `chat:${res.task_id}`;
         router.replace(`/dashboard/agent?chat=${res.task_id}`);
@@ -321,10 +367,22 @@ export default function AgentPage() {
       refreshChatList();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not start the task.';
-      updateAgentMessage(agentMsgId, { status: 'error', error: message });
+      updateAgentMessage(agentMsgId, { status: 'error', error: message, currentTask: undefined, retry });
     } finally {
       setIsSending(false);
     }
+  };
+
+  /** Drop a failed exchange and send the same message again. */
+  const retryMessage = (msg: Extract<ChatMessage, { role: 'agent' }>) => {
+    if (!msg.retry || isSending || conversationBusy) return;
+    const { text, attachment } = msg.retry;
+    setMessages((current) => {
+      const index = current.findIndex((m) => m.id === msg.id);
+      const before = index > 0 && current[index - 1].role === 'user' ? index - 1 : index;
+      return index < 0 ? current : [...current.slice(0, before), ...current.slice(index + 1)];
+    });
+    void sendMessage(text, attachment ?? null);
   };
 
   const handlePauseResume = async (msg: Extract<ChatMessage, { role: 'agent' }>) => {
@@ -494,7 +552,7 @@ export default function AgentPage() {
                 </div>
               </div>
             ) : (
-              <AgentReply key={msg.id} msg={msg} onPauseResume={() => void handlePauseResume(msg)} />
+              <AgentReply key={msg.id} msg={msg} onPauseResume={() => void handlePauseResume(msg)} onRetry={() => retryMessage(msg)} />
             )
           )}
           <div ref={bottomRef} />
@@ -512,10 +570,42 @@ const STATUS_LINES: Record<string, { icon: typeof CircleCheck; text: string; ton
   failed: { icon: CircleAlert, text: 'Not completed. Nothing unverified was marked as done.', tone: 'text-xelora-error' },
 };
 
-function AgentReply({ msg, onPauseResume }: { msg: Extract<ChatMessage, { role: 'agent' }>; onPauseResume: () => void }) {
+/** "Searching the web" -> "Searching the web…"; full sentences keep their punctuation. */
+function liveText(text: string) {
+  return /[.!?…:]$/.test(text) ? text : `${text}…`;
+}
+
+/** Seconds spent on the current step, shown once it is no longer instant. Remount (key) to restart. */
+function Elapsed() {
+  const [started] = useState(() => Date.now());
+  const [now, setNow] = useState(started);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const seconds = Math.floor((now - started) / 1000);
+  if (seconds < 3) return null;
+  return (
+    <span className="shrink-0 tabular-nums text-xelora-text-muted">
+      {seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`}
+    </span>
+  );
+}
+
+function AgentReply({ msg, onPauseResume, onRetry }: {
+  msg: Extract<ChatMessage, { role: 'agent' }>;
+  onPauseResume: () => void;
+  onRetry: () => void;
+}) {
+  const desktop = useIsDesktop();
   const [stepsOpen, setStepsOpen] = useState(false);
   const running = msg.status === 'running';
   const hasSteps = msg.steps.length > 0;
+  // Excel work gets the steps card; a quick answer (or a message not yet routed) a single status line.
+  const excelWork = msg.kind !== 'chat' && (msg.kind === 'task' || msg.taskId > 0);
+  const showCard = excelWork && (hasSteps || (running && Boolean(msg.currentTask)));
+  // The notice below explains the wait; the card just names it.
+  const cardStatus = msg.waitingForDesktop ? 'Waiting for Xelora Desktop' : msg.currentTask;
   const status = msg.status === 'done' && msg.kind !== 'chat' ? STATUS_LINES[msg.completionStatus ?? ''] : undefined;
   const limitError = msg.status === 'error' && /limit|plan|upgrade|quota/i.test(msg.error ?? '');
 
@@ -526,18 +616,27 @@ function AgentReply({ msg, onPauseResume }: { msg: Extract<ChatMessage, { role: 
         {msg.status === 'error' ? (
           <div className="flex items-start gap-2 rounded-xl border border-xelora-error/20 bg-xelora-error-bg px-4 py-3 text-sm text-xelora-text">
             <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-xelora-error" />
-            <div>
+            <div className="min-w-0 flex-1">
               <p>{msg.error}</p>
               {limitError && (
                 <Link href="/dashboard/billing/plans" className="mt-1 inline-block text-xs font-medium text-xelora-green hover:underline">
                   View plans
                 </Link>
               )}
+              {msg.retry && !limitError && (
+                <button
+                  type="button"
+                  onClick={onRetry}
+                  className="mt-2 flex h-7 items-center gap-1.5 rounded-lg border border-xelora-border bg-xelora-surface px-2.5 text-xs font-medium text-xelora-text-secondary hover:text-xelora-text"
+                >
+                  <RotateCw className="h-3 w-3" /> Try again
+                </button>
+              )}
             </div>
           </div>
         ) : (
           <>
-            {(hasSteps || (running && msg.currentTask)) && (
+            {showCard && (
               <div className="rounded-xl border border-xelora-border">
                 <button
                   type="button"
@@ -547,8 +646,9 @@ function AgentReply({ msg, onPauseResume }: { msg: Extract<ChatMessage, { role: 
                 >
                   {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Table2 className="h-4 w-4" strokeWidth={1.75} />}
                   <span className="min-w-0 flex-1 truncate">
-                    {running ? (msg.currentTask || 'Working in Excel…') : `Worked in Excel · ${msg.steps.length} ${msg.steps.length === 1 ? 'step' : 'steps'}`}
+                    {running ? liveText(cardStatus || 'Working in Excel') : `Worked in Excel · ${msg.steps.length} ${msg.steps.length === 1 ? 'step' : 'steps'}`}
                   </span>
+                  {running && <Elapsed key={cardStatus ?? ''} />}
                   {hasSteps && <ChevronDown className={`h-4 w-4 transition-transform ${stepsOpen || running ? 'rotate-180' : ''}`} />}
                 </button>
                 {hasSteps && (stepsOpen || running) && (
@@ -562,8 +662,25 @@ function AgentReply({ msg, onPauseResume }: { msg: Extract<ChatMessage, { role: 
                 )}
               </div>
             )}
-            {running && !hasSteps && !msg.currentTask && (
-              <p className="flex items-center gap-2 text-sm text-xelora-text-muted"><Loader2 className="h-4 w-4 animate-spin" /> Thinking…</p>
+            {running && msg.waitingForDesktop && (
+              <div className="flex items-start gap-2 rounded-xl border border-xelora-warning/30 bg-xelora-warning-bg px-3.5 py-3 text-sm text-xelora-text-secondary">
+                <MonitorSmartphone className="mt-0.5 h-4 w-4 shrink-0 text-xelora-warning" />
+                <div className="min-w-0">
+                  <p>Excel work runs in Xelora Desktop on your Windows PC, and it isn’t connected right now. Open it and sign in; this task starts there automatically.</p>
+                  {!desktop && (
+                    <Link href="/download" className="mt-1 inline-block text-xs font-medium text-xelora-green hover:underline">
+                      Get Xelora Desktop
+                    </Link>
+                  )}
+                </div>
+              </div>
+            )}
+            {running && !showCard && (
+              <p className="flex items-center gap-2 text-sm text-xelora-text-muted">
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                <span className="min-w-0 truncate">{liveText(msg.currentTask || 'Thinking')}</span>
+                <Elapsed key={msg.currentTask ?? ''} />
+              </p>
             )}
             {msg.status === 'done' && msg.response && <Markdown text={msg.response} sources={msg.sources ?? []} />}
             {msg.sources && msg.sources.length > 0 && (

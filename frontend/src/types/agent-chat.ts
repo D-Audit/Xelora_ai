@@ -1,3 +1,4 @@
+import type { FileItem } from '@/services/workspace';
 
 export interface ChatSource {
   n: number;
@@ -20,4 +21,8 @@ export type ChatMessage =
       sources?: ChatSource[];
       status: 'running' | 'paused' | 'done' | 'error';
       error?: string;
+      /** The message to send again when the user presses Retry on an error. */
+      retry?: { text: string; attachment?: FileItem };
+      /** The task is queued until Xelora Desktop comes online. */
+      waitingForDesktop?: boolean;
     };

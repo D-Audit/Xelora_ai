@@ -75,6 +75,76 @@ export interface QuickChatResponse {
   sources: { n: number; title: string; url: string }[];
   /** The conversation the answer was saved to (null when not signed in / no database). */
   task_id?: number | null;
+  /** True when no model answered in time; the reply is an apology, not an answer. */
+  failed?: boolean;
+}
+
+type QuickChatEvent =
+  | { type: 'route'; route: 'chat' | 'task'; reason: string }
+  | { type: 'status'; text: string }
+  | { type: 'ping' }
+  | ({ type: 'answer' } & Omit<QuickChatResponse, 'route' | 'reason'>);
+
+/**
+ * quickChat as a stream: onRoute fires as soon as the backend has decided
+ * between a quick answer and an Excel task, onStatus with each live step
+ * ("Searching the web for ..."). Resolves with the final answer; throws if
+ * the connection fails or ends before an answer arrives.
+ */
+export async function quickChatStream(
+  instruction: string,
+  options: {
+    workbookName?: string;
+    hasWorkbookContext?: boolean;
+    history?: { role: 'user' | 'assistant'; text: string }[];
+    taskId?: number | null;
+  },
+  handlers: { onRoute?: (route: 'chat' | 'task') => void; onStatus?: (text: string) => void } = {},
+): Promise<QuickChatResponse> {
+  const response = await fetch('/api/chat/stream', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      instruction,
+      workbookName: options.workbookName ?? null,
+      hasWorkbookContext: Boolean(options.hasWorkbookContext),
+      history: options.history ?? [],
+      taskId: options.taskId ?? null,
+    }),
+  });
+  if (!response.ok || !response.body) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error((body as { error?: string }).error || 'Could not reach Xelora. Please try again.');
+  }
+
+  let route: { route: 'chat' | 'task'; reason: string } | null = null;
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (value) buffer += value;
+    const lines = buffer.split('\n');
+    buffer = done ? '' : lines.pop() ?? '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let event: QuickChatEvent;
+      try {
+        event = JSON.parse(line) as QuickChatEvent;
+      } catch {
+        continue;
+      }
+      if (event.type === 'route') {
+        route = { route: event.route, reason: event.reason };
+        handlers.onRoute?.(event.route);
+      } else if (event.type === 'status') {
+        handlers.onStatus?.(event.text);
+      } else if (event.type === 'answer' && route) {
+        return { ...route, reply: event.reply, sources: event.sources ?? [], task_id: event.task_id, failed: event.failed };
+      }
+    }
+    if (done) break;
+  }
+  if (route?.route === 'task') return { ...route, reply: null, sources: [] };
+  throw new Error('The connection to Xelora closed before an answer arrived. Please try again.');
 }
 
 /** Quick answers (may search the web) for questions; route "task" means: start a workbook task instead. */
@@ -98,15 +168,16 @@ export const quickChat = (
     }),
   });
 
-export const startTask = (instruction: string, workbookName?: string) =>
+/** `routed`: the message already went through quick chat, which chose Excel work; don't re-route it. */
+export const startTask = (instruction: string, workbookName?: string, routed = false) =>
   request<{ task_id: number; status: string }>('/api/task', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ instruction, workbookName: workbookName ?? null }),
+    body: JSON.stringify({ instruction, workbookName: workbookName ?? null, routed }),
   });
-export const resumeTask = (taskId: number, correction?: string) =>
+export const resumeTask = (taskId: number, correction?: string, routed = false) =>
   request<{ task_id: number; status: string }>(`/api/task/${taskId}/resume`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ correction: correction ?? null }),
+    body: JSON.stringify({ correction: correction ?? null, routed }),
   });
 export const pauseTask = (taskId: number) =>
   request<{ task_id: number; is_paused: boolean }>(`/api/task/${taskId}/pause`, { method: 'POST' });

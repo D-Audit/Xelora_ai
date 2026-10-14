@@ -153,6 +153,20 @@ class HeartbeatTests(unittest.TestCase):
             pass
         self.assertEqual([], quiet.progress_log)
 
+    def test_live_status_names_the_current_step_and_restores_the_outer_one(self):
+        from agent import core
+        from agent.reveal import progress_snapshot
+
+        task = core.AgentTask("x")
+        with core._heartbeat(task, "Reading your workbook"):
+            with core._heartbeat(task, "Opening Excel"):
+                self.assertEqual("Opening Excel", task.live_status)
+            self.assertEqual("Reading your workbook", task.live_status)
+            snapshot = progress_snapshot(task.structured_steps, False, None, None, task.live_status)
+            self.assertEqual("Reading your workbook", snapshot["current_task"])
+        self.assertIsNone(task.live_status)
+        self.assertEqual("Done", progress_snapshot([], True, None, None, "Opening Excel")["current_task"])
+
     def test_labels_name_the_action(self):
         from agent.core import _action_label
 

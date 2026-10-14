@@ -326,7 +326,9 @@ MEMORY_MAX_RECORDS = {
 MEMORY_CONTEXT_ITEMS = int(os.getenv("MEMORY_CONTEXT_ITEMS", "3"))
 
 # Quick chat (the fast, tool-free conversation route in quick_chat.py).
-FAST_CHAT_TIMEOUT_SECONDS = int(os.getenv("FAST_CHAT_TIMEOUT_SECONDS", "25"))
+FAST_CHAT_TIMEOUT_SECONDS = int(os.getenv("FAST_CHAT_TIMEOUT_SECONDS", "20"))
+# Total time for one quick answer, across every model tried; then it says so.
+QUICK_CHAT_DEADLINE_SECONDS = int(os.getenv("QUICK_CHAT_DEADLINE_SECONDS", "45"))
 FAST_CHAT_MAX_OUTPUT_TOKENS = int(os.getenv("FAST_CHAT_MAX_OUTPUT_TOKENS", "1200"))
 QUICK_CHAT_CLAUDE_MODEL = os.getenv("QUICK_CHAT_CLAUDE_MODEL", "claude-sonnet-4-6")
 # Fast model for conversation; on failure quick chat tries GEMINI_MODEL_CHAIN next.
