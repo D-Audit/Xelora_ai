@@ -1,13 +1,13 @@
 """Database table behind memory/_store.py when DATABASE_URL is set.
-
 Hosts such as Render's free tier wipe local disk on every restart, so learned
 skills, task history and chat memory live in Postgres instead of JSON files.
 One row holds one (kind, scope) record list, mirroring the file layout.
 """
+
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime , timezone
 from typing import Any, Callable
 
 from sqlalchemy import Column, DateTime, Integer, String, Text, UniqueConstraint
@@ -15,7 +15,6 @@ from sqlalchemy.exc import IntegrityError
 
 import database
 from database import Base
-
 
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)

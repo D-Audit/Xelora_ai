@@ -23,6 +23,7 @@ Creates a real native Excel chart from a data range. chart_type: column, bar, li
     },
     "chart_type": {
       "type": "string",
+      "enum": ["column", "bar", "line", "pie", "doughnut", "area", "scatter", "radar"],
       "default": "column"
     },
     "chart_name": {

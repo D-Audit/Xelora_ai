@@ -51,6 +51,9 @@ def _sqlite_sessions():
 class AgentLinkCase(unittest.TestCase):
     def setUp(self):
         patches = [
+            # This fixture supplies a real temporary database below, including
+            # the dependency used to rebuild conversations after a restart.
+            patch.object(config, "DATABASE_URL", "sqlite://"),
             patch.object(config, "TASK_EXECUTION", "agent"),
             patch.object(config, "LOCAL_API_KEY", "test-api-key"),
             patch.object(config, "GEMINI_API_KEY", "server-gemini-key"),
@@ -211,6 +214,12 @@ class RunJobTests(AgentLinkCase):
 
     def test_reply_after_cloud_restart_still_goes_to_the_agent(self):
         """A chat rebuilt from the database must not run on the cloud (no Excel)."""
+        # /task normally creates this row before dispatch. start_task() only
+        # builds the in-memory task, so seed the persisted conversation here.
+        from models import Task
+        with self.Session() as db:
+            db.add(Task(id=7, user_id=USER, instruction="Add a totals row"))
+            db.commit()
         self.start_task()
 
         def answer(task, **_kwargs):

@@ -42,12 +42,48 @@ class QuickChatRoutingTests(unittest.TestCase):
 
 
 class PreRouteTests(unittest.TestCase):
-    def test_only_attachments_and_approvals_skip_the_model(self):
+    def test_clear_spreadsheet_requests_skip_the_model(self):
         self.assertEqual("task", pre_route("what is in here?", workbook_name="sales.xlsx").kind)
         self.assertEqual("task", pre_route("confirm", has_workbook_context=True).kind)
         self.assertIsNone(pre_route("confirm"))
-        self.assertIsNone(pre_route("Create a pivot table from the active worksheet"))
+        self.assertEqual("task", pre_route("Create a pivot table from the active worksheet").kind)
         self.assertIsNone(pre_route("hello"))
+
+    def test_local_files_and_analysis_are_tasks_but_how_tos_are_not(self):
+        for text in (
+            r'analyse these datasets make a clear dashboard ,summary ,charts "D:\MOVIE\Video\CocaCola_Kaggle_Analysis.xlsx"',
+            r'Open "C:\Users\Ana\Sales Reports\October.xlsm"',
+            'Inspect /home/ana/Sales reports/october.xlsx',
+            'Analyse sales.csv',
+            'Create a dashboard from this dataset',
+            'Analyse these datasets',
+            'Create charts',
+            'Fix the formulas',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual("task", pre_route(text).kind)
+                self.assertEqual("task", classify_message(text).kind)
+        for text in ('How do I open sales.xlsx?', 'How do I create a dashboard?', 'hello'):
+            self.assertIsNone(pre_route(text))
+
+    def test_failed_chat_handoff_can_recover_from_history(self):
+        history = [
+            {"role": "user", "text": r'Analyse "D:\Sales Data\sales.xlsx"', "kind": "chat"},
+            {"role": "assistant", "text": "I cannot open local files.", "kind": "chat"},
+        ]
+        self.assertTrue(quick_chat.has_agent_work(history))
+        with patch.object(quick_chat, "_providers") as providers:
+            answer = quick_chat.quick_answer("why don't you open it", history, route=True)
+        self.assertEqual("task", answer["route"])
+        providers.assert_not_called()
+        self.assertEqual("chat", classify_message("why don't you open it").kind)
+
+    def test_named_workbook_never_reaches_a_refusing_chat_model(self):
+        with patch.object(quick_chat, "_providers") as providers:
+            answer = quick_chat.quick_answer(r'Analyse "D:\Data\sales.xlsx"', route=True)
+        self.assertEqual("task", answer["route"])
+        self.assertIsNone(answer["reply"])
+        providers.assert_not_called()
 
 
 class SmarterRoutingTests(unittest.TestCase):
@@ -134,7 +170,8 @@ class QuickChatEndpointTests(unittest.TestCase):
         self.assertEqual("Both are great.", events[3]["reply"])
         self.assertNotIn("route", events[3])
         task_events = [json.loads(line) for line in task.text.splitlines() if line.strip()]
-        self.assertEqual({"type": "route", "route": "task", "reason": "Sorting a column."}, task_events[-1])
+        self.assertEqual(1, len(task_events))
+        self.assertEqual(("route", "task"), (task_events[0]["type"], task_events[0]["route"]))
 
 
     def test_a_routed_task_is_not_routed_again(self):
@@ -260,7 +297,8 @@ class ClaudeSearchLoopTests(unittest.TestCase):
     def test_the_model_hands_excel_work_to_the_agent(self):
         self.client.messages.create.return_value = _block(stop_reason="tool_use", content=[
             _block(type="tool_use", id="h", name="start_excel_task", input={"reason": "Build a budget sheet."})])
-        answer = quick_chat.quick_answer("Set up a monthly budget for my family", route=True)
+        # Ambiguous wording still reaches the model for semantic routing.
+        answer = quick_chat.quick_answer("Help me keep tabs on what I spend each month", route=True)
         self.assertEqual({"route": "task", "reason": "Build a budget sheet.", "reply": None, "sources": []}, answer)
         request = self.client.messages.create.call_args.kwargs
         self.assertIn("start_excel_task", [tool["name"] for tool in request["tools"]])

@@ -43,6 +43,21 @@ class ToolGuidanceTests(unittest.TestCase):
         # Keyboard navigation is a general method, not an extra feature.
         self.assertEqual(["excel_skills"], [step.capability for step in steps if step.capability != "excel_shortcuts"])
 
+    def test_local_sources_are_opened_before_analysis_not_treated_as_uploads(self):
+        for path in (r'"D:\Sales Data\sales.xlsx"', r'"\\server\reports\sales.xlsm"',
+                     '"/home/ana/Sales Data/sales.csv"'):
+            with self.subTest(path=path):
+                plan = route_instruction(f"Analyse {path} and make a dashboard", file_access=False)
+                self.assertEqual("local_workbook", plan.steps[0].capability)
+                self.assertEqual("open_workbook", plan.steps[0].tools[0])
+                self.assertNotIn("user_files", plan.capabilities())
+                self.assertIn("create_chart", {tool for step in plan.steps for tool in step.tools})
+
+    def test_uploaded_files_keep_workspace_routing(self):
+        plan = route_instruction("Analyse my uploaded sales.xlsx and create charts")
+        self.assertIn("user_files", plan.capabilities())
+        self.assertNotIn("local_workbook", plan.capabilities())
+
 
 
 class ResearchHintTests(unittest.TestCase):

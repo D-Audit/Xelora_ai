@@ -23,7 +23,8 @@ Changes an existing chart's type, title, or data range without deleting and recr
     },
     "chart_type": {
       "type": "string",
-      "description": "One of: column, bar, line, pie, scatter, area"
+      "description": "One of: column, bar, line, pie, scatter, area, doughnut, radar",
+      "enum": ["column", "bar", "line", "pie", "scatter", "area", "doughnut", "radar"]
     },
     "title": {
       "type": "string"

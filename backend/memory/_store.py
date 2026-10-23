@@ -1,5 +1,4 @@
 """Persistence for agent memory (skills, task history, chat memory).
-
 One chokepoint with three backends, picked per call:
 - remote: the desktop local agent reads/writes its user's memory through the
   cloud API (set by local_agent.py via ``use_remote``),

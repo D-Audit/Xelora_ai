@@ -7,7 +7,6 @@ from uuid import uuid4
 
 from memory._store import keywords, read_records, update_records
 
-
 def add_skill(name: str, description: str, trigger_conditions: list, action_sequence: list, tags: list | None = None, *, user_id: int | None = None) -> str:
     sequence = [str(action) for action in action_sequence]
 

@@ -32,29 +32,44 @@ def _fix_multi_area_table_reference(data_range: str) -> str:
 
 
 def run(sheet_name: str, data_range: str, chart_type: str = "column", chart_name: str = "Chart1"):
-    wb = get_active_workbook()
-    sheet = wb.sheets[sheet_name]
-
-    data_range = _fix_multi_area_table_reference(data_range)
-
     chart_type_map = {
         "column": "column_clustered", "bar": "bar_clustered", "line": "line",
         "pie": "pie", "doughnut": "doughnut", "area": "area",
         "scatter": "xy_scatter", "radar": "radar",
     }
-    xl_type = chart_type_map.get(chart_type, "column_clustered")
+    chart_type = str(chart_type).strip().lower()
+    if chart_type not in chart_type_map:
+        return {"status": "unsupported_chart_type", "verified": False,
+                "error": f"Unsupported chart type: {chart_type}",
+                "supported_types": list(chart_type_map)}
+    xl_type = chart_type_map[chart_type]
+    wb = get_active_workbook()
+    sheet = wb.sheets[sheet_name]
+    if chart_name in [c.name for c in sheet.charts]:
+        return {"status": "chart_already_exists", "verified": False,
+                "error": f"Chart '{chart_name}' already exists. Use modify_chart or choose a new name."}
+    data_range = _fix_multi_area_table_reference(data_range)
 
+    chart = None
     try:
+        source = sheet.range(data_range)
         chart = sheet.charts.add()
-        chart.set_source_data(sheet.range(data_range))
+        chart.set_source_data(source)
         chart.chart_type = xl_type
         chart.name = chart_name
         wb.save()
     except Exception as e:
+        cleanup_error = None
+        if chart is not None:
+            try:
+                chart.delete()
+            except Exception as cleanup_exc:
+                cleanup_error = str(cleanup_exc)
         return {
             "sheet": sheet_name, "data_range": data_range, "chart_type": chart_type,
             "chart_name": chart_name, "status": "chart_creation_failed", "verified": False,
             "error": str(e),
+            "cleanup_error": cleanup_error,
             "verification_note": (
                 f"Could not create chart from data_range '{data_range}'. If this range "
                 f"references two or more non-adjacent Table columns, each piece must be "
@@ -64,6 +79,6 @@ def run(sheet_name: str, data_range: str, chart_type: str = "column", chart_name
             ),
         }
 
-    verified = chart_name in [c.name for c in sheet.charts]
+    verified = chart_name in [c.name for c in sheet.charts] and chart.chart_type == xl_type
     return {"sheet": sheet_name, "data_range": data_range, "chart_type": chart_type,
-            "chart_name": chart_name, "status": "chart_created", "verified": verified}
+            "chart_name": chart_name, "status": "chart_created" if verified else "chart_verification_failed", "verified": verified}

@@ -676,9 +676,15 @@ def get_active_workbook():
 
 
 def normalize(values):
+    # COM formula matrices are tuples of tuples; xlwings value converters
+    # generally produce lists. Preserve the same matrix shape for both.
+    if isinstance(values, tuple):
+        values = list(values)
     if not isinstance(values, list):
         values = [[values]]
-    elif values and not isinstance(values[0], list):
+    elif values and isinstance(values[0], (list, tuple)):
+        values = [list(row) for row in values]
+    elif values:
         values = [values]
     return values
 

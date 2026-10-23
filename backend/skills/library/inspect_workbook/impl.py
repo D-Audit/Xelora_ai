@@ -42,14 +42,15 @@ def _inspect_sheet(wb, sheet):
     header_guess = False
     formula_map = {}
     formula_errors = []
+    formula_error_count = 0
     formula_scan_warning = None
     nonempty_cell_count = 0
     if used:
-        values = normalize(used.value)
+        values = used.options(ndim=2, err_to_str=True).value
         nonempty_cell_count = sum(
             1 for row in values for value in row if value not in (None, "")
         )
-        first_row = normalize(used.rows[0].value)[0]
+        first_row = values[0] if values else []
         header_guess = all(isinstance(v, str) for v in first_row if v is not None)
 
         # Scan displayed cell values independently of formula metadata.  A
@@ -57,10 +58,13 @@ def _inspect_sheet(wb, sheet):
         # #VALUE! cells from the completion guard.
         for r_idx, row in enumerate(values):
             for c_idx, cell_value in enumerate(row):
-                if _is_excel_error(cell_value) and len(formula_errors) < MAX_REPORTED_FORMULA_ERRORS:
+                if not _is_excel_error(cell_value):
+                    continue
+                formula_error_count += 1
+                if len(formula_errors) < MAX_REPORTED_FORMULA_ERRORS:
                     formula_errors.append({
                         "sheet": sheet_name,
-                        "address": used.offset(r_idx, c_idx).address,
+                        "address": used.offset(r_idx, c_idx).resize(1, 1).address,
                         "error": cell_value.strip().upper(),
                         "formula": None,
                     })
@@ -71,7 +75,7 @@ def _inspect_sheet(wb, sheet):
             for r_idx, row in enumerate(formulas):
                 for c_idx, cell_formula in enumerate(row):
                     if isinstance(cell_formula, str) and cell_formula.startswith("="):
-                        addr = used.offset(r_idx, c_idx).address
+                        addr = used.offset(r_idx, c_idx).resize(1, 1).address
                         formula_map[addr] = {
                             "formula": cell_formula,
                             "referenced_ranges": _extract_range_refs(cell_formula),
@@ -107,7 +111,8 @@ def _inspect_sheet(wb, sheet):
         "named_ranges_touching_this_sheet": named_ranges,
         "formulas_found": formula_map,
         "formula_errors": formula_errors,
-        "formula_error_count": len(formula_errors),
+        "formula_error_count": formula_error_count,
+        "formula_errors_truncated": formula_error_count > len(formula_errors),
         "formula_scan_warning": formula_scan_warning,
         "other_sheets_in_workbook": other_sheets,
         "verified": True,

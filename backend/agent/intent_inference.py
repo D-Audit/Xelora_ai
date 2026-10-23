@@ -13,6 +13,8 @@ Example:
 """
 
 import json
+import re
+from copy import deepcopy
 from typing import List, Dict, Optional
 
 
@@ -22,20 +24,20 @@ INTENT_PATTERNS = {
         "keywords": ["total", "sum", "add up", "aggregate"],
         "implicit_steps": [
             {
-                "description": "Identify numeric columns in the data",
-                "tool_hint": "profile_current_sheet",
+                "description": "Identify additive numeric measures; exclude IDs, dates, percentages and existing subtotals",
+                "tool_hint": "read_range",
                 "is_critical": False,
                 "success_criteria": "Detected numeric columns"
             },
             {
-                "description": "Add SUM formulas for each numeric column",
-                "tool_hint": "fill_formula_down",
+                "description": "Add totals for the requested additive measures, avoiding double-counted subtotals",
+                "tool_hint": "insert_formula",
                 "is_critical": True,
                 "success_criteria": "Total row shows sums"
             },
             {
                 "description": "Format totals row (bold, colored background)",
-                "tool_hint": "set_fill_color",
+                "tool_hint": "format_range",
                 "is_critical": False,
                 "success_criteria": "Total row visually distinct"
             }
@@ -54,7 +56,7 @@ INTENT_PATTERNS = {
             },
             {
                 "description": "Add KPI cells with key metrics",
-                "tool_hint": "paste_table",
+                "tool_hint": "insert_formula",
                 "is_critical": True,
                 "success_criteria": "KPI cells populated with formulas"
             },
@@ -75,7 +77,7 @@ INTENT_PATTERNS = {
     
     # Pattern: "Budget vs actual"
     "budget_analysis": {
-        "keywords": ["budget", "actual", "variance", "performance", "vs"],
+        "keywords": ["budget vs actual", "actual vs budget", "variance"],
         "implicit_steps": [
             {
                 "description": "Create variance columns ($ and %)",
@@ -100,7 +102,7 @@ INTENT_PATTERNS = {
     
     # Pattern: "Scenario analysis" / "What-if"
     "scenario_analysis": {
-        "keywords": ["scenario", "what-if", "sensitivity", "impact", "change"],
+        "keywords": ["scenario", "what-if", "sensitivity"],
         "implicit_steps": [
             {
                 "description": "Create scenario builder table",
@@ -110,7 +112,7 @@ INTENT_PATTERNS = {
             },
             {
                 "description": "Add parameter variation rows",
-                "tool_hint": "paste_table",
+                "tool_hint": "write_table",
                 "is_critical": True,
                 "success_criteria": "Scenarios populated"
             },
@@ -129,7 +131,7 @@ INTENT_PATTERNS = {
         "implicit_steps": [
             {
                 "description": "Format headers (bold, color, larger font)",
-                "tool_hint": "set_fill_color",
+                "tool_hint": "format_range",
                 "is_critical": True,
                 "success_criteria": "Headers formatted"
             },
@@ -159,22 +161,22 @@ INTENT_PATTERNS = {
         "keywords": ["clean", "cleanup", "duplicate", "remove duplicate", "normalize"],
         "implicit_steps": [
             {
-                "description": "Remove duplicate rows",
-                "tool_hint": "remove_duplicates",
+                "description": "Inspect source rows, blanks, types and candidate duplicate keys before proposing cleanup",
+                "tool_hint": "read_range",
                 "is_critical": True,
-                "success_criteria": "Duplicates removed"
+                "success_criteria": "Data quality issues identified without changing source rows"
             },
             {
-                "description": "Profile data for quality issues",
-                "tool_hint": "profile_current_sheet",
+                "description": "Apply only requested cleanup; repeated values alone do not justify deleting rows",
+                "tool_hint": "read_range",
                 "is_critical": False,
                 "success_criteria": "Data quality assessed"
             },
             {
-                "description": "Apply data validation to prevent future duplicates",
-                "tool_hint": "data_validation",
+                "description": "Read back cleaned data and reconcile row counts with the approved changes",
+                "tool_hint": "read_range",
                 "is_critical": False,
-                "success_criteria": "Validation rules applied"
+                "success_criteria": "No unintended row loss or changed identifiers"
             }
         ]
     }
@@ -194,7 +196,7 @@ def infer_implicit_steps(instruction: str) -> List[Dict]:
     for pattern_key, pattern_info in INTENT_PATTERNS.items():
         score = 0
         for keyword in pattern_info["keywords"]:
-            if keyword in instruction_lower:
+            if re.search(r"(?<!\w)" + re.escape(keyword) + r"(?!\w)", instruction_lower):
                 score += 1
         scores[pattern_key] = score
     
@@ -236,24 +238,22 @@ def enhance_plan_with_intent(explicit_plan: List[Dict], instruction: str) -> Lis
     if not implicit_steps:
         return explicit_plan
     
-    # Update dependency chains
-    # Implicit steps should come before explicit ones
-    num_implicit = len(implicit_steps)
-    
+    # Preserve explicit IDs and dependency edges: changing only references
+    # creates dangling/self dependencies. Do not mutate the caller's plan.
+    explicit_plan = deepcopy(explicit_plan)
+    occupied = {step["id"] for step in explicit_plan}
+    previous = None
+    for index, step in enumerate(implicit_steps, 1):
+        candidate = f"implicit_{index}"
+        while candidate in occupied:
+            candidate = "inferred_" + candidate
+        occupied.add(candidate)
+        step["id"] = candidate
+        step["depends_on"] = [previous] if previous else []
+        previous = candidate
     for step in explicit_plan:
-        if step.get("depends_on"):
-            # Shift dependency indices
-            new_deps = []
-            for dep in step["depends_on"]:
-                if dep.startswith("subtask_"):
-                    # Convert to 0-indexed
-                    idx = int(dep.split("_")[1]) - 1
-                    # Shift by number of implicit steps
-                    new_idx = idx + num_implicit
-                    new_deps.append(f"subtask_{new_idx + 1}")
-                else:
-                    new_deps.append(dep)
-            step["depends_on"] = new_deps
+        if not step.get("depends_on"):
+            step["depends_on"] = [previous]
     
     # Merge: implicit first, then explicit
     merged = implicit_steps + explicit_plan

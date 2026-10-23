@@ -1,1 +1,1 @@
-
+"""Sandboxed Excel code generation."""

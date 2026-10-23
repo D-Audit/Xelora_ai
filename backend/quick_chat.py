@@ -41,12 +41,12 @@ _ACTION_WORDS = re.compile(
     r"format|sort|filter|clean|analyse|analyze|summari[sz]e|calculate|fix|apply|rename|"
     r"move|copy|merge|split|freeze|highlight|convert|generate|find|replace|group|hide|"
     r"unhide|protect|unprotect|refresh|import|export|put|place|enter|populate|plot|track|total|"
-    r"compute|count|rank|compare|transpose|lookup|organi[sz]e|prepare|set up|design)\b",
+    r"compute|count|rank|compare|transpose|lookup|organi[sz]e|prepare|set up|design|open|inspect)\b",
     re.IGNORECASE,
 )
 _WORKBOOK_WORDS = re.compile(
-    r"\b(?:excel|workbook|spreadsheet|worksheet|sheet|cell|cells|column|columns|row|rows|"
-    r"range|table|pivot(?:\s*table)?|chart|graph|formula|data|dashboard|report|csv|xlsx|ods|"
+    r"\b(?:excel|workbooks?|spreadsheets?|worksheets?|sheets?|cells?|columns?|rows?|"
+    r"ranges?|tables?|pivot(?:\s*table)?s?|charts?|graphs?|formulas?|data|datasets?|dashboards?|reports?|csv|xlsx|ods|"
     r"budget|invoice|tracker|timesheet|forecast|ledger|inventory|expenses?|payroll|schedule|planner)\b",
     re.IGNORECASE,
 )
@@ -62,6 +62,12 @@ _QUESTION_PREFIX = re.compile(
 )
 # "How do I ..." asks for an explanation even when it names a sheet or column.
 _HOW_TO = re.compile(r"^(?:how (?:do|can|would|should) (?:i|you|we)|how to)\b", re.IGNORECASE)
+_WORKBOOK_FILE = re.compile(r"\.(?:xlsx|xlsm|xlsb|xls|csv|tsv|ods)\b", re.IGNORECASE)
+_OPEN_FOLLOW_UP = re.compile(
+    r"^(?:(?:why (?:don't|dont|do not|can't|cant|can not) you|can you|could you|please)\s+)?"
+    r"(?:open|inspect|analyse|analyze)\s+(?:it|that|the file|the workbook)[.!?\s]*$",
+    re.IGNORECASE,
+)
 # A question about the user's own workbook needs Excel to answer it:
 # "what's the total in column C?", "summarise my sheet", "is cell B4 right?".
 _WORKBOOK_REFERENCE = re.compile(
@@ -115,6 +121,10 @@ def classify_message(
         return MessageRoute("task", "The message continues or approves the current task.")
     if _HOW_TO.match(text):
         return MessageRoute("chat", "A how-to question is answered with an explanation.")
+    if has_workbook_context and _OPEN_FOLLOW_UP.fullmatch(text):
+        return MessageRoute("task", "The user asks to work on the previously referenced file.")
+    if _WORKBOOK_FILE.search(text):
+        return MessageRoute("task", "The named spreadsheet needs the Excel workflow.")
     if _WORKBOOK_REFERENCE.search(text):
         return MessageRoute("task", "The message is about the user's own workbook.")
     if _QUESTION_PREFIX.match(text):
@@ -142,27 +152,37 @@ def pre_route(
 ) -> MessageRoute | None:
     """The few routes that never need a model's judgment, else None.
 
-    An attachment is always Excel work, and "confirm" / "continue" in an Excel
-    conversation answers that task. Everything else is decided by the model
-    (quick_answer(route=True)), with classify_message() as its fallback.
+    Clear spreadsheet requests must reach the agent even if a chat model would
+    incorrectly claim it cannot access files. Ambiguous messages still use the model.
     """
     text = " ".join((instruction or "").split())
     if workbook_name:
         return MessageRoute("task", "An attached workbook needs the Excel workflow.")
     if has_workbook_context and _CONTINUE.fullmatch(text):
         return MessageRoute("task", "The message continues or approves the current task.")
+    if has_workbook_context and _OPEN_FOLLOW_UP.fullmatch(text):
+        return MessageRoute("task", "The user asks to work on the previously referenced file.")
+    explicit = classify_message(text)
+    if explicit.kind == "task":
+        return explicit
     return None
 
 
 def has_agent_work(transcript: list[dict] | None) -> bool:
-    """Whether a conversation already contains Excel-agent replies (not just quick answers)."""
-    return any(isinstance(turn, dict) and turn.get("role") == "assistant" and turn.get("kind") != "chat"
+    """Recognize agent work, including file requests misrouted to chat earlier."""
+    return any(isinstance(turn, dict) and (
+                   (turn.get("role") == "assistant" and turn.get("kind") != "chat")
+                   or (turn.get("role") == "user" and _WORKBOOK_FILE.search(str(turn.get("text") or ""))
+                       and not _HOW_TO.match(str(turn.get("text") or "").strip())))
                for turn in transcript or [])
 
 
 _SYSTEM_PROMPT = """You are Xelora's quick conversation assistant. Xelora is an Excel assistant: it helps people
 work with spreadsheets, data, formulas, charts, reports and the numbers behind them. Reply warmly and concisely.
 You do not have workbook access in this mode and must never say you viewed or changed Excel.
+This limitation applies only to quick conversation. Xelora's desktop Excel agent can open local
+workbook paths and inspect, edit, analyse and chart their data. Do not describe Xelora as text-only
+or claim it cannot open local files; actual access depends on the connected desktop and tool results.
 
 Stay focused on what Xelora is for, and use judgment rather than rules about topics:
 - Answer greetings, thanks and questions about Xelora itself naturally.
@@ -183,6 +203,8 @@ You can hand a message to Xelora's Excel agent with start_excel_task. It works i
 Call it, instead of replying, when the user wants something done in or with a spreadsheet: build, edit,
 fill, format, clean, analyse or chart data, create a workbook, sheet, table, budget, tracker or report,
 or answer a question about their own workbook's contents. Call it before anything else and write no reply.
+Hand off named local files too, including Windows drive paths and paths with spaces. The agent has
+open_workbook; users do not need to open the file manually or paste its contents first.
 Do not call it for questions you can answer in words, such as how an Excel feature works.
 If you are unsure whether they want you to act or explain, explain and offer to do it."""
 
@@ -599,6 +621,11 @@ def quick_answer(instruction: str, history: list[dict] | None = None, *, user_id
     The whole answer, across every provider tried, fits in
     QUICK_CHAT_DEADLINE_SECONDS; if nothing answers, "failed" is True.
     """
+    if route:
+        excel_context = excel_context or has_agent_work(history)
+        fixed = pre_route(instruction, has_workbook_context=excel_context)
+        if fixed is not None:
+            return {"route": "task", "reason": fixed.reason, "reply": None, "sources": []}
     cleaned_history = _clean_history(history)
     web = config.QUICK_CHAT_WEB_SEARCH
     tools = ([_HANDOFF_TOOL] if route else []) + (_TOOLS if web else [])

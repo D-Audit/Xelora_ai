@@ -51,10 +51,9 @@ def list_users(db: Session = Depends(require_admin)):
                 "createdAt": au.created_at.isoformat() if au.created_at else None,
             }
             for u, au, sub in rows
+
         ]
     }
-
-
 @router.get("/subscriptions")
 def list_subscriptions(db: Session = Depends(require_admin)):
     subs = db.query(Subscription, User).join(User, User.id == Subscription.user_id).all()
@@ -74,7 +73,6 @@ def list_subscriptions(db: Session = Depends(require_admin)):
         ]
     }
 
-
 @router.post("/users/{target_user_id}/plan")
 def set_user_plan(target_user_id: int, req: SetPlanRequest, db: Session = Depends(require_admin)):
     if req.plan_tier not in PLAN_CATALOG:
@@ -89,7 +87,6 @@ def set_user_plan(target_user_id: int, req: SetPlanRequest, db: Session = Depend
     db.commit()
     return {"ok": True}
 
-
 @router.post("/users/{target_user_id}/role")
 def set_user_role(target_user_id: int, req: SetAdminRequest, db: Session = Depends(require_admin)):
     auth_user = db.query(AuthUser).filter(AuthUser.id == target_user_id).first()
@@ -98,7 +95,6 @@ def set_user_role(target_user_id: int, req: SetAdminRequest, db: Session = Depen
     auth_user.is_admin = req.is_admin
     db.commit()
     return {"ok": True}
-
 
 @router.get("/stats")
 def platform_stats(db: Session = Depends(require_admin)):

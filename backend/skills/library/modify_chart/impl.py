@@ -43,6 +43,14 @@ def _resolve_chart_com_object(chart):
 
 def run(sheet_name: str, chart_name: str, chart_type: str = None, title: str = None,
         title_formula: str = None, data_range: str = None):
+    type_map = {"column": "column_clustered", "bar": "bar_clustered", "line": "line",
+                "pie": "pie", "scatter": "xy_scatter", "area": "area",
+                "doughnut": "doughnut", "radar": "radar"}
+    if chart_type is not None:
+        chart_type = str(chart_type).strip().lower()
+        if chart_type not in type_map:
+            return {"status": "unsupported_chart_type", "verified": False,
+                    "error": f"Unsupported chart type: {chart_type}", "supported_types": list(type_map)}
     wb = get_active_workbook()
     sheet = wb.sheets[sheet_name]
 
@@ -63,9 +71,10 @@ def run(sheet_name: str, chart_name: str, chart_type: str = None, title: str = N
     changes = []
 
     if chart_type:
-        type_map = {"column": "column_clustered", "bar": "bar_clustered", "line": "line",
-                    "pie": "pie", "scatter": "xy_scatter_lines_no_markers", "area": "area"}
-        chart.chart_type = type_map.get(chart_type.lower(), chart_type)
+        chart.chart_type = type_map[chart_type]
+        if chart.chart_type != type_map[chart_type]:
+            return {"status": "chart_type_verification_failed", "verified": False,
+                    "error": "Excel did not preserve the requested chart type."}
         changes.append(f"type -> {chart_type}")
 
     if data_range:
@@ -85,7 +94,17 @@ def run(sheet_name: str, chart_name: str, chart_type: str = None, title: str = N
                 ),
             }
         real_chart.HasTitle = True
-        real_chart.ChartTitle.Text = title_formula or title
+        if title_formula:
+            real_chart.ChartTitle.Formula = title_formula
+            actual_title = real_chart.ChartTitle.Formula
+        else:
+            real_chart.ChartTitle.Text = title
+            actual_title = real_chart.ChartTitle.Text
+        if actual_title != (title_formula or title):
+            return {"sheet": sheet_name, "chart_name": chart_name, "changes": changes,
+                    "status": "title_verification_failed", "verified": False,
+                    "error": "Excel did not preserve the requested chart title.",
+                    "actual_title": actual_title}
         changes.append(f"title -> {title_formula or title}")
 
     wb.save()

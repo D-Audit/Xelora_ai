@@ -313,13 +313,16 @@ Add these charts:
             value = [["Label", "Result"], ["Revenue", "#VALUE!"]]
             rows = [_Object(value=[["Label", "Result"]])]
 
+            def options(self, **kwargs):
+                return self
+
             @property
             def formula(self):
                 raise RuntimeError("Legacy Excel formula metadata unavailable")
 
             def offset(self, row, column):
                 addresses = {(0, 0): "$A$1", (0, 1): "$B$1", (1, 0): "$A$2", (1, 1): "$B$2"}
-                return _Object(address=addresses[(row, column)])
+                return _Object(resize=lambda rows, columns: _Object(address=addresses[(row, column)]))
 
         sheet = _Object(
             name="Summary",

@@ -46,6 +46,8 @@ class RoutePlan:
 
 _CELL_REF = re.compile(r"\b[A-Z]{1,3}[1-9][0-9]{0,6}(:[A-Z]{1,3}[1-9][0-9]{0,6})?\b")
 _URL = re.compile(r"https?://", re.I)
+_LOCAL_WORKBOOK = re.compile(
+    r"(?:^|[\s\"'])(?:[A-Z]:[\\/]|\\\\|/|~[/\\])[^\r\n\"']*?\.(?:xlsx|xlsm|xlsb|xls|csv|tsv|ods)\b", re.I)
 _PATTERNS: dict[str, re.Pattern[str]] = {
     "research": re.compile(
         r"\b(latest|current|today'?s?|recent|news|look ?up|search (the )?(web|internet|online)|research|"
@@ -65,7 +67,8 @@ _PATTERNS: dict[str, re.Pattern[str]] = {
     "mcp": re.compile(r"\b(mcp|integration|connector)\b", re.I),
     "excel": re.compile(
         r"\b(excel|workbook|worksheet|sheet|cells?|range|column|row|formula|format|currency|bold|"
-        r"sort|filter|table|chart|pivot|conditional|fill down|sum|average|vlookup|xlookup|spreadsheet)\b", re.I),
+        r"sort|filter|table|charts?|dashboard|datasets?|analysis|analytics|pivot|conditional|fill down|sum|average|vlookup|xlookup|spreadsheet)\b"
+        r"|\.(xlsx|xlsm|xlsb|xls|ods)\b", re.I),
 }
 
 
@@ -196,6 +199,13 @@ def route_instruction(instruction: str, *, file_access: bool = True, available: 
         matched.add("excel")
     plan = RoutePlan(intents=sorted(matched) or ["excel"])
 
+    if _LOCAL_WORKBOOK.search(text):
+        matched.add("excel")
+        plan.intents = sorted(matched)
+        plan.steps.append(RouteStep("local_workbook", ("open_workbook", "inspect_workbook", "read_range"),
+                                    "Open the user's exact local path on the connected Excel desktop first, then inspect its sheets and data. "
+                                    "A local path is not an uploaded workspace file. Report the actual tool error if access fails."))
+
     if "terminal" in matched:
         if available["terminal"]:
             plan.steps.append(RouteStep("terminal", ("run_terminal",), "Explicit command-line request; allowlisted argv only."))
@@ -204,7 +214,7 @@ def route_instruction(instruction: str, *, file_access: bool = True, available: 
     if "research" in matched:
         plan.steps.append(RouteStep("web_research", ("web_search", "web_fetch"),
                                     "Current facts: search, fetch the primary source, cite its URL."))
-    if "user_file" in matched:
+    if "user_file" in matched and not _LOCAL_WORKBOOK.search(text):
         if file_access:
             plan.steps.append(RouteStep("user_files", ("list_workspace_files", "import_workspace_file_to_sheet", "read_workspace_file"),
                                         "Find the stored file (uploaded names show as uploaded_as). To put a CSV/XLSX into Excel use "

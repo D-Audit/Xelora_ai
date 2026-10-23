@@ -18,5 +18,5 @@ def _extract_range_refs(formula: str):
 def run(sheet_name: str, cell_range: str):
     wb = get_active_workbook()
     sheet = wb.sheets[sheet_name]
-    values = normalize(sheet.range(cell_range).value)
+    values = sheet.range(cell_range).options(ndim=2, err_to_str=True).value
     return {"sheet": sheet_name, "range": cell_range, "values": values, "verified": True}
