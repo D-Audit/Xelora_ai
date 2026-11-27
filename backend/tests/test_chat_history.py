@@ -41,6 +41,8 @@ class ChatHistoryTests(unittest.TestCase):
         for item in (patch.object(config, "LOCAL_API_KEY", "test-api-key"),
                      patch.object(database, "SessionLocal", self.Session),
                      patch.dict(main.ACTIVE_TASKS, clear=True),
+                     # Plan metering has its own tests (test_chat_metering.py).
+                     patch.object(main, "chat_usage_guard", None),
                      patch("quick_chat.quick_answer", return_value=dict(ANSWER))):
             item.start()
             self.addCleanup(item.stop)

@@ -53,6 +53,12 @@ app.include_router(notifications_router)
 app.include_router(workflows_router)
 app.include_router(admin_router)
 
+# Quick chat answers count against each plan's ai_actions_per_month.
+import main as _main  # noqa: E402
+from plan_guard import ChatUsageGuard  # noqa: E402
+
+_main.chat_usage_guard = ChatUsageGuard()
+
 
 def _set_header(request, name: str, value: str) -> None:
     headers = MutableHeaders(scope=request.scope)

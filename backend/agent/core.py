@@ -2487,6 +2487,8 @@ def run_task(task: AgentTask, db=None, db_task_id: int = None, user_preferences:
                 active_provider = providers.active_provider_name(task)
                 if active_provider == "claude":
                     tool_calls, text_blocks, stop_reason = providers.call_claude(task, system_prompt)
+                elif active_provider == "openai":
+                    tool_calls, text_blocks, stop_reason = providers.call_openai(task, system_prompt)
                 elif active_provider == "openrouter":
                     tool_calls, text_blocks, stop_reason = providers.call_openrouter(task, system_prompt)
                     # Store assistant message with tool_calls for OpenRouter format

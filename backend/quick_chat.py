@@ -578,8 +578,59 @@ def _openrouter_reply_with(model: str, instruction: str, history: list[dict[str,
     raise RuntimeError(f"OpenRouter {model} kept calling tools without answering.")
 
 
-_PROVIDER_REPLIES = {"gemini": _gemini_reply, "claude": _claude_reply, "openrouter": _openrouter_reply}
-_PROVIDER_KEYS = {"gemini": "GEMINI_API_KEY", "claude": "ANTHROPIC_API_KEY", "openrouter": "OPENROUTER_API_KEY"}
+def _openai_models() -> list[str]:
+    """The quick-chat GPT model, then up to one fallback from the task chain."""
+    models = [config.QUICK_CHAT_OPENAI_MODEL, *config.OPENAI_MODEL_CHAIN]
+    return list(dict.fromkeys(model for model in models if model))[:2]
+
+
+def _openai_reply(instruction: str, history: list[dict[str, str]], system: str, run: _Run) -> str:
+    if not config.OPENAI_API_KEY:
+        raise RuntimeError("OpenAI is not configured.")
+    last_error: Exception | None = None
+    for index, model in enumerate(_openai_models()):
+        if index and run.remaining() < _ANSWER_RESERVE_SECONDS:
+            break
+        try:
+            return _openai_reply_with(model, instruction, history, system, run)
+        except _HandOff:
+            raise
+        except Exception as exc:  # unavailable model, quota, timeout: try the next one
+            print(f"Quick chat model {model} failed: {type(exc).__name__}: {exc}")
+            last_error = exc
+    raise last_error or RuntimeError("No OpenAI model is configured.")
+
+
+def _openai_reply_with(model: str, instruction: str, history: list[dict[str, str]], system: str, run: _Run) -> str:
+    from agent import openai_responses as oai
+
+    items = [{"role": turn["role"], "content": turn["text"]} for turn in history]
+    items.append({"role": "user", "content": instruction})
+    tools = oai.function_tools(run.tools, limit=0)[0] if run.tools else []
+    rounds = run.rounds()
+    for round_index in range(rounds + 1):
+        payload = oai.base_payload(model, system, items, max_output_tokens=config.QUICK_CHAT_OPENAI_MAX_OUTPUT_TOKENS,
+                                   reasoning_effort=config.QUICK_CHAT_OPENAI_REASONING_EFFORT)
+        if tools:
+            # The last round (or a run short of time) must answer with what it has.
+            payload["tools"] = tools
+            payload["tool_choice"] = "none" if run.answer_now(round_index, rounds) else "auto"
+        data = oai.create_response(payload, timeout=run.timeout())
+        calls, text = oai.parse_output(data)
+        if not calls or not tools:
+            if not text:
+                raise RuntimeError(f"OpenAI {model} returned no usable quick-chat response.")
+            return text
+        items = items + oai.replayable_output(data.get("output"))
+        results = _run_tools([(call["name"], call["arguments"]) for call in calls], run)
+        items += [oai.function_call_output(call["id"], result) for call, result in zip(calls, results)]
+    raise RuntimeError(f"OpenAI {model} kept calling tools without answering.")
+
+
+_PROVIDER_REPLIES = {"openai": _openai_reply, "gemini": _gemini_reply, "claude": _claude_reply,
+                     "openrouter": _openrouter_reply}
+_PROVIDER_KEYS = {"openai": "OPENAI_API_KEY", "gemini": "GEMINI_API_KEY", "claude": "ANTHROPIC_API_KEY",
+                  "openrouter": "OPENROUTER_API_KEY"}
 
 
 def _providers() -> list[str]:

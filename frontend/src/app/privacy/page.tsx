@@ -57,7 +57,8 @@ const sections: LegalSection[] = [
       <>
         <p>
           To respond to a request, {site.name} sends the relevant content (your message, recent conversation and any spreadsheet data
-          or web content needed for the task) to our AI model providers, currently Google (Gemini) and Anthropic (Claude). When a
+          or web content needed for the task) to our AI model providers, currently OpenAI (GPT), with Google (Gemini),
+          Anthropic (Claude) and OpenRouter used as backups when the primary provider is unavailable. When a
           question needs current information, the search query is sent to a web search provider.
         </p>
         <p>

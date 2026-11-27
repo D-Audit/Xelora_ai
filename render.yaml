@@ -25,6 +25,10 @@ services:
         sync: false    # e.g. https://xelora-api.onrender.com (given to paired desktops)
       - key: DATABASE_URL
         sync: false   # paste your Neon/Supabase Postgres URL
+      - key: AI_PROVIDER
+        value: openai   # GPT runs tasks and chat; other keys below are optional fallbacks
+      - key: OPENAI_API_KEY
+        sync: false
       - key: GEMINI_API_KEY
         sync: false
       - key: ANTHROPIC_API_KEY

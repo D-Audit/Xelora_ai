@@ -219,7 +219,8 @@ _last_poll: dict[int, float] = {}    # user_id -> monotonic time the agent last 
 
 def configured_providers() -> list[str]:
     """Providers the relay can serve, primary first."""
-    available = [name for name, provider in (("gemini", "gemini"), ("claude", "anthropic"), ("openrouter", "openrouter"))
+    available = [name for name, provider in (("openai", "openai"), ("gemini", "gemini"), ("claude", "anthropic"),
+                                             ("openrouter", "openrouter"))
                  if _server_key(provider)]
     return sorted(available, key=lambda name: name != config.AI_PROVIDER)
 
@@ -596,6 +597,7 @@ _UPSTREAMS = {
     "anthropic": ("https://api.anthropic.com/", re.compile(r"^v1/messages$")),
     "gemini": ("https://generativelanguage.googleapis.com/", re.compile(r"^v1(beta)?/models/[\w.\-]+:generateContent$")),
     "openrouter": ("https://openrouter.ai/api/v1/", re.compile(r"^chat/completions$")),
+    "openai": ("https://api.openai.com/", re.compile(r"^v1/responses$")),
 }
 _FORWARDED_HEADERS = ("content-type", "anthropic-version", "anthropic-beta", "http-referer", "x-title")
 
@@ -613,6 +615,7 @@ def _server_key(provider: str) -> str:
         "anthropic": config.ANTHROPIC_API_KEY,
         "gemini": config.GEMINI_API_KEY,
         "openrouter": getattr(config, "OPENROUTER_API_KEY", ""),
+        "openai": getattr(config, "OPENAI_API_KEY", ""),
     }[provider]
 
 

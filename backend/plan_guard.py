@@ -95,3 +95,69 @@ def check_and_increment_task_usage(db: Session, user_id: int) -> None:
     usage.workflow_runs_used += 1
     usage.ai_actions_used += 1
     db.commit()
+
+
+def _billing_checks_skipped() -> bool:
+    return os.getenv("SKIP_BILLING_CHECKS", "false").lower() == "true"
+
+
+def chat_answer_blocked(db: Session, user_id: int) -> str | None:
+    """Why this account may not get another AI chat answer, or None if it may.
+
+    Every plan has an ``ai_actions_per_month`` allowance. A chat answer is
+    one AI model call, so it is counted against that allowance (an Excel task
+    is counted by check_and_increment_task_usage instead). The reason is
+    shown to the user as the chat reply.
+    """
+    if _billing_checks_skipped():
+        return None
+    sub = db.query(Subscription).filter(Subscription.user_id == user_id).first()
+    if not sub:
+        return "Your account has no active plan yet. Choose a plan to keep chatting with Xelora."
+    if sub.status not in ("active", "trialing"):
+        return f"Your subscription is '{sub.status}'. Reactivate your plan to keep chatting with Xelora."
+    plan = get_plan(sub.plan_tier)
+    limit = plan.get("ai_actions_per_month")  # None = unlimited/custom
+    if limit is None:
+        return None
+    usage = _get_or_create_usage(db, user_id, sub)
+    if usage.ai_actions_used >= limit:
+        return (
+            f"You've used all {limit} AI actions included in your {plan['name']} plan this billing period. "
+            "Upgrade your plan to keep going."
+        )
+    return None
+
+
+def record_chat_answer(db: Session, user_id: int) -> None:
+    """Count one answered chat message as an AI action."""
+    if _billing_checks_skipped():
+        return
+    sub = db.query(Subscription).filter(Subscription.user_id == user_id).first()
+    if not sub:
+        return
+    usage = _get_or_create_usage(db, user_id, sub)
+    usage.ai_actions_used += 1
+    db.commit()
+
+
+class ChatUsageGuard:
+    """main.py's hook for metering quick chat (installed by server.py)."""
+
+    @staticmethod
+    def _with_session(work):
+        from database import SessionLocal
+
+        if SessionLocal is None:
+            return None
+        db = SessionLocal()
+        try:
+            return work(db)
+        finally:
+            db.close()
+
+    def blocked(self, user_id: int) -> str | None:
+        return self._with_session(lambda db: chat_answer_blocked(db, user_id))
+
+    def record(self, user_id: int) -> None:
+        self._with_session(lambda db: record_chat_answer(db, user_id))

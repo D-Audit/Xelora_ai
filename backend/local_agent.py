@@ -60,9 +60,11 @@ def configure_environment(api_url: str, token: str, workspace_dir: str | None = 
         "ANTHROPIC_API_KEY": token,
         "GEMINI_API_KEY": token,
         "OPENROUTER_API_KEY": token,
+        "OPENAI_API_KEY": token,
         "ANTHROPIC_BASE_URL": f"{relay}/anthropic",
         "GEMINI_BASE_URL": f"{relay}/gemini",
         "OPENROUTER_BASE_URL": f"{relay}/openrouter",
+        "OPENAI_BASE_URL": f"{relay}/openai/v1",
         # Tasks run right here; nothing local is persisted to a database.
         "TASK_EXECUTION": "server",
         "DATABASE_URL": "",

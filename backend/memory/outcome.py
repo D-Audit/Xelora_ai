@@ -6,7 +6,7 @@ learns the same way wherever it ran.
 from __future__ import annotations
 
 import json
-from unittest import result
+
 import config
 # Tool inputs/results can be whole sheets of data; memory keeps a preview.
 _MAX_STORED_CHARS = 1500

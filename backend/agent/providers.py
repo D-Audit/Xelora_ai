@@ -1,8 +1,8 @@
 """
 agent/providers.py
-Provider-specific glue for Claude and Gemini. Same pattern as the
-original backend - kept isolated here so agent/core.py's loop doesn't
-care which provider is active.
+Provider-specific glue for OpenAI (GPT), Claude, Gemini and OpenRouter,
+kept isolated here so agent/core.py's loop doesn't care which provider is
+active.
 
 Tool list = skill library tools + the code-gen tool + (optionally) the
 visual fallback tools, so the AI genuinely sees all three layers as
@@ -608,6 +608,7 @@ def validate_provider_tool_catalogues() -> None:
     """Run at startup so invalid local tool composition never reaches users."""
     build_claude_tools()
     build_gemini_tools()
+    build_openai_tools()
 
 
 _GEMINI_READ_ONLY_TOOL_NAMES = {
@@ -943,18 +944,20 @@ def active_provider_name(task) -> str:
     protocol rather than the process-wide default.
     """
     provider = str(getattr(task, "active_provider", "") or config.AI_PROVIDER).lower()
-    return provider if provider in {"gemini", "claude", "openrouter"} else config.AI_PROVIDER
+    return provider if provider in config.SUPPORTED_PROVIDERS else config.AI_PROVIDER
 
 
 def task_provider() -> str:
     """The provider a new Excel task starts on: EXCEL_TASK_PROVIDER when it has a key."""
     preferred = config.EXCEL_TASK_PROVIDER
-    if preferred in {"gemini", "claude", "openrouter"} and _provider_is_configured(preferred):
+    if preferred in config.SUPPORTED_PROVIDERS and _provider_is_configured(preferred):
         return preferred
     return config.AI_PROVIDER
 
 
 def _provider_is_configured(provider: str) -> bool:
+    if provider == "openai":
+        return bool(config.OPENAI_API_KEY) and bool(config.OPENAI_MODEL_CHAIN)
     if provider == "gemini":
         return bool(config.GEMINI_API_KEY)
     if provider == "claude":
@@ -978,6 +981,7 @@ def _is_provider_availability_failure(error: Exception) -> bool:
         "connection reset", "connection aborted", "connection refused", "network is unreachable",
         "timed out", "timeout", "server disconnected", "remote protocol error",
         "rate limit", "rate-limit", "too many requests", "429", "quota",
+        "service unavailable", "overloaded", "http 502", "http 503", "http 504",
     )
     return any(term in detail for term in availability_terms)
 
@@ -1023,7 +1027,7 @@ def activate_available_provider_fallback(task, error: Exception) -> bool:
     fallback = next(
         (
             candidate for candidate in config.AI_PROVIDER_FALLBACK_CHAIN
-            if candidate in {"gemini", "claude", "openrouter"}
+            if candidate in config.SUPPORTED_PROVIDERS
             and candidate not in attempted
             and _provider_is_configured(candidate)
         ),
@@ -1072,6 +1076,9 @@ def submit_tool_result(task, tool_call, result):
     provider = active_provider_name(task)
     if provider == "claude":
         submit_claude_tool_result(task, tool_call, result)
+    elif provider == "openai":
+        call_id = tool_call.get("id", "") if isinstance(tool_call, dict) else getattr(tool_call, "id", "")
+        submit_openai_tool_result(task, call_id, result)
     elif provider == "openrouter":
         tool_call_id = tool_call.get("id", "") if isinstance(tool_call, dict) else getattr(tool_call, "id", "")
         submit_openrouter_tool_result(task, tool_call_id, result)
@@ -1787,3 +1794,132 @@ def submit_openrouter_tool_result(task, tool_call_id: str, result: dict):
 def openrouter_tool_input(tool_call: dict) -> dict:
     """Extract tool input from OpenRouter tool call."""
     return tool_call.get("arguments", {})
+
+
+# =============================================================================
+# OpenAI (GPT) Support - Responses API (see agent/openai_responses.py)
+# =============================================================================
+
+# Mouse/vision controls that are the agent's last resort. When the catalogue
+# exceeds OpenAI's tool limit these go first; keyboard shortcuts, skills,
+# code generation, file/web tools and every verification tool stay.
+_OPENAI_DROP_FIRST = frozenset(
+    tool["name"] for tool in VISION_TOOLS_CLAUDE
+) - EXCEL_SHORTCUT_TOOL_NAMES - {
+    "get_execution_capabilities", "save_workbook", "verify_task_completion",
+    "paste_table", "create_sheet", "rename_sheet", "batch_excel_operations",
+    "get_sheet_info", "get_cell_value", "get_active_sheet_name", "verify_current_sheet",
+}
+
+
+def build_openai_tools(task=None) -> list[dict]:
+    """The same catalogue Claude sees, as Responses function tools within OpenAI's limit."""
+    from agent import openai_responses
+
+    tools, dropped = openai_responses.function_tools(build_claude_tools(), drop_first=_OPENAI_DROP_FIRST)
+    if dropped and task is not None and not getattr(task, "openai_dropped_tools_logged", False):
+        task.openai_dropped_tools_logged = True
+        task.log_step(
+            f"{len(dropped)} last-resort screen controls are not offered to GPT this task "
+            f"(OpenAI allows {config.OPENAI_MAX_TOOLS} tools per request): {', '.join(sorted(dropped))}."
+        )
+    return tools
+
+
+def _openai_tool_choice(task):
+    """Force the one tool core requires next (codegen fallback, recovery inspection)."""
+    if getattr(task, "pending_codegen_fallback", None):
+        return {"type": "function", "name": "run_excel_code"}
+    recovery_tool = _recovery_inspection_tool_name(task)
+    if recovery_tool:
+        return {"type": "function", "name": recovery_tool}
+    return "auto"
+
+
+def call_openai(task, system_prompt: str):
+    """One agent turn on GPT. Returns (tool_calls, text_blocks, stop_reason).
+
+    Tool calls are dicts {"name", "arguments", "id"} (id = Responses call_id),
+    the same shape core already handles for OpenRouter. The response's own
+    items (reasoning, message, function calls) are appended to task.messages
+    so the next turn replays them exactly.
+    """
+    import requests
+    from agent import openai_responses as oai
+
+    if not config.OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY is not configured")
+
+    deferred = task.awaiting_approval and getattr(task, "defer_excel_until_approval", False)
+    tools = [] if deferred else build_openai_tools(task)
+    tool_choice = _openai_tool_choice(task) if tools else None
+    if isinstance(tool_choice, dict) and not any(tool["name"] == tool_choice["name"] for tool in tools):
+        tool_choice = "required"
+
+    deadline = time.monotonic() + config.OPENAI_TOTAL_TIMEOUT_SECONDS
+    include_reasoning = True
+    last_error = None
+    for model in config.OPENAI_MODEL_CHAIN:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            last_error = TimeoutError(
+                f"OpenAI model chain timed out after its {config.OPENAI_TOTAL_TIMEOUT_SECONDS}s response budget."
+            )
+            break
+        payload = oai.base_payload(
+            model, system_prompt, oai.input_items(task.messages, include_reasoning=include_reasoning),
+            max_output_tokens=config.OPENAI_MAX_OUTPUT_TOKENS,
+            reasoning_effort=config.OPENAI_REASONING_EFFORT,
+        )
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice
+        try:
+            try:
+                data = oai.create_response(payload, timeout=min(config.OPENAI_TIMEOUT_SECONDS, remaining))
+            except oai.OpenAIError as exc:
+                # Encrypted reasoning is bound to the model that produced it;
+                # after a model switch, continue without the old reasoning.
+                if exc.status == 400 and include_reasoning and any(
+                    term in str(exc).lower() for term in ("reasoning", "encrypted")
+                ):
+                    include_reasoning = False
+                    payload["input"] = oai.input_items(task.messages, include_reasoning=False)
+                    data = oai.create_response(payload, timeout=max(1.0, deadline - time.monotonic()))
+                else:
+                    raise
+        except oai.OpenAIError as exc:
+            last_error = exc
+            if not exc.retry_next_model:
+                raise
+            task.log_step(f"GPT model '{model}' unavailable ({str(exc)[:160]}); trying the next model.")
+            include_reasoning = False
+            continue
+        except requests.exceptions.RequestException as exc:
+            last_error = exc
+            task.log_step(f"GPT model '{model}' could not be reached ({type(exc).__name__}); trying the next model.")
+            include_reasoning = False
+            continue
+
+        tool_calls, text = oai.parse_output(data)
+        if not tool_calls and not text:
+            reason = ((data.get("incomplete_details") or {}).get("reason") or data.get("status") or "empty")
+            last_error = RuntimeError(f"OpenAI model '{model}' returned neither text nor a tool call ({reason}).")
+            task.log_step(f"GPT model '{model}' returned an empty response ({reason}); trying the next model.")
+            include_reasoning = False
+            continue
+
+        task.messages.append({
+            "role": "assistant",
+            "content": {oai.ITEMS_KEY: oai.replayable_output(data.get("output"))},
+        })
+        return tool_calls, [text] if text else [], "tool_use" if tool_calls else "end_turn"
+
+    raise last_error or RuntimeError("OpenAI did not return a usable response from any configured model.")
+
+
+def submit_openai_tool_result(task, call_id: str, result):
+    """Record one tool result as a Responses function_call_output item."""
+    from agent import openai_responses as oai
+
+    task.messages.append({"role": "user", "content": {oai.ITEMS_KEY: [oai.function_call_output(call_id, result)]}})

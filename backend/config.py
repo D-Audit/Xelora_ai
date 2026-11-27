@@ -28,6 +28,9 @@ def _local_agent_setting(name: str, default: str) -> str:
     value = _LOCAL_ENV_VALUES.get(name)
     return value if value is not None else os.getenv(name, default)
 
+# Every provider the agent loop, quick chat and the desktop relay can drive.
+SUPPORTED_PROVIDERS = ("openai", "gemini", "claude", "openrouter")
+
 AI_PROVIDER = _local_agent_setting("AI_PROVIDER", "gemini").strip().lower()
 # A configured secondary provider keeps an in-progress workbook task alive
 # when the primary provider is rate-limited or its DNS/network route fails.
@@ -35,11 +38,12 @@ AI_PROVIDER = _local_agent_setting("AI_PROVIDER", "gemini").strip().lower()
 # load-balancer and will never send concurrent Excel actions.
 AI_PROVIDER_FALLBACK_CHAIN = [
     provider.strip().lower()
-    for provider in _local_agent_setting("AI_PROVIDER_FALLBACK_CHAIN", "openrouter,claude,gemini").split(",")
+    for provider in _local_agent_setting("AI_PROVIDER_FALLBACK_CHAIN", "openai,openrouter,claude,gemini").split(",")
     if provider.strip() and provider.strip().lower() != AI_PROVIDER
 ]
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 LOCAL_API_KEY = os.getenv("LOCAL_API_KEY", "")
 
 
@@ -64,6 +68,7 @@ DATABASE_URL = _sqlalchemy_database_url(os.getenv("DATABASE_URL", ""))
 ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "")
 GEMINI_BASE_URL = os.getenv("GEMINI_BASE_URL", "")
 OPENROUTER_BASE_URL = (os.getenv("OPENROUTER_BASE_URL", "") or "https://openrouter.ai/api/v1").rstrip("/")
+OPENAI_BASE_URL = (os.getenv("OPENAI_BASE_URL", "") or "https://api.openai.com/v1").rstrip("/")
 
 # Where signed-in users' tasks run. "server": in this process (local install,
 # backend on the same PC as Excel). "agent": the cloud queues each task for the
@@ -260,10 +265,31 @@ OPENROUTER_INTER_MODEL_DELAY_SECONDS = float(
 OPENROUTER_TOTAL_TIMEOUT_SECONDS = int(
     os.getenv("OPENROUTER_TOTAL_TIMEOUT_SECONDS", "45")
 )
+# OpenAI (GPT), on the Responses API - current GPT models call tools only
+# there. Excel tasks try OPENAI_MODEL_CHAIN in order; the first entry is the
+# agent's main model, later ones are used only when it is unavailable.
+OPENAI_MODEL_CHAIN = [
+    m.strip() for m in os.getenv("OPENAI_MODEL_CHAIN", "gpt-6.2-sol,gpt-6.1-sol").split(",") if m.strip()
+]
+# Reasoning effort for Excel task turns (e.g. low, medium, high); empty uses
+# the model's default. A model that does not take the setting ignores it.
+OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "").strip().lower()
+# Reasoning tokens count toward this budget, so it is larger than the other
+# providers' 1-4k: a reasoning model must still have room for its tool call.
+OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "16000"))
+OPENAI_TIMEOUT_SECONDS = int(os.getenv("OPENAI_TIMEOUT_SECONDS", "120"))
+OPENAI_TOTAL_TIMEOUT_SECONDS = int(os.getenv("OPENAI_TOTAL_TIMEOUT_SECONDS", "180"))
+# false: OpenAI keeps no copy of the conversation (users' workbook data);
+# reasoning is carried between turns as encrypted content instead.
+OPENAI_STORE = os.getenv("OPENAI_STORE", "false").lower() == "true"
+# OpenAI's per-request function limit. Beyond it, the last-resort mouse
+# controls are left out first (keyboard, skills and verification stay).
+OPENAI_MAX_TOOLS = int(os.getenv("OPENAI_MAX_TOOLS", "128"))
+
 CLAUDE_TIMEOUT_SECONDS = int(os.getenv("CLAUDE_TIMEOUT_SECONDS", "35"))
 CLAUDE_TASK_MODEL = os.getenv("CLAUDE_TASK_MODEL", "claude-sonnet-4-6")
 # Excel tasks are long multi-step tool use, where a stronger model plans and
-# recovers better. EXCEL_TASK_PROVIDER (gemini | claude | openrouter) runs them
+# recovers better. EXCEL_TASK_PROVIDER (openai | gemini | claude | openrouter) runs them
 # on that provider when its key is configured; empty means AI_PROVIDER.
 EXCEL_TASK_PROVIDER = os.getenv("EXCEL_TASK_PROVIDER", "").strip().lower()
 
@@ -276,17 +302,19 @@ def validate_ai_provider_configuration() -> None:
     fail on its first model request is misleading, so fail loudly at startup.
     """
     configured_keys = {
+        "openai": OPENAI_API_KEY,
         "gemini": GEMINI_API_KEY,
         "claude": ANTHROPIC_API_KEY,
         "openrouter": OPENROUTER_API_KEY,
     }
     if AI_PROVIDER not in configured_keys:
         raise RuntimeError(
-            "AI_PROVIDER must be one of: gemini, claude, openrouter. "
+            "AI_PROVIDER must be one of: openai, gemini, claude, openrouter. "
             f"Received {AI_PROVIDER!r}."
         )
     if not configured_keys[AI_PROVIDER]:
         env_name = {
+            "openai": "OPENAI_API_KEY",
             "gemini": "GEMINI_API_KEY",
             "claude": "ANTHROPIC_API_KEY",
             "openrouter": "OPENROUTER_API_KEY",
@@ -298,6 +326,10 @@ def validate_ai_provider_configuration() -> None:
     if AI_PROVIDER == "openrouter" and not OPENROUTER_MODEL_CHAIN:
         raise RuntimeError(
             "AI_PROVIDER=openrouter requires at least one OPENROUTER_MODEL_CHAIN entry."
+        )
+    if AI_PROVIDER == "openai" and not OPENAI_MODEL_CHAIN:
+        raise RuntimeError(
+            "AI_PROVIDER=openai requires at least one OPENAI_MODEL_CHAIN entry."
         )
 ALLOW_NO_AUTH = os.getenv("ALLOW_NO_AUTH", "false").lower() == "true"
 
@@ -342,6 +374,11 @@ FAST_CHAT_MAX_OUTPUT_TOKENS = int(os.getenv("FAST_CHAT_MAX_OUTPUT_TOKENS", "1200
 QUICK_CHAT_CLAUDE_MODEL = os.getenv("QUICK_CHAT_CLAUDE_MODEL", "claude-sonnet-4-6")
 # Fast model for conversation; on failure quick chat tries GEMINI_MODEL_CHAIN next.
 QUICK_CHAT_GEMINI_MODEL = os.getenv("QUICK_CHAT_GEMINI_MODEL", "gemini-2.5-flash-lite")
+# Quick chat on GPT: a fast model at low reasoning effort; on failure it tries
+# OPENAI_MODEL_CHAIN next. Reasoning shares the output budget, hence its own.
+QUICK_CHAT_OPENAI_MODEL = os.getenv("QUICK_CHAT_OPENAI_MODEL", "gpt-6.2-sol")
+QUICK_CHAT_OPENAI_REASONING_EFFORT = os.getenv("QUICK_CHAT_OPENAI_REASONING_EFFORT", "low").strip().lower()
+QUICK_CHAT_OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("QUICK_CHAT_OPENAI_MAX_OUTPUT_TOKENS", "4000"))
 
 # Web search. Keyed providers are tried in this order, then DuckDuckGo (no
 # key; often blocked from cloud hosts). SEARCH_PROVIDER pins a single one.

@@ -244,6 +244,34 @@ def _chat_has_excel_work(req: ChatRequest, db: Session | None, jwt_user_id: int 
     return req.has_workbook_context
 
 
+# Meters chat answers against the user's plan. main.py alone has no billing;
+# server.py installs plan_guard.ChatUsageGuard here (blocked(uid), record(uid)).
+chat_usage_guard = None
+
+
+def _chat_limit_reason(user_id: int | None) -> str | None:
+    if user_id is None or chat_usage_guard is None:
+        return None
+    try:
+        return chat_usage_guard.blocked(user_id)
+    except Exception as exc:  # metering must never take chat down
+        print(f"Chat usage check failed: {exc}")
+        return None
+
+
+def _record_chat_answer(user_id: int | None, answer: dict) -> None:
+    if user_id is None or chat_usage_guard is None or answer.get("route") != "chat" or answer.get("failed"):
+        return
+    try:
+        chat_usage_guard.record(user_id)
+    except Exception as exc:
+        print(f"Chat usage could not be recorded: {exc}")
+
+
+def _limit_answer(reason: str) -> dict:
+    return {"route": "chat", "reason": "Plan limit reached.", "reply": reason, "sources": [], "limit_reached": True}
+
+
 @app.post("/chat", dependencies=_AUTH)
 def quick_chat(
     req: ChatRequest,
@@ -265,9 +293,13 @@ def quick_chat(
     fixed = pre_route(req.instruction, workbook_name=req.workbook_name, has_workbook_context=has_context)
     if fixed is not None:
         return {"route": fixed.kind, "reason": fixed.reason, "reply": None, "sources": []}
+    limit = _chat_limit_reason(jwt_user_id)
+    if limit:
+        return _limit_answer(limit)
     answer = quick_answer(req.instruction, req.history[-12:], user_id=jwt_user_id, route=True, excel_context=has_context)
     if answer.get("route") == "task":
         return {"route": "task", "reason": answer["reason"], "reply": None, "sources": []}
+    _record_chat_answer(jwt_user_id, answer)
     task_id = None
     if db is not None and jwt_user_id is not None and not answer.get("failed"):
         task_id = _save_quick_exchange(db, jwt_user_id, req.task_id, req.instruction, answer)
@@ -300,6 +332,13 @@ def quick_chat_stream(
         if fixed is not None:
             yield json.dumps({"type": "route", "route": fixed.kind, "reason": fixed.reason}) + "\n"
             return
+        limit = _chat_limit_reason(jwt_user_id)
+        if limit:
+            answer = _limit_answer(limit)
+            yield json.dumps({"type": "route", "route": "chat", "reason": answer["reason"]}) + "\n"
+            yield json.dumps({"type": "answer", "task_id": None,
+                              **{k: v for k, v in answer.items() if k != "route"}}) + "\n"
+            return
         # Sent at once, so the client knows the server is awake and working.
         yield json.dumps({"type": "status", "text": "Thinking"}) + "\n"
         updates: queue.Queue = queue.Queue()
@@ -327,6 +366,7 @@ def quick_chat_stream(
             yield json.dumps({"type": "route", "route": "task", "reason": answer.get("reason") or ""}) + "\n"
             return
         yield json.dumps({"type": "route", "route": "chat", "reason": "Answered in conversation."}) + "\n"
+        _record_chat_answer(jwt_user_id, answer)
         task_id = None
         if jwt_user_id is not None and not answer.get("failed"):
             # The request's session is closed once streaming starts; save with a fresh one.
